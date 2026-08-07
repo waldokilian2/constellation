@@ -1,0 +1,119 @@
+# AGENTS.md
+
+Guidance for AI coding agents working in this repository. Keep this file up to date as the codebase evolves — it is the primary onboarding doc for agents.
+
+## Project Overview
+
+**Constellation** deterministically maps Java Spring Boot microservice architectures. It parses source code with the tree-sitter AST (no LLM, no runtime) to extract entry points (message handlers, REST endpoints, event listeners), message producers, per-entry-point call trees, and cross-repo links via shared queue/topic names. The result is a single `graph.json`. AI is an optional advisory layer that queries that graph.
+
+The **core analysis is deterministic** — every relationship is read from source. AI never re-derives structure; it gets the extracted graph as structured context.
+
+## Requirements & Dependencies
+
+- **Python 3.10+** (uses `from __future__ import annotations`).
+- Runtime deps (installed ad hoc by the startup scripts — **there is no `requirements.txt` / `pyproject.toml`**):
+  - `tree-sitter`, `tree-sitter-java` (AST parsing)
+  - `fastapi`, `uvicorn` (web server)
+- **No test suite.** `tests/` contains only sample Java repos used as analysis input (`tests/repos/{order-service,fulfillment-service,notification-service}`). There are no `test_*.py` files.
+- Frontend is **React 18 via CDN + Babel standalone** — there is **no build step and no `package.json`**. Do not introduce a bundler without a strong reason.
+- LLM calls use stdlib `urllib` only (no `requests`/`httpx`). Keep it that way — adding an HTTP dep is a regression against the "no extra deps" convention.
+
+## Quick Commands
+
+```bash
+./start.sh                        # create venv, install deps, gen graph, start server on :8765
+./start.sh /path/to/repo1 ...     # analyze custom repos instead of test repos
+start.bat                         # Windows equivalent
+
+# Analyze without the server (activate .venv first)
+source .venv/bin/activate
+python -m engine.constellation /path/to/repo1 /path/to/repo2 --output output/graph.json
+
+# MCP stdio server (for Claude Code / Cursor)
+python -m engine.mcp_server        # CONSTELLATION_GRAPH optionally points at a graph.json
+
+# Mock backend for frontend-only work (no engine required)
+python web/mock_server.py
+```
+
+The startup scripts only regenerate `output/graph.json` when it is missing or custom repo args are passed. `output/graph.json` is gitignored (as is `tests/repos/sample-spring-kafka-microservices/`).
+
+## Repository Layout
+
+```
+engine/            # Deterministic analysis engine (Python)
+  parser.py          # tree-sitter Java AST wrapper + query helpers
+  entry_detector.py  # Spring annotation + producer scanner
+  call_graph.py      # BFS call-tree builder (depth-limited)
+  cross_repo.py      # queue/topic name matcher between repos
+  context_builder.py # builds AI system prompts from graph data
+  graph_tools.py     # 8 pure query functions (single source of truth)
+  mcp_server.py      # MCP stdio server (JSON-RPC 2.0)
+  models.py          # dataclasses for the graph
+  paths.py           # safe, root-confined source path resolution
+  project_store.py   # multi-project index, git-clone ingestion, engine-run w/ log capture
+  constellation.py   # CLI orchestrator + ConstellationEngine
+server.py            # FastAPI app: REST + AI proxy + static frontend
+web/                 # React CDN frontend (no build step)
+  index.html         # loads React/Babel/marked from CDN, transforms app.js
+  app.js             # Projects → Galaxy → Solar System → Path → Detail (~3100 lines)
+  styles.css         # SVG + CSS visualization styles
+  mock_server.py     # static in-memory backend for frontend dev
+tests/repos/         # sample Java microservices (input data, not tests)
+output/              # graphs + project store (gitignored)
+  graph.json         # legacy single-graph (start.sh seed; imported as "Default")
+  projects.json      # multi-project index
+  projects/<pid>/    # per-project: graph.json + cloned repos/
+start.sh / start.bat # bootstrap + server launchers
+```
+
+## How Data Flows
+
+The app is **multi-project**: each project is an isolated collection of repos with its own graph (`output/projects/<pid>/graph.json`); projects have no relationship to each other. On first load, a pre-existing legacy `output/graph.json` is imported once as a "Default" project (`ProjectStore.ensure_legacy_seed`).
+
+1. **Ingest** — the UI creates a project (`POST /api/projects`, git URLs) or adds repos to one (`POST /api/projects/{pid}/repos`). `engine/project_store.py` shallow-clones each repo into `output/projects/<pid>/repos/`, then re-runs the engine over the project's full repo set (cross-repo linking needs all repos together), streaming `[clone]/[scan]/[link]` progress over SSE.
+2. **Parse** — `entry_detector.py` scans `*.java` files (skipping `/test/` and `*Test*` paths), using `parser.py` to find annotated methods and producer call patterns.
+3. **Index & link** — methods are indexed for call resolution; `cross_repo.py` links producers to consumers by matching channel names.
+4. **Call trees** — `call_graph.py` builds a depth-limited (MAX_DEPTH=4, MAX_NODES=50) BFS tree per entry point, resolving each invocation to a definition and tagging confidence.
+5. **Serialize** — `constellation.py` assembles a `ConstellationGraph` → the project's `graph.json` with `repo_roots` for safe path resolution.
+6. **Serve** — `server.py` serves each project's graph via **project-scoped** REST + AI endpoints (`/api/projects/{pid}/...`); the single legacy `/api/graph` returns the first ready project. `mcp_server.py` loads a graph file directly for MCP.
+
+## Confidence Tags (important for correctness)
+
+Every call-tree node carries a confidence value:
+- **`EXTRACTED`** — call resolved to a concrete definition in the codebase.
+- **`INFERRED`** — call name matched but target couldn't be confirmed (cross-file resolution without imports).
+- **`AMBIGUOUS`** — multiple possible targets, first one chosen.
+- **`TRUNCATED`** — node limit hit during traversal.
+
+These are set in `call_graph.py` (`_resolve_call`, `_is_trivial`, `_expand_node`). Do not silently change the semantics of `EXTRACTED`/`INFERRED` — the AI prompts and UI both display them.
+
+## Graph Tools (single source of truth)
+
+`engine/graph_tools.py` defines **8 pure functions** (`TOOL_DEFINITIONS`) consumed by three interfaces: the MCP server, the REST API (`/api/projects/{pid}/tools/*`), and the web AI tool-loop. `execute_tool(graph, name, args)` is the dispatcher and `_filter_args` validates args against the schema.
+
+The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`.
+
+**Rule:** if you add a tool, register it in **all** of: `TOOL_DEFINITIONS`, the `execute_tool` dispatch table, `_filter_args` (implicit via schema), and `get_tool_definitions`. Keep the functions pure (no I/O, no state) — they operate only on the graph dict.
+
+## Conventions
+
+- **Python:** module-level docstrings, `from __future__ import annotations`, type hints, and `# ── Section ──` comment separators. Dataclasses for the graph model (`models.py`). Follow these when editing engine/server code.
+- **Style:** section-header comments use the `# ── ... ──` pattern (see any `engine/*.py`). Docstrings are used liberally — keep them.
+- **No build step:** frontend edits are plain JS/CSS/HTML. When changing `web/app.js`, be aware `index.html` fetches and `Babel.transform`s it at runtime with the **classic** JSX runtime — avoid automatic-runtime-only syntax.
+- **Security:** source reads are confined to recorded `repo_roots` (`engine/paths.py`, `server.py:_resolve_source_path`). Keep arbitrary-file-read surfaces closed. The graph stores **repo-relative** paths for portability.
+- **Env vars:** `CONSTELLATION_PORT` (8765), `CONSTELLATION_GRAPH` (graph path for MCP), `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL` (default `nemotron-3-ultra-free`), `ANTHROPIC_API_KEY` (takes priority if set). `server.py` also loads a `.env` file at startup.
+
+## Known Gotchas & Latent Bugs
+
+- Previously `server.py` referenced undefined names (`run_in_threadpool`, `Request`, `all_models`, `_API_TOKEN`, `_USER_AGENT`, `queue`/`threading`/`asyncio`) that made `/api/analyze`, `/api/ai/models`, auth, and streaming fail at call time. These are **fixed**: the imports/consts are defined, `/api/analyze` is replaced by the streaming ingest endpoints, and `ai_models` falls back to `FREE_MODELS` when the provider can't be reached. `CONSTELLATION_API_TOKEN` auth is still optional (open when unset) and is documented in code but **not** in the README's env-var table.
+- All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (graph, source, tools, ai/chat, ai/chat/stream). The flat `/api/graph`, `/api/source`, `/api/tools/*`, `/api/ai/*` routes no longer exist; only `/api/ai/models` and `/api/graph` (legacy alias → first ready project) remain non-scoped. The frontend builds these via `projPath(pid, rest)` in `web/app.js`.
+- The MCP server loads `graph.json` once at startup; restart to pick up graph changes.
+- Call resolution is name-based (no import-aware resolution yet) and can produce false positives — see the "Limitations" section of `README.md`.
+
+## Roadmap Context (README)
+
+- In progress: import-aware call resolution, Python (FastAPI) support, `.env`/API-key hardening.
+- Planned: TypeScript/Express, Go, C#; Apache Camel DSL; dynamic queue-name resolution; Anthropic tool-use; SSE streaming.
+
+When implementing anything on the roadmap, prefer extending the existing deterministic pipeline (new detector entries, new tools) and keep the "no LLM in the core" principle intact.

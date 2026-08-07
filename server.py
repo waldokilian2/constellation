@@ -7,9 +7,13 @@ Also serves the static frontend.
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional
+import asyncio
 import json
 import os
+import queue
+import re
 import sys
+import threading
 import urllib.request
 
 # Load .env file if it exists (before importing app code)
@@ -21,7 +25,8 @@ if _env_file.exists():
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -32,13 +37,46 @@ BASE_DIR = Path(__file__).parent.resolve()
 GRAPH_FILE = BASE_DIR / "output" / "graph.json"
 FRONTEND_DIR = BASE_DIR / "web"
 
+# Auth / UA used by the LLM proxy. ``_API_TOKEN`` gates protected endpoints
+# (defined here so the references throughout the module resolve).
+_API_TOKEN = os.environ.get("CONSTELLATION_API_TOKEN", "")
+_USER_AGENT = os.environ.get("CONSTELLATION_USER_AGENT", "Constellation/0.1")
+
+from engine.project_store import ProjectStore
+
+PROJECT_STORE = ProjectStore(BASE_DIR)
+# Import a pre-multi-project graph.json (e.g. produced by start.sh) as a
+# "Default" project so the app isn't empty on first load.
+PROJECT_STORE.ensure_legacy_seed()
+
 app = FastAPI(title="Constellation API", version="0.1.0")
 
 
-# ── Graph endpoints ────────────────────────────────────────────────
+# ── Graph + project endpoints ──────────────────────────────────────
 
-def _load_graph() -> dict:
-    """Load the graph.json file."""
+def _load_project(pid: str) -> dict:
+    """Load a project metadata record, 404 if unknown."""
+    meta = PROJECT_STORE.get_project(pid)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Project '{pid}' not found")
+    return meta
+
+
+def _load_graph(pid: Optional[str] = None) -> dict:
+    """Load a project's graph.
+
+    With ``pid`` → that project's ``graph.json`` (404 if not analysed yet).
+    Without ``pid`` → the legacy global ``output/graph.json`` (MCP/compat).
+    """
+    if pid:
+        meta = _load_project(pid)
+        try:
+            return PROJECT_STORE.load_graph(pid)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Project '{meta['name']}' has no graph yet (status: {meta.get('status', '?')})",
+            )
     if not GRAPH_FILE.exists():
         raise HTTPException(status_code=404, detail="graph.json not found. Run the engine first.")
     with open(GRAPH_FILE) as f:
@@ -57,57 +95,48 @@ def _require_auth(request: Request) -> None:
 
 
 @app.get("/api/graph")
-async def get_graph():
-    """Return the full graph data."""
-    return _load_graph()
+async def get_graph_legacy():
+    """Legacy global graph — returns the first ready project's graph (MCP/compat)."""
+    for p in PROJECT_STORE.list_projects():
+        if p.get("status") == "ready":
+            try:
+                return PROJECT_STORE.load_graph(p["id"])
+            except FileNotFoundError:
+                continue
+    return _load_graph(None)
 
 
-@app.get("/api/graph/entry-points")
-async def get_entry_points():
-    """Return all entry points."""
-    graph = _load_graph()
-    return graph.get("entry_points", [])
+@app.get("/api/projects")
+async def list_projects():
+    """List all projects (newest first)."""
+    return {"projects": PROJECT_STORE.list_projects()}
 
 
-@app.get("/api/graph/entry-point/{entry_id:path}")
-async def get_entry_point(entry_id: str):
-    """Return a single entry point by ID."""
-    graph = _load_graph()
-    for ep in graph.get("entry_points", []):
-        if ep["id"] == entry_id:
-            return ep
-    raise HTTPException(status_code=404, detail=f"Entry point '{entry_id}' not found")
+@app.get("/api/projects/{pid}")
+async def get_project(pid: str):
+    """Return one project's metadata."""
+    return _load_project(pid)
 
 
-@app.get("/api/graph/cross-repo-links")
-async def get_cross_repo_links():
-    """Return cross-repo connections."""
-    graph = _load_graph()
-    return graph.get("cross_repo_links", [])
+@app.delete("/api/projects/{pid}")
+async def delete_project(pid: str):
+    """Delete a project and its cloned repos + graph."""
+    if not PROJECT_STORE.delete(pid):
+        raise HTTPException(status_code=404, detail=f"Project '{pid}' not found")
+    return {"ok": True, "id": pid}
 
 
-@app.get("/api/graph/repos")
-async def get_repos():
-    """Return repo summary info."""
-    graph = _load_graph()
-    repos = {}
-    for ep in graph.get("entry_points", []):
-        repo = ep["repo"]
-        if repo not in repos:
-            repos[repo] = {"name": repo, "entry_points": 0, "producers": 0}
-        repos[repo]["entry_points"] += 1
-    for prod in graph.get("producers", []):
-        repo = prod["repo"]
-        if repo not in repos:
-            repos[repo] = {"name": repo, "entry_points": 0, "producers": 0}
-        repos[repo]["producers"] += 1
-    return list(repos.values())
+@app.get("/api/projects/{pid}/graph")
+async def get_project_graph(pid: str):
+    """Return the full graph for a project."""
+    return _load_graph(pid)
 
 
-@app.get("/api/source")
-async def get_source(file_path: str):
-    """Read a source file and return its contents (for detail panel)."""
-    p = _resolve_source_path(file_path)
+@app.get("/api/projects/{pid}/source")
+async def get_project_source(pid: str, file_path: str):
+    """Read a source file within a project's repo roots (for the detail panel)."""
+    graph = _load_graph(pid)
+    p = _resolve_source_path(file_path, graph)
     if p is None:
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     try:
@@ -123,7 +152,7 @@ async def get_source(file_path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _resolve_source_path(file_path: str) -> Optional[Path]:
+def _resolve_source_path(file_path: str, graph: Optional[dict] = None) -> Optional[Path]:
     """Resolve a graph file path to a real file on disk, within repo roots.
 
     Reads are confined to the repo roots recorded in the graph (or the
@@ -131,10 +160,11 @@ def _resolve_source_path(file_path: str) -> Optional[Path]:
     file reads via the API.
     """
     from engine.paths import resolve_source_path
-    try:
-        graph = _load_graph()
-    except HTTPException:
-        graph = {}
+    if graph is None:
+        try:
+            graph = _load_graph(None)
+        except HTTPException:
+            graph = {}
     return resolve_source_path(graph, file_path, fallback_roots=_legacy_repo_roots(graph))
 
 
@@ -143,30 +173,98 @@ def _legacy_repo_roots(graph: dict) -> list[Path]:
     return [BASE_DIR / "tests" / "repos" / repo for repo in graph.get("repos", [])]
 
 
-@app.post("/api/analyze")
-async def analyze_repos(repos: list[str] = Body(...), request: Request = None):
-    """Re-run the engine on new repo paths and return the graph."""
-    _require_auth(request)
+# ── Project ingestion (git clone + engine run, streamed over SSE) ───
 
-    from engine.constellation import ConstellationEngine
-    from pathlib import Path as P
 
-    repo_dirs = []
-    for repo_path in repos:
-        p = P(repo_path).resolve()
-        if not p.exists():
-            raise HTTPException(status_code=400, detail=f"Path not found: {p}")
-        repo_dirs.append((p.name, p))
+class ProjectIngestRequest(BaseModel):
+    """Create a new project from a set of git URLs."""
+    name: str
+    repos: list[str] = []
 
-    engine = ConstellationEngine()
-    graph = await run_in_threadpool(engine.analyze, repo_dirs)
 
-    # Save to disk
-    output_path = BASE_DIR / "output" / "graph.json"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(graph.to_json())
+class RepoIngestRequest(BaseModel):
+    """Add repos (git URLs) to an existing project (re-analyses the union)."""
+    repos: list[str]
 
-    return graph.to_dict()
+
+def _classify_log(line: str) -> str:
+    """Map an engine/clone log line to a coarse phase for the UI."""
+    low = line.lower()
+    if low.startswith("[clone]"):
+        return "clone"
+    if low.startswith("[scan]"):
+        return "scan"
+    if low.startswith("[link]"):
+        return "link"
+    if low.startswith("[done]"):
+        return "done"
+    if low.startswith("[graph]"):
+        return "graph"
+    return "info"
+
+
+@app.post("/api/projects")
+async def create_project(req: ProjectIngestRequest):
+    """Create a project (name + git URLs) and stream the ingestion logs.
+
+    Returns an SSE stream:
+      {"type": "log", "phase": "...", "message": "..."} — progress line
+      {"type": "done", "project": {...}}                  — finished ok
+      {"type": "error", "message": "..."}                 — failed
+    """
+    if not req.repos:
+        raise HTTPException(status_code=400, detail="At least one repository URL is required")
+    meta = PROJECT_STORE.create_meta(req.name)
+    return _ingest_response(meta["id"], req.repos)
+
+
+@app.post("/api/projects/{pid}/repos")
+async def add_project_repos(pid: str, req: RepoIngestRequest):
+    """Add git-URL repos to an existing project; re-analyse and stream logs."""
+    _load_project(pid)
+    if not req.repos:
+        raise HTTPException(status_code=400, detail="At least one repository URL is required")
+    # Mark the project busy so the UI can reflect re-analysis in progress.
+    PROJECT_STORE.mark_status(pid, "analyzing")
+    return _ingest_response(pid, req.repos)
+
+
+def _ingest_response(pid: str, urls: list[str]):
+    return StreamingResponse(
+        _ingest_stream(pid, urls),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _ingest_stream(pid: str, urls: list[str]):
+    """Run project ingestion on a worker thread, surfacing events as SSE."""
+    q: "queue.Queue" = queue.Queue()
+    SENTINEL = object()
+
+    def _produce():
+        try:
+            def _log(msg: str):
+                q.put({"type": "log", "phase": _classify_log(msg), "message": msg})
+            meta = PROJECT_STORE.ingest(pid, list(urls), log=_log)
+            q.put({"type": "done", "project": meta})
+        except Exception as e:
+            PROJECT_STORE.mark_error(pid, str(e))
+            q.put({"type": "error", "message": str(e)})
+        finally:
+            q.put(SENTINEL)
+
+    threading.Thread(target=_produce, daemon=True).start()
+    loop = asyncio.get_running_loop()
+    while True:
+        ev = await loop.run_in_executor(None, q.get)
+        if ev is SENTINEL:
+            break
+        yield "data: " + json.dumps(ev) + "\n\n"
 
 
 # ── AI proxy endpoints ─────────────────────────────────────────────
@@ -580,13 +678,13 @@ def _stream_llm_events(
     yield {"type": "done"}
 
 
-@app.post("/api/ai/explain")
-async def ai_explain(req: AIRequest):
+@app.post("/api/projects/{pid}/ai/explain")
+async def ai_explain(pid: str, req: AIRequest):
     """
     Legacy single-call endpoint. Kept for backwards compatibility.
-    The /api/ai/chat endpoint is preferred.
+    The /api/projects/{pid}/ai/chat endpoint is preferred.
     """
-    graph = _load_graph()
+    graph = _load_graph(pid)
     # Try to find the entry point from the context string
     entry_point_id = ""
     context = req.context or ""
@@ -611,8 +709,8 @@ async def ai_explain(req: AIRequest):
     return result
 
 
-@app.post("/api/ai/chat")
-async def ai_chat(req: ChatRequest):
+@app.post("/api/projects/{pid}/ai/chat")
+async def ai_chat(pid: str, req: ChatRequest):
     """
     Conversational chat endpoint with structured graph context and tool-use.
 
@@ -633,7 +731,7 @@ async def ai_chat(req: ChatRequest):
     """
     from engine.graph_tools import get_tool_definitions
 
-    graph = _load_graph()
+    graph = _load_graph(pid)
     system_prompt = _build_chat_prompt(req, graph)
 
     # Convert messages to plain dicts
@@ -645,10 +743,10 @@ async def ai_chat(req: ChatRequest):
     return result
 
 
-@app.post("/api/ai/chat/stream")
-async def ai_chat_stream(req: ChatRequest):
+@app.post("/api/projects/{pid}/ai/chat/stream")
+async def ai_chat_stream(pid: str, req: ChatRequest):
     """
-    Streaming variant of /api/ai/chat.
+    Streaming variant of /api/projects/{pid}/ai/chat.
 
     Returns a Server-Sent-Events stream. Each `data:` line is JSON:
       {"type": "token", "text": "..."}        — a streamed text delta
@@ -662,7 +760,7 @@ async def ai_chat_stream(req: ChatRequest):
     """
     from engine.graph_tools import get_tool_definitions
 
-    graph = _load_graph()
+    graph = _load_graph(pid)
     system_prompt = _build_chat_prompt(req, graph)
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     tools = get_tool_definitions()
@@ -759,61 +857,61 @@ async def ai_models():
 
 from engine.graph_tools import get_tool_definitions, execute_tool
 
-@app.get("/api/tools")
-async def list_tools():
-    """List all available graph tools and their schemas."""
+@app.get("/api/projects/{pid}/tools")
+async def list_tools(pid: str):
+    """List all available graph tools and their schemas (project-scoped)."""
     return {"tools": get_tool_definitions()}
 
 
-@app.post("/api/tools/{tool_name}")
-async def call_tool(tool_name: str, args: dict = Body(default={})):
+@app.post("/api/projects/{pid}/tools/{tool_name}")
+async def call_tool(pid: str, tool_name: str, args: dict = Body(default={})):
     """Execute a graph tool by name with JSON arguments."""
-    graph = _load_graph()
+    graph = _load_graph(pid)
     result = execute_tool(graph, tool_name, args)
     return result
 
 
 # Convenience GET wrappers for common queries
 
-@app.get("/api/tools/search")
-async def tool_search(q: str, type: str = "", search_type: str = "all"):
-    """Quick search: GET /api/tools/search?q=OrderService"""
-    graph = _load_graph()
+@app.get("/api/projects/{pid}/tools/search")
+async def tool_search(pid: str, q: str, type: str = "", search_type: str = "all"):
+    """Quick search: GET /api/projects/{pid}/tools/search?q=OrderService"""
+    graph = _load_graph(pid)
     return execute_tool(graph, "search_code", {"query": q, "type": type, "search_type": search_type})
 
 
-@app.get("/api/tools/callers")
-async def tool_callers(method: str):
-    """Quick find_callers: GET /api/tools/callers?method=save"""
-    graph = _load_graph()
+@app.get("/api/projects/{pid}/tools/callers")
+async def tool_callers(pid: str, method: str):
+    """Quick find_callers: GET /api/projects/{pid}/tools/callers?method=save"""
+    graph = _load_graph(pid)
     return execute_tool(graph, "find_callers", {"method_name": method})
 
 
-@app.get("/api/tools/channels")
-async def tool_channels():
+@app.get("/api/projects/{pid}/tools/channels")
+async def tool_channels(pid: str):
     """List all message channels."""
-    graph = _load_graph()
+    graph = _load_graph(pid)
     return execute_tool(graph, "list_channels", {})
 
 
-@app.get("/api/tools/channel/{channel_name}")
-async def tool_channel(channel_name: str):
+@app.get("/api/projects/{pid}/tools/channel/{channel_name}")
+async def tool_channel(pid: str, channel_name: str):
     """Get flow for a specific channel."""
-    graph = _load_graph()
+    graph = _load_graph(pid)
     return execute_tool(graph, "get_channel_flow", {"channel": channel_name})
 
 
-@app.get("/api/tools/overview")
-async def tool_overview():
+@app.get("/api/projects/{pid}/tools/overview")
+async def tool_overview(pid: str):
     """Get architecture overview."""
-    graph = _load_graph()
+    graph = _load_graph(pid)
     return execute_tool(graph, "get_architecture_overview", {})
 
 
-@app.get("/api/tools/trace")
-async def tool_trace(from_method: str, to_method: str):
-    """Trace path: GET /api/tools/trace?from_method=createOrder&to_method=save"""
-    graph = _load_graph()
+@app.get("/api/projects/{pid}/tools/trace")
+async def tool_trace(pid: str, from_method: str, to_method: str):
+    """Trace path: GET /api/projects/{pid}/tools/trace?from_method=createOrder&to_method=save"""
+    graph = _load_graph(pid)
     return execute_tool(graph, "trace_path", {"from_method": from_method, "to_method": to_method})
 
 

@@ -21,7 +21,17 @@ from .parser import JavaParser
 from .entry_detector import EntryPointDetector
 from .call_graph import CallGraphBuilder
 from .cross_repo import CrossRepoLinker
-from .models import ConstellationGraph
+from .java_index import JavaIndex
+from .models import ConstellationGraph, CallNode
+
+
+def _is_test_file(path: Path) -> bool:
+    """Standard Maven/Gradle test detection (src/test/, *Test/*Tests/*IT)."""
+    s = str(path).replace("\\", "/")
+    if "/src/test/" in s or "/test/" in s:
+        return True
+    stem = path.stem
+    return stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("IT")
 
 
 class ConstellationEngine:
@@ -43,47 +53,42 @@ class ConstellationEngine:
         Returns:
             ConstellationGraph with all entry points, producers, and links.
         """
-        all_entry_points = []
-        all_producers = []
-        all_methods = []
         repo_names = []
         repo_roots: dict[str, str] = {}
 
-        # ── Phase 1: Detect entry points and producers ────────────
+        # ── Phase 1: collect Java sources (skip tests) ─────────────
+        all_files: list[tuple[str, Path, Path]] = []
         for repo_name, repo_path in repo_dirs:
             repo_names.append(repo_name)
             repo_roots[repo_name] = str(repo_path)
             print(f"[scan] {repo_name}: scanning {repo_path}")
+            java_files = sorted(p for p in repo_path.rglob("*.java") if not _is_test_file(p))
+            for jf in java_files:
+                all_files.append((repo_name, repo_path, jf))
 
-            detector = EntryPointDetector(repo_name)
-            entries, producers, methods = detector.scan_directory(repo_path)
+        # ── Phase 2: build the type-aware symbol index ──────────────
+        index = JavaIndex()
+        index.build(all_files)
+        print(f"[scan] indexed {len(index.by_fqn)} types, {len(index.methods)} methods, "
+              f"{len(index.constants)} constants across {len(repo_dirs)} repo(s)")
 
-            all_entry_points.extend(entries)
-            all_producers.extend(producers)
-            all_methods.extend(methods)
-            print(f"[scan] {repo_name}: {len(entries)} entry points, "
-                  f"{len(producers)} producers, {len(methods)} methods indexed")
+        # ── Phase 3: detect entry points + producers (type-based) ───
+        detector = EntryPointDetector(index)
+        all_entry_points, all_producers = detector.scan()
+        print(f"[scan] {len(all_entry_points)} entry points, {len(all_producers)} producers")
 
-        # ── Phase 2: Build call trees ──────────────────────────────
+        # ── Phase 4: build call trees ───────────────────────────────
         print(f"\n[graph] Building call trees for {len(all_entry_points)} entry points...")
-        builder = CallGraphBuilder(all_methods)
-
-        # Build a lookup: "ClassName.methodName" → ClassMethod.node
-        method_node_lookup = {}
-        for m in all_methods:
-            key = f"{m.class_name}.{m.name}"
-            if key not in method_node_lookup:
-                method_node_lookup[key] = m
+        builder = CallGraphBuilder(index)
 
         for ep in all_entry_points:
-            method_key = f"{ep.class_name}.{ep.method}"
-            method_cm = method_node_lookup.get(method_key)
-            if method_cm and method_cm.node:
-                ep.call_tree = builder.build_tree(ep, method_cm.node)
+            # Find the entry method's AST node via the index.
+            entry_methods = index.find_methods(ep.class_name, ep.method)
+            entry_method = next((m for m in entry_methods if m.repo == ep.repo and m.file == ep.file), None)
+            if entry_method and entry_method.node:
+                ep.call_tree = builder.build_tree(ep, entry_method.node)
                 ep.metrics = builder.compute_metrics(ep.call_tree)
             else:
-                # Method node not found — create a minimal tree
-                from .models import CallNode
                 ep.call_tree = CallNode(
                     method=f"{ep.class_name}.{ep.method}",
                     file=ep.file,
@@ -93,13 +98,13 @@ class ConstellationEngine:
                 )
                 ep.metrics = {"depth": 0, "total_nodes": 1, "unique_files": 1, "branch_count": 0}
 
-        # ── Phase 3: Cross-repo linking ────────────────────────────
+        # ── Phase 5: cross-repo linking ─────────────────────────────
         print(f"\n[link] Finding cross-repo connections...")
         linker = CrossRepoLinker()
         links = linker.link(all_entry_points, all_producers)
         print(f"[link] Found {len(links)} cross-repo links")
 
-        # ── Phase 4: Assemble graph ────────────────────────────────
+        # ── Phase 6: assemble graph ─────────────────────────────────
         graph = ConstellationGraph(
             repos=repo_names,
             repo_roots=repo_roots,
@@ -107,7 +112,7 @@ class ConstellationEngine:
             producers=all_producers,
             cross_repo_links=links,
             generated_at=datetime.now(timezone.utc).isoformat(),
-            engine_version="0.1.0",
+            engine_version="0.2.0",
         )
 
         return graph

@@ -1582,6 +1582,39 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 .pc-delete:hover { color: #ff6b81; border-color: rgba(255,107,129,.35); background: rgba(255,107,129,.08); }
 
+/* Bottom-edge manage bar + dropdown menu */
+.pc-manage-btn {
+  font-size: 12px; font-weight: 600; letter-spacing: .02em;
+  color: var(--text-dim); border: 1px solid var(--border-strong);
+  background: rgba(255,255,255,.03);
+  padding: 5px 11px; border-radius: 8px; cursor: pointer;
+  transition: all .12s;
+}
+.pc-manage-btn:hover { color: var(--cyan); border-color: rgba(0,212,255,.35); background: rgba(0,212,255,.08); }
+.menu-backdrop { position: fixed; inset: 0; z-index: 40; }
+.manage-menu {
+  position: absolute; right: 16px; bottom: 56px; z-index: 50;
+  min-width: 188px; padding: 5px;
+  background: rgba(20, 26, 36, .97);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 14px 40px rgba(0,0,0,.5);
+  backdrop-filter: blur(12px);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.manage-item {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text); text-align: left;
+  padding: 8px 10px; border-radius: 8px; border: 1px solid transparent;
+  background: transparent; cursor: pointer; transition: all .1s;
+}
+.manage-item:hover:not(:disabled) { background: rgba(0,212,255,.1); border-color: rgba(0,212,255,.25); }
+.manage-item:disabled { opacity: .4; cursor: not-allowed; }
+.manage-item.danger { color: #ff8da1; }
+.manage-item.danger:hover:not(:disabled) { background: rgba(255,107,129,.12); border-color: rgba(255,107,129,.35); }
+.manage-item svg { flex: 0 0 auto; }
+.manage-sep { height: 1px; background: var(--border); margin: 3px 2px; }
+
 .status-badge {
   font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
   padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-strong);
@@ -1590,6 +1623,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 .status-badge.ok { color: #34d399; border-color: rgba(52,211,153,.35); background: rgba(52,211,153,.08); }
 .status-badge.busy { color: #fbbf24; border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.08); }
 .status-badge.err { color: #f87171; border-color: rgba(248,113,113,.35); background: rgba(248,113,113,.08); }
+.status-badge.stale { color: #fbbf24; border-color: rgba(251,191,36,.45); background: rgba(251,191,36,.1); animation: stale-pulse 2.4s ease-in-out infinite; }
 
 /* ---- Header additions ---- */
 .brand-mark-btn { background: none; border: none; cursor: pointer; padding: 0; line-height: 1; }
@@ -1604,6 +1638,24 @@ code { font-family: var(--mono); color: var(--cyan); }
   transition: background .12s, box-shadow .12s;
 }
 .add-repo-pill:hover { background: rgba(0, 212, 255, .18); box-shadow: 0 0 14px rgba(0, 212, 255, .3); }
+
+.rescan-pill {
+  cursor: pointer; border: 1px solid rgba(148, 163, 184, .3);
+  background: rgba(148, 163, 184, .08); color: #cbd5e1;
+  transition: background .12s, box-shadow .12s;
+}
+.rescan-pill:hover { background: rgba(148, 163, 184, .18); box-shadow: 0 0 14px rgba(148, 163, 184, .25); }
+
+.stale-pill {
+  cursor: pointer; border: 1px solid rgba(251, 191, 36, .45);
+  background: rgba(251, 191, 36, .1); color: #fbbf24; font-weight: 600;
+  animation: stale-pulse 2.4s ease-in-out infinite;
+}
+.stale-pill:hover { background: rgba(251, 191, 36, .2); box-shadow: 0 0 16px rgba(251, 191, 36, .35); }
+@keyframes stale-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(251, 191, 36, .15); }
+  50% { box-shadow: 0 0 16px rgba(251, 191, 36, .4); }
+}
 
 /* ---- Modal ---- */
 .modal-overlay {

@@ -264,17 +264,27 @@ function ErrorScreen({ message }) {
 }
 
 /* ---------------- Header ---------------- */
-function Header({ graph, mode, onModeChange }) {
+function Header({ graph, mode, onModeChange, projectName, onHome, onAddRepo }) {
   const gen = graph && graph.generated_at
     ? new Date(graph.generated_at).toLocaleString()
     : "";
   return (
     <header className="topbar glass">
       <div className="brand">
-        <span className="brand-mark">✦</span>
+        <button className="brand-mark-btn" onClick={onHome} title="Back to projects">
+          <span className="brand-mark">✦</span>
+        </button>
         <div>
           <div className="brand-name">CONSTELLATION</div>
-          <div className="brand-sub">Codebase Mapper</div>
+          <div className="brand-sub">
+            {onHome && projectName ? (
+              <span className="brand-crumb">
+                <button className="crumb link" onClick={onHome}>Projects</button>
+                <span className="crumb-sep">›</span>
+                <span className="crumb">{projectName}</span>
+              </span>
+            ) : "Codebase Mapper"}
+          </div>
         </div>
       </div>
       {onModeChange && (
@@ -290,6 +300,9 @@ function Header({ graph, mode, onModeChange }) {
         </div>
       )}
       <div className="meta">
+        {onAddRepo && (
+          <button className="meta-pill add-repo-pill" onClick={onAddRepo} title="Add a repository to this project">+ Add repo</button>
+        )}
         {graph && graph.engine_version && <span className="meta-pill">engine v{graph.engine_version}</span>}
         {gen && <span className="meta-pill">{gen}</span>}
       </div>
@@ -1194,7 +1207,7 @@ function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNod
 }
 
 /* ---------------- Detail Panel ---------------- */
-function DetailPanel({ node, entryPoint, onClose }) {
+function DetailPanel({ node, entryPoint, onClose, pid }) {
   const [source, setSource] = useState(null);
   const [srcStatus, setSrcStatus] = useState("loading");
   const [srcError, setSrcError] = useState("");
@@ -1207,7 +1220,7 @@ function DetailPanel({ node, entryPoint, onClose }) {
       if (alive) setSrcStatus("none");
       return () => { alive = false; };
     }
-    fetchJSON("/api/source?file_path=" + encodeURIComponent(node.file))
+    fetchJSON(projPath(pid, "/source?file_path=" + encodeURIComponent(node.file)))
       .then((s) => { if (alive) { setSource(s); setSrcStatus("ready"); } })
       .catch((e) => { if (alive) { setSrcError(e.message); setSrcStatus("error"); } });
     return () => { alive = false; };
@@ -2045,7 +2058,7 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
 
 
 /* ---------------- Global Chat Widget (unified, context-aware) ---------------- */
-function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows }) {
+function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, pid }) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -2188,7 +2201,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows }
     };
 
     try {
-      const res = await fetch("/api/ai/chat/stream", {
+      const res = await fetch(projPath(pid, "/ai/chat/stream"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2459,9 +2472,22 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows }
 
 /* ---------------- App ---------------- */
 function App() {
+  // ── project-level state ─────────────────────────────────────────
+  const [projects, setProjects] = useState([]);
+  const [projStatus, setProjStatus] = useState("loading"); // loading | ready | error
+  const [projError, setProjError] = useState("");
+  const [activeId, setActiveId] = useState(null);
+  const [activeMeta, setActiveMeta] = useState(null);
+
+  // ── graph state for the active project ──────────────────────────
   const [graph, setGraph] = useState(null);
-  const [status, setStatus] = useState("loading");
-  const [error, setError] = useState("");
+  const [graphStatus, setGraphStatus] = useState("idle"); // idle | loading | ready | error
+  const [graphError, setGraphError] = useState("");
+
+  // ── ingestion modal ─────────────────────────────────────────────
+  const [ingest, setIngest] = useState(null); // {mode, pid?, projectName?} | null
+
+  // ── view state (unchanged) ──────────────────────────────────────
   const [view, setView] = useState({ name: "galaxy" });
   const [mode, setMode] = useState("topology"); // "topology" | "flows"
   const [flows, setFlows] = useState([]);
@@ -2471,25 +2497,80 @@ function App() {
   const [zoomFx, setZoomFx] = useState(null);
   const zoomTimer = useRef(null);
 
-  useEffect(() => {
-    let alive = true;
-    fetchJSON("/api/graph")
-      .then((g) => {
-        if (alive) {
-          setGraph(g);
-          setFlows(detectFlows(g));
-          setStatus("ready");
-        }
-      })
-      .catch((e) => { if (alive) { setError(e.message); setStatus("error"); } });
-    return () => { alive = false; };
+  const loadProjects = useCallback(() => {
+    setProjStatus("loading");
+    fetchJSON("/api/projects")
+      .then((d) => { setProjects(d.projects || []); setProjStatus("ready"); })
+      .catch((e) => { setProjError(e.message); setProjStatus("error"); });
   }, []);
+
+  useEffect(() => { loadProjects(); }, [loadProjects]);
+
+  // Load the active project's scoped graph.
+  useEffect(() => {
+    if (!activeId) { setGraph(null); setGraphStatus("idle"); return; }
+    let alive = true;
+    setGraphStatus("loading");
+    setGraph(null);
+    setGraphError("");
+    fetchJSON(projPath(activeId, "/graph"))
+      .then((g) => { if (alive) { setGraph(g); setFlows(detectFlows(g)); setGraphStatus("ready"); } })
+      .catch((e) => { if (alive) { setGraphError(e.message); setGraphStatus("error"); } });
+    return () => { alive = false; };
+  }, [activeId]);
 
   useEffect(() => {
     const onResize = () => setDims({ w: window.innerWidth, h: window.innerHeight });
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  const openProject = (p) => {
+    setActiveMeta(p);
+    setActiveId(p.id);
+    setSelectedNode(null);
+    setView({ name: "galaxy" });
+    setMode("topology");
+  };
+
+  const backToProjects = () => {
+    setActiveId(null);
+    setActiveMeta(null);
+    setSelectedNode(null);
+    setGraph(null);
+    loadProjects();
+  };
+
+  const refreshActive = () => {
+    if (!activeId) { loadProjects(); return; }
+    fetchJSON(projPath(activeId, "/graph"))
+      .then((g) => { setGraph(g); setFlows(detectFlows(g)); setGraphStatus("ready"); })
+      .catch(() => {});
+    fetchJSON("/api/projects/" + encodeURIComponent(activeId))
+      .then(setActiveMeta).catch(() => {});
+    loadProjects();
+  };
+
+  const onIngestComplete = (proj) => {
+    const was = ingest;
+    setIngest(null);
+    if (was && was.mode === "create" && proj && proj.id) {
+      setActiveMeta(proj);
+      setActiveId(proj.id);
+      setSelectedNode(null);
+      setView({ name: "galaxy" });
+      setMode("topology");
+      loadProjects();
+    } else {
+      refreshActive();
+    }
+  };
+
+  const deleteProject = (pid) => {
+    fetch("/api/projects/" + encodeURIComponent(pid), { method: "DELETE" })
+      .then(() => { if (pid === activeId) backToProjects(); else loadProjects(); })
+      .catch(() => {});
+  };
 
   const goGalaxy = () => { setSelectedNode(null); setView({ name: "galaxy" }); };
   const goFlowIndex = () => { setSelectedNode(null); setView({ name: "flowIndex" }); };
@@ -2521,14 +2602,53 @@ function App() {
     return [r.x + r.width / 2, r.y + r.height / 2];
   };
 
-  if (status === "loading") return (<React.Fragment><Starfield /><LoadingScreen /></React.Fragment>);
-  if (status === "error") return (<React.Fragment><Starfield /><ErrorScreen message={error} /></React.Fragment>);
+  // ── Projects landing (no project selected) ──────────────────────
+  if (!activeId) {
+    if (projStatus === "loading") return (<React.Fragment><Starfield /><LoadingScreen /></React.Fragment>);
+    if (projStatus === "error") return (<React.Fragment><Starfield /><ErrorScreen message={projError} /></React.Fragment>);
+    return (
+      <React.Fragment>
+        <Starfield />
+        <ProjectsView
+          projects={projects}
+          loading={false}
+          onOpen={openProject}
+          onNew={() => setIngest({ mode: "create" })}
+          onDelete={deleteProject}
+        />
+        {ingest && (
+          <IngestionModal
+            mode={ingest.mode}
+            projectName={ingest.projectName}
+            pid={ingest.pid}
+            onComplete={onIngestComplete}
+            onClose={() => setIngest(null)}
+          />
+        )}
+      </React.Fragment>
+    );
+  }
+
+  // ── Active project shell ────────────────────────────────────────
+  if (graphStatus === "loading") return (<React.Fragment><Starfield /><LoadingScreen /></React.Fragment>);
+  if (graphStatus === "error") return (<React.Fragment><Starfield /><ErrorScreen message={graphError} /></React.Fragment>);
   if (!graph) return null;
 
   return (
     <div className="app">
       <Starfield />
-      <Header graph={graph} mode={mode} onModeChange={switchMode} />
+      <Header
+        graph={graph}
+        mode={mode}
+        onModeChange={switchMode}
+        projectName={(activeMeta && activeMeta.name) || "Project"}
+        onHome={backToProjects}
+        onAddRepo={() => setIngest({
+          mode: "add",
+          pid: activeId,
+          projectName: (activeMeta && activeMeta.name) || "",
+        })}
+      />
       <main className="stage">
         {/* ── Topology mode (existing) ── */}
         {mode === "topology" && view.name === "galaxy" && (
@@ -2641,6 +2761,7 @@ function App() {
                 node={selectedNode}
                 entryPoint={flowEp}
                 onClose={() => setSelectedNode(null)}
+                pid={activeId}
               />
             );
           }
@@ -2651,6 +2772,7 @@ function App() {
             node={selectedNode}
             entryPoint={ep}
             onClose={() => setSelectedNode(null)}
+            pid={activeId}
           />
         );
       })()}
@@ -2660,6 +2782,7 @@ function App() {
         view={view}
         selectedNode={selectedNode}
         flows={flows}
+        pid={activeId}
         entryPoint={(() => {
           if (view.name === "path") return graph.entry_points.find((e) => e.id === view.entryId);
           if (view.name === "flowTrace") {
@@ -2671,6 +2794,16 @@ function App() {
         })()}
         detailOpen={!!selectedNode && (view.name === "path" || view.name === "flowTrace")}
       />
+
+      {ingest && (
+        <IngestionModal
+          mode={ingest.mode}
+          pid={ingest.pid}
+          projectName={ingest.projectName}
+          onComplete={onIngestComplete}
+          onClose={() => setIngest(null)}
+        />
+      )}
 
       {zoomFx && <>
         <svg className="zoom-spark" style={{ left: zoomFx.x, top: zoomFx.y }} viewBox="0 0 100 100" width="120" height="120" aria-hidden="true">
@@ -2705,6 +2838,279 @@ function findStepByRepo(step, repo) {
     if (found) return found;
   }
   return null;
+}
+
+/* ---------------- Projects (multi-project landing + ingestion) ---------------- */
+
+// Build a project-scoped API path. Every graph-dependent endpoint lives under
+// /api/projects/<pid>/...; /api/ai/models stays global (not project-specific).
+const projPath = (pid, rest) => "/api/projects/" + encodeURIComponent(pid) + rest;
+
+function fmtRelative(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (isNaN(diff)) return "";
+  if (diff < 60) return "just now";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  if (diff < 86400 * 7) return Math.floor(diff / 86400) + "d ago";
+  return d.toLocaleDateString();
+}
+
+function StatusBadge({ status }) {
+  const map = {
+    ready: { label: "Ready", cls: "ok" },
+    analyzing: { label: "Analyzing…", cls: "busy" },
+    error: { label: "Error", cls: "err" },
+  };
+  const m = map[status] || { label: status || "—", cls: "" };
+  return <span className={"status-badge " + m.cls}>{m.label}</span>;
+}
+
+function ProjectsView({ projects, loading, onOpen, onNew, onDelete }) {
+  return (
+    <div className="projects-view">
+      <div className="projects-inner">
+        <div className="projects-head">
+          <div className="projects-title-block">
+            <div className="projects-title-row">
+              <span className="projects-logo" aria-hidden="true">✦</span>
+              <h1 className="projects-title">Constellation</h1>
+            </div>
+            <p className="projects-sub muted">
+              Map any microservice architecture from source. Pick a project to enter its galaxy.
+            </p>
+          </div>
+          <button className="btn-primary" onClick={onNew}>+ New project</button>
+        </div>
+
+        {loading ? (
+          <div className="screen-center"><div className="orbit-loader"><span></span></div></div>
+        ) : projects.length === 0 ? (
+          <div className="empty-state glass">
+            <div className="empty-mark">✦</div>
+            <h2>No projects yet</h2>
+            <p className="muted">Create your first project by importing one or more Git repositories.</p>
+            <button className="btn-primary big" onClick={onNew}>Create a project</button>
+          </div>
+        ) : (
+          <div className="project-grid">
+            {projects.map((p) => {
+              const stats = p.stats || {};
+              const repos = p.repos || [];
+              return (
+                <div
+                  className={"project-card glass" + (p.status === "analyzing" ? " busy" : "")}
+                  key={p.id}
+                  onClick={() => p.status !== "analyzing" && onOpen(p)}
+                >
+                  <div className="pc-top">
+                    <StatusBadge status={p.status} />
+                  </div>
+                  <div className="pc-name">{p.name}</div>
+                  <div className="pc-meta muted">
+                    {repos.length} repos · {stats.entry_points || 0} entry points · {stats.cross_repo_links || 0} links
+                  </div>
+                  <div className="pc-repos">
+                    {repos.slice(0, 4).map((r) => (
+                      <span className="repo-chip" key={r.name} title={r.source}>{r.name}</span>
+                    ))}
+                    {repos.length > 4 && <span className="repo-chip more">+{repos.length - 4}</span>}
+                  </div>
+                  <div className="pc-foot">
+                    <span className="muted small">Updated {fmtRelative(p.updated_at)}</span>
+                    <button
+                      className="pc-delete"
+                      title="Delete project"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm("Delete project '" + p.name + "'? This removes its graph and cloned repos.")) onDelete(p.id);
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                        <path d="M10 11v6M14 11v6"></path>
+                        <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Reads the SSE ingestion stream from /api/projects (create) or
+// /api/projects/<pid>/repos (add). Mirrors the GlobalChat SSE reader.
+function IngestionModal({ mode, pid, projectName, onComplete, onClose }) {
+  const isCreate = mode === "create";
+  const [name, setName] = useState(projectName || "");
+  const [urls, setUrls] = useState([""]);
+  const [logs, setLogs] = useState([]);
+  const [status, setStatus] = useState("idle"); // idle | running | done | error
+  const [error, setError] = useState("");
+  const logEndRef = useRef(null);
+
+  useEffect(() => {
+    if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  const validUrls = urls.map((u) => u.trim()).filter(Boolean);
+  const setUrlAt = (i, v) => setUrls((prev) => prev.map((u, idx) => (idx === i ? v : u)));
+  const addRow = () => setUrls((prev) => [...prev, ""]);
+  const removeRow = (i) => setUrls((prev) => prev.filter((_, idx) => idx !== i));
+
+  const submit = async () => {
+    setError("");
+    setLogs([]);
+    setStatus("running");
+    const endpoint = isCreate
+      ? "/api/projects"
+      : projPath(pid, "/repos");
+    const body = isCreate
+      ? { name: (name || "").trim() || "Untitled Project", repos: validUrls }
+      : { repos: validUrls };
+    let sawDone = false;
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok || !res.body) {
+        const t = await res.text().catch(() => "");
+        throw new Error("Failed (" + res.status + ") " + t.slice(0, 200));
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const events = buf.split("\n\n");
+        buf = events.pop();
+        for (const raw of events) {
+          const line = raw.trim();
+          if (!line.startsWith("data:")) continue;
+          const dataStr = line.slice(5).trim();
+          if (!dataStr) continue;
+          let ev;
+          try { ev = JSON.parse(dataStr); } catch { continue; }
+          if (ev.type === "log") {
+            setLogs((prev) => [...prev, { phase: ev.phase, message: ev.message }]);
+          } else if (ev.type === "done") {
+            sawDone = true;
+            setStatus("done");
+            setLogs((prev) => [...prev, { phase: "done", message: "Analysis complete." }]);
+            const proj = ev.project;
+            setTimeout(() => onComplete && onComplete(proj), 750);
+            return;
+          } else if (ev.type === "error") {
+            setStatus("error");
+            setError(ev.message || "Ingestion failed");
+          }
+        }
+      }
+      if (!sawDone) setStatus("error");
+    } catch (e) {
+      setStatus("error");
+      setError(e.message);
+    }
+  };
+
+  const busy = status === "running";
+
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose && onClose(); }}>
+      <div className="modal-card glass">
+        <div className="modal-head">
+          <h2>{isCreate ? "New project" : "Add repositories to " + (projectName || "project")}</h2>
+          <button className="modal-close" onClick={() => onClose && onClose()} disabled={busy} title="Close">✕</button>
+        </div>
+
+        <div className="modal-body">
+          {isCreate && (
+            <label className="field">
+              <span className="field-label">Project name</span>
+              <input
+                className="text-input"
+                type="text"
+                placeholder="e.g. Order Platform"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                disabled={busy}
+                autoFocus
+              />
+            </label>
+          )}
+
+          <label className="field">
+            <span className="field-label">Git repository URLs ({validUrls.length})</span>
+            <div className="url-list">
+              {urls.map((u, i) => (
+                <div className="url-row" key={i}>
+                  <input
+                    className="text-input mono"
+                    type="text"
+                    placeholder="https://github.com/org/repo.git"
+                    value={u}
+                    onChange={(e) => setUrlAt(i, e.target.value)}
+                    disabled={busy}
+                  />
+                  {urls.length > 1 && (
+                    <button className="url-remove" onClick={() => removeRow(i)} disabled={busy} title="Remove">✕</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button className="btn-link" onClick={addRow} disabled={busy}>+ add another repo</button>
+          </label>
+
+          <p className="muted small">
+            Repos are cloned (shallow) and analysed together so cross-service links are detected.
+            {!isCreate && " The project is re-analysed as a whole when you add a repo."}
+          </p>
+
+          {(status === "running" || status === "done" || status === "error") && (
+            <div className="ingest-log">
+              <div className="ingest-log-head">
+                {status === "running" && <span className="badge busy">Working…</span>}
+                {status === "done" && <span className="badge ok">Done</span>}
+                {status === "error" && <span className="badge err">Failed</span>}
+              </div>
+              <div className="log-stream mono">
+                {logs.length === 0 && <div className="muted small">Starting…</div>}
+                {logs.map((l, i) => (
+                  <div className={"log-line phase-" + (l.phase || "info")} key={i}>{l.message}</div>
+                ))}
+                <div ref={logEndRef} />
+              </div>
+            </div>
+          )}
+
+          {error && <div className="ingest-error">{error}</div>}
+        </div>
+
+        <div className="modal-foot">
+          <button className="btn-ghost" onClick={() => onClose && onClose()} disabled={busy}>Cancel</button>
+          <button
+            className="btn-primary"
+            onClick={submit}
+            disabled={busy || validUrls.length === 0 || (isCreate && !(name || "").trim())}
+          >
+            {busy ? "Importing…" : isCreate ? "Create & import" : "Add & re-analyse"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const rootEl = document.getElementById("root");

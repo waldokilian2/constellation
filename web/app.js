@@ -264,7 +264,7 @@ function ErrorScreen({ message }) {
 }
 
 /* ---------------- Header ---------------- */
-function Header({ graph, mode, onModeChange, projectName, onHome, onAddRepo }) {
+function Header({ graph, mode, onModeChange, projectName, onHome }) {
   const gen = graph && graph.generated_at
     ? new Date(graph.generated_at).toLocaleString()
     : "";
@@ -300,9 +300,6 @@ function Header({ graph, mode, onModeChange, projectName, onHome, onAddRepo }) {
         </div>
       )}
       <div className="meta">
-        {onAddRepo && (
-          <button className="meta-pill add-repo-pill" onClick={onAddRepo} title="Add a repository to this project">+ Add repo</button>
-        )}
         {graph && graph.engine_version && <span className="meta-pill">engine v{graph.engine_version}</span>}
         {gen && <span className="meta-pill">{gen}</span>}
       </div>
@@ -2485,7 +2482,45 @@ function App() {
   const [graphError, setGraphError] = useState("");
 
   // ── ingestion modal ─────────────────────────────────────────────
-  const [ingest, setIngest] = useState(null); // {mode, pid?, projectName?} | null
+  const [ingest, setIngest] = useState(null); // {mode, pid?, projectName?, pull?} | null
+
+  // ── upstream change detection (per-project staleness) ────────────
+  const [updatesByPid, setUpdatesByPid] = useState({}); // {pid: {repos, total, stale_count}}
+
+  const fetchProjectUpdates = useCallback((pid) => {
+    fetchJSON(projPath(pid, "/updates"))
+      .then((u) => setUpdatesByPid((prev) => ({ ...prev, [pid]: u })))
+      .catch(() => {});
+  }, []);
+
+  const loadProjects = useCallback(() => {
+    setProjStatus("loading");
+    fetchJSON("/api/projects")
+      .then((d) => {
+        const list = d.projects || [];
+        setProjects(list);
+        setProjStatus("ready");
+        // Refresh staleness for every analysed project (cheap ls-remote per repo).
+        list.forEach((p) => { if (p.status !== "analyzing") fetchProjectUpdates(p.id); });
+      })
+      .catch((e) => { setProjError(e.message); setProjStatus("error"); });
+  }, [fetchProjectUpdates]);
+
+  // Quiet in-place refresh: updates the project list + staleness WITHOUT flipping
+  // to the loading screen, so background refreshes (e.g. after a rescan) never
+  // unmount an open modal. Use loadProjects() for full navigations/initial mount.
+  const refreshProjects = useCallback(() => {
+    fetchJSON("/api/projects")
+      .then((d) => {
+        const list = d.projects || [];
+        setProjects(list);
+        setProjStatus((s) => (s === "error" ? "ready" : s));
+        list.forEach((p) => { if (p.status !== "analyzing") fetchProjectUpdates(p.id); });
+      })
+      .catch(() => {});
+  }, [fetchProjectUpdates]);
+
+  useEffect(() => { loadProjects(); }, [loadProjects]);
 
   // ── view state (unchanged) ──────────────────────────────────────
   const [view, setView] = useState({ name: "galaxy" });
@@ -2496,15 +2531,6 @@ function App() {
   // Zoom-drill transition: {x,y} = node center in viewport px, phase in|out
   const [zoomFx, setZoomFx] = useState(null);
   const zoomTimer = useRef(null);
-
-  const loadProjects = useCallback(() => {
-    setProjStatus("loading");
-    fetchJSON("/api/projects")
-      .then((d) => { setProjects(d.projects || []); setProjStatus("ready"); })
-      .catch((e) => { setProjError(e.message); setProjStatus("error"); });
-  }, []);
-
-  useEffect(() => { loadProjects(); }, [loadProjects]);
 
   // Load the active project's scoped graph.
   useEffect(() => {
@@ -2531,6 +2557,7 @@ function App() {
     setSelectedNode(null);
     setView({ name: "galaxy" });
     setMode("topology");
+    fetchProjectUpdates(p.id);
   };
 
   const backToProjects = () => {
@@ -2542,13 +2569,14 @@ function App() {
   };
 
   const refreshActive = () => {
-    if (!activeId) { loadProjects(); return; }
+    if (!activeId) { refreshProjects(); return; }
     fetchJSON(projPath(activeId, "/graph"))
       .then((g) => { setGraph(g); setFlows(detectFlows(g)); setGraphStatus("ready"); })
       .catch(() => {});
     fetchJSON("/api/projects/" + encodeURIComponent(activeId))
       .then(setActiveMeta).catch(() => {});
-    loadProjects();
+    fetchProjectUpdates(activeId);
+    refreshProjects();
   };
 
   const onIngestComplete = (proj) => {
@@ -2560,15 +2588,23 @@ function App() {
       setSelectedNode(null);
       setView({ name: "galaxy" });
       setMode("topology");
+      fetchProjectUpdates(proj.id);
       loadProjects();
     } else {
       refreshActive();
     }
   };
 
+  // Kick off a rescan for any project (active or from the list).
+  const startRescan = (pid, name, pull) =>
+    setIngest({ mode: "rescan", pid, projectName: name || "project", pull });
+
+  const startAddRepo = (p) =>
+    setIngest({ mode: "add", pid: p.id, projectName: p.name || "" });
+
   const deleteProject = (pid) => {
     fetch("/api/projects/" + encodeURIComponent(pid), { method: "DELETE" })
-      .then(() => { if (pid === activeId) backToProjects(); else loadProjects(); })
+      .then(() => { if (pid === activeId) backToProjects(); else refreshProjects(); })
       .catch(() => {});
   };
 
@@ -2615,13 +2651,18 @@ function App() {
           onOpen={openProject}
           onNew={() => setIngest({ mode: "create" })}
           onDelete={deleteProject}
+          updatesByPid={updatesByPid}
+          onAddRepo={startAddRepo}
+          onRescan={(p, pull) => startRescan(p.id, p.name, pull)}
         />
         {ingest && (
           <IngestionModal
             mode={ingest.mode}
             projectName={ingest.projectName}
             pid={ingest.pid}
+            pull={ingest.pull}
             onComplete={onIngestComplete}
+            onScanDone={refreshProjects}
             onClose={() => setIngest(null)}
           />
         )}
@@ -2643,11 +2684,6 @@ function App() {
         onModeChange={switchMode}
         projectName={(activeMeta && activeMeta.name) || "Project"}
         onHome={backToProjects}
-        onAddRepo={() => setIngest({
-          mode: "add",
-          pid: activeId,
-          projectName: (activeMeta && activeMeta.name) || "",
-        })}
       />
       <main className="stage">
         {/* ── Topology mode (existing) ── */}
@@ -2800,7 +2836,9 @@ function App() {
           mode={ingest.mode}
           pid={ingest.pid}
           projectName={ingest.projectName}
+          pull={ingest.pull}
           onComplete={onIngestComplete}
+          onScanDone={refreshActive}
           onClose={() => setIngest(null)}
         />
       )}
@@ -2858,17 +2896,111 @@ function fmtRelative(iso) {
   return d.toLocaleDateString();
 }
 
-function StatusBadge({ status }) {
+function StatusBadge({ status, stale }) {
   const map = {
     ready: { label: "Ready", cls: "ok" },
     analyzing: { label: "Analyzing…", cls: "busy" },
     error: { label: "Error", cls: "err" },
   };
-  const m = map[status] || { label: status || "—", cls: "" };
+  let m = map[status] || { label: status || "—", cls: "" };
+  // A ready project whose remote HEAD has moved reads "Out of date".
+  if (stale && status === "ready") m = { label: "Out of date", cls: "stale" };
   return <span className={"status-badge " + m.cls}>{m.label}</span>;
 }
 
-function ProjectsView({ projects, loading, onOpen, onNew, onDelete }) {
+function ProjectCard({ p, updates, onOpen, onAddRepo, onRescan, onDelete }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const stats = p.stats || {};
+  const repos = p.repos || [];
+  const stale = !!(updates && updates.stale_count > 0);
+  // "Update" only makes sense for repos that have a remote to pull.
+  const hasRemote = repos.some((r) => !(r.source || "").startsWith("local:"));
+  const busy = p.status === "analyzing";
+  const close = () => setMenuOpen(false);
+  const trash = (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="3 6 5 6 21 6"></polyline>
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+      <path d="M10 11v6M14 11v6"></path>
+      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>
+    </svg>
+  );
+  return (
+    <div
+      className={"project-card glass" + (busy ? " busy" : "")}
+      onClick={() => !busy && onOpen(p)}
+    >
+      <div className="pc-top">
+        <StatusBadge status={p.status} stale={stale} />
+      </div>
+      <div className="pc-name">{p.name}</div>
+      <div className="pc-meta muted">
+        {repos.length} repos · {stats.entry_points || 0} entry points · {stats.cross_repo_links || 0} links
+      </div>
+      <div className="pc-repos">
+        {repos.slice(0, 4).map((r) => (
+          <span className="repo-chip" key={r.name} title={r.source}>{r.name}</span>
+        ))}
+        {repos.length > 4 && <span className="repo-chip more">+{repos.length - 4}</span>}
+      </div>
+      <div className="pc-foot">
+        <span className="muted small">Updated {fmtRelative(p.updated_at)}</span>
+        <button
+          className="pc-manage-btn"
+          title="Manage project"
+          onClick={(e) => { e.stopPropagation(); setMenuOpen((o) => !o); }}
+        >
+          Manage ⋯
+        </button>
+      </div>
+      {menuOpen && (
+        <>
+          <div className="menu-backdrop" onClick={(e) => { e.stopPropagation(); close(); }} />
+          <div className="manage-menu" onClick={(e) => e.stopPropagation()}>
+            <button
+              className="manage-item"
+              title={stale ? "Pull latest for the stale repo(s), then re-analyse" : "All repos are up to date"}
+              disabled={busy || !hasRemote || !stale}
+              onClick={() => { close(); onRescan(p, true); }}
+            >
+              ↑ Update{stale ? " · " + updates.stale_count + " stale" : ""}
+            </button>
+            <button
+              className="manage-item"
+              title="Re-extract the graph from the current source (no download)"
+              disabled={busy}
+              onClick={() => { close(); onRescan(p, false); }}
+            >
+              ↻ Rescan
+            </button>
+            <button
+              className="manage-item"
+              title="Add another repository to this project"
+              disabled={busy}
+              onClick={() => { close(); onAddRepo(p); }}
+            >
+              + Add repo
+            </button>
+            <div className="manage-sep" />
+            <button
+              className="manage-item danger"
+              title="Delete project"
+              disabled={busy}
+              onClick={() => {
+                close();
+                if (confirm("Delete project '" + p.name + "'? This removes its graph and cloned repos.")) onDelete(p.id);
+              }}
+            >
+              {trash} Delete
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProjectsView({ projects, loading, onOpen, onNew, onDelete, updatesByPid, onAddRepo, onRescan }) {
   return (
     <div className="projects-view">
       <div className="projects-inner">
@@ -2896,49 +3028,17 @@ function ProjectsView({ projects, loading, onOpen, onNew, onDelete }) {
           </div>
         ) : (
           <div className="project-grid">
-            {projects.map((p) => {
-              const stats = p.stats || {};
-              const repos = p.repos || [];
-              return (
-                <div
-                  className={"project-card glass" + (p.status === "analyzing" ? " busy" : "")}
-                  key={p.id}
-                  onClick={() => p.status !== "analyzing" && onOpen(p)}
-                >
-                  <div className="pc-top">
-                    <StatusBadge status={p.status} />
-                  </div>
-                  <div className="pc-name">{p.name}</div>
-                  <div className="pc-meta muted">
-                    {repos.length} repos · {stats.entry_points || 0} entry points · {stats.cross_repo_links || 0} links
-                  </div>
-                  <div className="pc-repos">
-                    {repos.slice(0, 4).map((r) => (
-                      <span className="repo-chip" key={r.name} title={r.source}>{r.name}</span>
-                    ))}
-                    {repos.length > 4 && <span className="repo-chip more">+{repos.length - 4}</span>}
-                  </div>
-                  <div className="pc-foot">
-                    <span className="muted small">Updated {fmtRelative(p.updated_at)}</span>
-                    <button
-                      className="pc-delete"
-                      title="Delete project"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (confirm("Delete project '" + p.name + "'? This removes its graph and cloned repos.")) onDelete(p.id);
-                      }}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <polyline points="3 6 5 6 21 6"></polyline>
-                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
-                        <path d="M10 11v6M14 11v6"></path>
-                        <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+            {projects.map((p) => (
+              <ProjectCard
+                key={p.id}
+                p={p}
+                updates={updatesByPid ? updatesByPid[p.id] : null}
+                onOpen={onOpen}
+                onAddRepo={onAddRepo}
+                onRescan={onRescan}
+                onDelete={onDelete}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -2948,18 +3048,28 @@ function ProjectsView({ projects, loading, onOpen, onNew, onDelete }) {
 
 // Reads the SSE ingestion stream from /api/projects (create) or
 // /api/projects/<pid>/repos (add). Mirrors the GlobalChat SSE reader.
-function IngestionModal({ mode, pid, projectName, onComplete, onClose }) {
+function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onScanDone }) {
   const isCreate = mode === "create";
+  const isRescan = mode === "rescan";
   const [name, setName] = useState(projectName || "");
   const [urls, setUrls] = useState([""]);
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState("idle"); // idle | running | done | error
   const [error, setError] = useState("");
   const logEndRef = useRef(null);
+  const didAutoRun = useRef(false);
 
   useEffect(() => {
     if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
+
+  // Rescan has no form — kick it off automatically the first time the modal mounts.
+  useEffect(() => {
+    if (isRescan && !didAutoRun.current) {
+      didAutoRun.current = true;
+      submit();
+    }
+  }, [isRescan]);
 
   const validUrls = urls.map((u) => u.trim()).filter(Boolean);
   const setUrlAt = (i, v) => setUrls((prev) => prev.map((u, idx) => (idx === i ? v : u)));
@@ -2972,10 +3082,14 @@ function IngestionModal({ mode, pid, projectName, onComplete, onClose }) {
     setStatus("running");
     const endpoint = isCreate
       ? "/api/projects"
-      : projPath(pid, "/repos");
+      : isRescan
+        ? projPath(pid, "/rescan" + (pull ? "?pull=true" : ""))
+        : projPath(pid, "/repos");
     const body = isCreate
       ? { name: (name || "").trim() || "Untitled Project", repos: validUrls }
-      : { repos: validUrls };
+      : isRescan
+        ? {}
+        : { repos: validUrls };
     let sawDone = false;
     try {
       const res = await fetch(endpoint, {
@@ -3010,7 +3124,13 @@ function IngestionModal({ mode, pid, projectName, onComplete, onClose }) {
             setStatus("done");
             setLogs((prev) => [...prev, { phase: "done", message: "Analysis complete." }]);
             const proj = ev.project;
-            setTimeout(() => onComplete && onComplete(proj), 750);
+            if (isRescan) {
+              // Refresh the underlying view but keep this modal open — the user
+              // dismisses it explicitly once they've reviewed the scan log.
+              onScanDone && onScanDone(proj);
+            } else {
+              setTimeout(() => onComplete && onComplete(proj), 750);
+            }
             return;
           } else if (ev.type === "error") {
             setStatus("error");
@@ -3031,7 +3151,11 @@ function IngestionModal({ mode, pid, projectName, onComplete, onClose }) {
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose && onClose(); }}>
       <div className="modal-card glass">
         <div className="modal-head">
-          <h2>{isCreate ? "New project" : "Add repositories to " + (projectName || "project")}</h2>
+          <h2>{isCreate
+            ? "New project"
+            : isRescan
+              ? (pull ? "Pull & rescan " + (projectName || "project") : "Rescan " + (projectName || "project"))
+              : "Add repositories to " + (projectName || "project")}</h2>
           <button className="modal-close" onClick={() => onClose && onClose()} disabled={busy} title="Close">✕</button>
         </div>
 
@@ -3051,32 +3175,44 @@ function IngestionModal({ mode, pid, projectName, onComplete, onClose }) {
             </label>
           )}
 
-          <label className="field">
-            <span className="field-label">Git repository URLs ({validUrls.length})</span>
-            <div className="url-list">
-              {urls.map((u, i) => (
-                <div className="url-row" key={i}>
-                  <input
-                    className="text-input mono"
-                    type="text"
-                    placeholder="https://github.com/org/repo.git"
-                    value={u}
-                    onChange={(e) => setUrlAt(i, e.target.value)}
-                    disabled={busy}
-                  />
-                  {urls.length > 1 && (
-                    <button className="url-remove" onClick={() => removeRow(i)} disabled={busy} title="Remove">✕</button>
-                  )}
-                </div>
-              ))}
-            </div>
-            <button className="btn-link" onClick={addRow} disabled={busy}>+ add another repo</button>
-          </label>
+          {!isRescan && (
+            <label className="field">
+              <span className="field-label">Git repository URLs ({validUrls.length})</span>
+              <div className="url-list">
+                {urls.map((u, i) => (
+                  <div className="url-row" key={i}>
+                    <input
+                      className="text-input mono"
+                      type="text"
+                      placeholder="https://github.com/org/repo.git"
+                      value={u}
+                      onChange={(e) => setUrlAt(i, e.target.value)}
+                      disabled={busy}
+                    />
+                    {urls.length > 1 && (
+                      <button className="url-remove" onClick={() => removeRow(i)} disabled={busy} title="Remove">✕</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <button className="btn-link" onClick={addRow} disabled={busy}>+ add another repo</button>
+            </label>
+          )}
 
-          <p className="muted small">
-            Repos are cloned (shallow) and analysed together so cross-service links are detected.
-            {!isCreate && " The project is re-analysed as a whole when you add a repo."}
-          </p>
+          {!isRescan && (
+            <p className="muted small">
+              Repos are cloned (shallow) and analysed together so cross-service links are detected.
+              {!isCreate && " The project is re-analysed as a whole when you add a repo."}
+            </p>
+          )}
+
+          {isRescan && (
+            <p className="muted small">
+              {pull
+                ? "Stale repositories are re-cloned to their latest commit, then the whole project is re-analysed."
+                : "Re-extracts the graph from the current source on disk — no download. Use this after the engine itself changes."}
+            </p>
+          )}
 
           {(status === "running" || status === "done" || status === "error") && (
             <div className="ingest-log">
@@ -3099,14 +3235,27 @@ function IngestionModal({ mode, pid, projectName, onComplete, onClose }) {
         </div>
 
         <div className="modal-foot">
-          <button className="btn-ghost" onClick={() => onClose && onClose()} disabled={busy}>Cancel</button>
-          <button
-            className="btn-primary"
-            onClick={submit}
-            disabled={busy || validUrls.length === 0 || (isCreate && !(name || "").trim())}
-          >
-            {busy ? "Importing…" : isCreate ? "Create & import" : "Add & re-analyse"}
-          </button>
+          {isRescan ? (
+            <button
+              className="btn-primary"
+              onClick={() => onClose && onClose()}
+              disabled={busy}
+              title={busy ? "Scan in progress…" : "Close"}
+            >
+              {busy ? "Scanning…" : status === "error" ? "Close" : "Done · Close"}
+            </button>
+          ) : (
+            <>
+              <button className="btn-ghost" onClick={() => onClose && onClose()} disabled={busy}>Cancel</button>
+              <button
+                className="btn-primary"
+                onClick={submit}
+                disabled={busy || validUrls.length === 0 || (isCreate && !(name || "").trim())}
+              >
+                {busy ? "Importing…" : isCreate ? "Create & import" : "Add & re-analyse"}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

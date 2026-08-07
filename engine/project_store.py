@@ -242,24 +242,50 @@ class ProjectStore:
 
     # ── ingestion ──────────────────────────────────────────────────
 
-    def clone_repo(
-        self,
-        pid: str,
-        url: str,
-        log: Callable[[str], None] = lambda _msg: None,
-    ) -> dict:
-        """Clone a single git URL into the project's ``repos/`` dir.
+    # ── git helpers ────────────────────────────────────────────────
 
-        Returns the repo source record ``{name, source, path}``.
-        Raises ``RuntimeError`` if the clone fails.
+    @staticmethod
+    def _current_commit(repo_dir: Path) -> Optional[str]:
+        """Return the short-ish HEAD sha of a cloned repo, or ``None``."""
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True, timeout=20,
+            )
+            return out.stdout.strip() or None
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+    @staticmethod
+    def _remote_head(url: str) -> tuple[Optional[str], Optional[str]]:
+        """Resolve the remote's current HEAD sha *without downloading*.
+
+        Uses ``git ls-remote <url> HEAD`` (no checkout). Returns
+        ``(sha, error)`` — exactly one is set. Used for stale detection.
         """
-        url = _validate_url(url)
-        repo_name = self._unique_repo_name(pid, repo_name_from_url(url))
-        dest = self.repos_dir(pid) / _safe_repo_dirname(repo_name)
+        try:
+            out = subprocess.run(
+                ["git", "ls-remote", url, "HEAD"],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.CalledProcessError as e:
+            tail = (e.stderr or "").strip().splitlines()
+            return None, tail[-1] if tail else f"git exited {e.returncode}"
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return None, f"ls-remote failed: {e}"
+        first = out.stdout.splitlines()[0].split() if out.stdout.splitlines() else []
+        return (first[0] if first else None), None
+
+    def _git_clone(self, url: str, dest: Path, log: Callable[[str], None], name: str) -> Optional[str]:
+        """Shallow-clone ``url`` into ``dest`` (replacing it), return its commit.
+
+        Shared by ``clone_repo`` (new repo, unique name) and ``pull_repos``
+        (refresh in place at the same path). Raises ``RuntimeError`` on failure.
+        """
         if dest.exists():
             shutil.rmtree(dest, ignore_errors=True)
 
-        log(f"[clone] Cloning {repo_name} ← {url}")
+        log(f"[clone] Cloning {name} ← {url}")
         try:
             subprocess.run(
                 ["git", "clone", "--depth", "1", url, str(dest)],
@@ -271,12 +297,30 @@ class ProjectStore:
         except subprocess.CalledProcessError as e:
             err = (e.stderr or e.stdout or "").strip().splitlines()
             tail = err[-1] if err else f"git exited {e.returncode}"
-            raise RuntimeError(f"Clone failed for {repo_name}: {tail}") from None
+            raise RuntimeError(f"Clone failed for {name}: {tail}") from None
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"Clone timed out for {repo_name}") from None
+            raise RuntimeError(f"Clone timed out for {name}") from None
 
-        log(f"[clone] {repo_name} ready at {dest}")
-        return {"name": repo_name, "source": url, "path": str(dest)}
+        commit = self._current_commit(dest)
+        log(f"[clone] {name} ready at {dest}" + (f" @ {commit[:8]}" if commit else ""))
+        return commit
+
+    def clone_repo(
+        self,
+        pid: str,
+        url: str,
+        log: Callable[[str], None] = lambda _msg: None,
+    ) -> dict:
+        """Clone a single git URL into the project's ``repos/`` dir.
+
+        Returns the repo source record ``{name, source, path, commit}``.
+        Raises ``RuntimeError`` if the clone fails.
+        """
+        url = _validate_url(url)
+        repo_name = self._unique_repo_name(pid, repo_name_from_url(url))
+        dest = self.repos_dir(pid) / _safe_repo_dirname(repo_name)
+        commit = self._git_clone(url, dest, log, repo_name)
+        return {"name": repo_name, "source": url, "path": str(dest), "commit": commit}
 
     def analyze_project(
         self,
@@ -356,6 +400,84 @@ class ProjectStore:
         meta.setdefault("repos", []).append(record)
         meta["updated_at"] = _now()
         self._upsert(meta)
+
+    # ── change detection + sync ────────────────────────────────────
+
+    def check_updates(self, pid: str) -> list[dict]:
+        """Ask each tracked repo's remote whether HEAD moved, *without* pulling.
+
+        Compares the commit recorded at clone time against ``git ls-remote
+        <url> HEAD``. No source is downloaded, so this is cheap and safe to
+        poll. Repos ingested as ``local:`` (legacy seed) have no remote and
+        are skipped. Returns one entry per remote-backed repo::
+
+            {name, source, current_commit, remote_commit, stale, error}
+        """
+        meta = self.get_project(pid)
+        if not meta:
+            raise ValueError(f"Unknown project: {pid}")
+
+        out: list[dict] = []
+        for r in meta.get("repos", []):
+            source = r.get("source", "")
+            if source.startswith("local:"):
+                continue  # no remote to query
+            remote, err = self._remote_head(source)
+            current = r.get("commit")
+            entry = {
+                "name": r.get("name"),
+                "source": source,
+                "current_commit": current,
+                "remote_commit": remote,
+                "stale": bool(remote) and remote != current,
+                "error": err,
+            }
+            out.append(entry)
+        return out
+
+    def pull_repos(
+        self,
+        pid: str,
+        only_stale: bool = True,
+        log: Callable[[str], None] = lambda _msg: None,
+    ) -> dict:
+        """Re-clone tracked repos to their latest commit, then return meta.
+
+        With ``only_stale=True`` (default) only repos whose remote HEAD moved
+        are re-fetched; unchanged repos are left untouched. Each refreshed repo
+        is re-cloned in place at its existing path and its recorded ``commit``
+        is updated. This does *not* re-analyse — call ``analyze_project`` after
+        to regenerate the graph. Local-seed repos (``local:``) are skipped.
+        """
+        meta = self.get_project(pid)
+        if not meta:
+            raise ValueError(f"Unknown project: {pid}")
+
+        stale_names: Optional[set] = None
+        if only_stale:
+            try:
+                stale_names = {u["name"] for u in self.check_updates(pid) if u["stale"]}
+            except Exception:
+                stale_names = None  # can't determine → refresh all remote repos
+
+        refreshed = 0
+        for r in meta.get("repos", []):
+            source = r.get("source", "")
+            if source.startswith("local:"):
+                continue
+            if stale_names is not None and r.get("name") not in stale_names:
+                continue
+            dest = Path(r["path"])
+            try:
+                r["commit"] = self._git_clone(source, dest, log, r.get("name", "?"))
+                refreshed += 1
+            except (RuntimeError, ValueError) as e:
+                log(f"[clone] {e}")
+
+        meta["updated_at"] = _now()
+        self._upsert(meta)
+        log(f"[clone] Synced {refreshed} repo(s) to latest.")
+        return meta
 
     def mark_status(self, pid: str, status: str, message: str = "") -> None:
         """Set a project's status (``analyzing`` / ``ready`` / ``error``)."""

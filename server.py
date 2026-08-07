@@ -230,8 +230,12 @@ async def add_project_repos(pid: str, req: RepoIngestRequest):
 
 
 def _ingest_response(pid: str, urls: list[str]):
+    return _stream_response(_ingest_stream(pid, urls))
+
+
+def _stream_response(gen):
     return StreamingResponse(
-        _ingest_stream(pid, urls),
+        gen,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -241,16 +245,22 @@ def _ingest_response(pid: str, urls: list[str]):
     )
 
 
-async def _ingest_stream(pid: str, urls: list[str]):
-    """Run project ingestion on a worker thread, surfacing events as SSE."""
+async def _sse_run(pid: str, produce):
+    """Run a project job on a worker thread, surfacing events as SSE.
+
+    ``produce(log)`` does the work (clone/scan/analyse) on a background
+    thread, calling ``log(msg)`` for each progress line, and returns the
+    updated project metadata. Emits the same event schema the UI already
+    consumes for ingestion: ``log`` / ``done`` / ``error``.
+    """
     q: "queue.Queue" = queue.Queue()
     SENTINEL = object()
 
-    def _produce():
+    def _worker():
         try:
             def _log(msg: str):
                 q.put({"type": "log", "phase": _classify_log(msg), "message": msg})
-            meta = PROJECT_STORE.ingest(pid, list(urls), log=_log)
+            meta = produce(_log)
             q.put({"type": "done", "project": meta})
         except Exception as e:
             PROJECT_STORE.mark_error(pid, str(e))
@@ -258,13 +268,59 @@ async def _ingest_stream(pid: str, urls: list[str]):
         finally:
             q.put(SENTINEL)
 
-    threading.Thread(target=_produce, daemon=True).start()
+    threading.Thread(target=_worker, daemon=True).start()
     loop = asyncio.get_running_loop()
     while True:
         ev = await loop.run_in_executor(None, q.get)
         if ev is SENTINEL:
             break
         yield "data: " + json.dumps(ev) + "\n\n"
+
+
+async def _ingest_stream(pid: str, urls: list[str]):
+    """Run project ingestion on a worker thread, surfacing events as SSE."""
+    produce = lambda log: PROJECT_STORE.ingest(pid, list(urls), log=log)
+    async for chunk in _sse_run(pid, produce):
+        yield chunk
+
+
+@app.post("/api/projects/{pid}/rescan")
+async def rescan_project(pid: str, pull: bool = False):
+    """Re-analyse a project's existing clones and stream the logs.
+
+    With ``pull=false`` (default) this re-extracts the graph from the *current*
+    on-disk source with no network — the right call after the engine logic
+    changes. With ``pull=true`` it first re-fetches any repos whose remote HEAD
+    has moved (shallow re-clone of stale repos only), then re-analyses.
+    """
+    _load_project(pid)
+    PROJECT_STORE.mark_status(pid, "analyzing")
+
+    def produce(log):
+        if pull:
+            log("[clone] Syncing repositories to latest…")
+            PROJECT_STORE.pull_repos(pid, only_stale=True, log=log)
+        log("[scan] Re-scanning repositories…")
+        return PROJECT_STORE.analyze_project(pid, log=log)
+
+    return _stream_response(_sse_run(pid, produce))
+
+
+@app.get("/api/projects/{pid}/updates")
+async def project_updates(pid: str):
+    """Check whether any tracked repo's remote has moved (no download).
+
+    Returns ``{repos: [...], stale_count, total}`` where each repo entry is
+    ``{name, source, current_commit, remote_commit, stale, error}``. Cheap to
+    poll (``git ls-remote``, no checkout). Local-seed repos are excluded.
+    """
+    _load_project(pid)
+    repos = PROJECT_STORE.check_updates(pid)
+    return {
+        "repos": repos,
+        "total": len(repos),
+        "stale_count": sum(1 for r in repos if r["stale"]),
+    }
 
 
 # ── AI proxy endpoints ─────────────────────────────────────────────

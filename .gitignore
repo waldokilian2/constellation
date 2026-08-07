@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+output/graph.json
+output/real-repo-graph.json
+tests/repos/sample-spring-kafka-microservices/

@@ -26,8 +26,12 @@ Open **http://localhost:8765** in your browser.
 The startup script will:
 1. Create a Python virtual environment (if missing)
 2. Install dependencies (if missing)
-3. Generate `graph.json` from the test repos (if missing)
+3. Generate the demo graphs from the bundled test repos (if missing)
 4. Start the server
+
+On first load the server seeds two demo projects:
+- **Spring Boot** — `order-service`, `fulfillment-service`, `notification-service` (Spring Messaging / REST / Kafka / RabbitMQ)
+- **Java EE** — `java-ee-order-service`, `java-ee-fulfillment-service`, `java-ee-notification-service` (JAX-RS, JMS MDB, CDI, EJB, WebSocket, Spring `@Scheduled`/`@MessageMapping`) with real cross-repo links
 
 ### Requirements
 
@@ -48,20 +52,35 @@ Scans for framework-specific annotations and patterns:
 | `@RabbitListener(queues = "name")` | RabbitMQ Consumer | Spring AMQP |
 | `@KafkaListener(topics = "name")` | Kafka Consumer | Spring Kafka |
 | `@JmsListener(destination = "name")` | JMS Consumer | Spring JMS |
+| `@RocketMQMessageListener(topic = "name")` | Kafka-style Consumer | RocketMQ |
+| `@StreamListener(value = "name")` | Kafka-style Consumer | Spring Cloud Stream |
 | `@GetMapping`, `@PostMapping`, etc. | REST Endpoint | Spring Web |
 | `@RequestMapping` (class-level prefix) | REST Endpoint | Spring Web |
-| `@EventListener` | Event Listener | Spring Events |
+| `@EventListener` / `@TransactionalEventListener` | Event Listener | Spring Events |
+| `@Scheduled` | Scheduled Task | Spring |
+| `@MessageMapping` / `@SubscribeMapping` | WebSocket / STOMP | Spring Messaging |
+| `@Path` + `@GET`/`@POST`/… | REST Endpoint | JAX-RS (Jakarta EE) |
+| `@MessageDriven` + `activationConfig` | JMS MDB consumer | Jakarta EE |
+| `@Observes` (parameter) | Event Listener | CDI |
+| `@Schedule` / `@Schedules` | Scheduled Task | EJB |
+| `@ServerEndpoint` + `@OnMessage`/`@OnOpen`/… | WebSocket endpoint | Jakarta WebSocket |
+
+Channels are resolved through the symbol index: string literals, `Class.CONST` / bare constant
+references, `${...}` placeholders (from `application.properties`/`.yml`), and `#{...}` SpEL
+(dynamic — preserved for display). Array arguments (`topics = {"a", "b"}`) produce one entry
+point per element.
 
 ### Producer Detection
 
-Finds message producers by matching method calls:
+Finds message producers by matching the **declared field type** of the receiver (not the variable name — a plain `template.send(...)` no longer false-matches):
 
-| Pattern | Type |
-|---------|------|
-| `rabbitTemplate.convertAndSend("queue", ...)` | RabbitMQ Producer |
-| `kafkaTemplate.send("topic", ...)` / `template.send(...)` | Kafka Producer |
-| `jmsTemplate.convertAndSend(...)` | JMS Producer |
-| `applicationEventPublisher.publishEvent(...)` | Event Publisher |
+| Declared field type | Producing methods | Type |
+|---------------------|-------------------|------|
+| `KafkaTemplate` | `send(...)` | Kafka Producer |
+| `RabbitTemplate` / `AmqpTemplate` | `convertAndSend(...)`, `send(...)` | RabbitMQ Producer |
+| `JmsTemplate` | `convertAndSend(...)`, `send(...)` | JMS Producer |
+| `ApplicationEventPublisher` | `publishEvent(...)` | Event Publisher |
+| `StreamBridge` | `send(...)` | Cloud Stream (broker-agnostic) |
 
 ### Cross-Repo Message Flow
 
@@ -90,14 +109,17 @@ When an API key is configured, the web UI provides a conversational AI assistant
 ```
 constellation/
 ├── engine/                         # Deterministic analysis engine
-│   ├── parser.py                   #   tree-sitter Java AST wrapper
-│   ├── entry_detector.py           #   Spring annotation + producer scanner
+│   ├── parser.py                   #   tree-sitter Java AST wrapper + structural helpers
+│   ├── java_index.py               #   repo-wide symbol index (type-aware resolution)
+│   ├── entry_detector.py           #   Spring + Java EE annotation + producer scanner
 │   ├── call_graph.py               #   BFS call tree builder (depth-limited)
 │   ├── cross_repo.py               #   Queue/topic name matcher
 │   ├── context_builder.py          #   Builds AI system prompts from graph data
 │   ├── graph_tools.py              #   8 query functions (shared by all interfaces)
 │   ├── mcp_server.py               #   MCP stdio server for coding agents
 │   ├── models.py                   #   Data classes
+│   ├── paths.py                    #   Safe, root-confined source path resolution
+│   ├── project_store.py            #   Multi-project index, git-clone ingestion
 │   └── constellation.py            #   CLI orchestrator
 │
 ├── server.py                       # FastAPI web server + REST API
@@ -107,17 +129,22 @@ constellation/
 │   └── styles.css
 │
 ├── tests/repos/                    # Sample Java microservice repos
-│   ├── order-service/              #   REST + RabbitMQ producer + event listener
-│   ├── fulfillment-service/        #   RabbitMQ consumer + Kafka producer
-│   ├── notification-service/       #   Kafka + RabbitMQ consumers
-│   ├── java-ee-order-service/      #   Java EE demo — app1: REST, @MessageMapping,
-│   │   java-ee-fulfillment-service/  #     @Scheduled; producers → order-events
-│   │   java-ee-notification-service/ #   Java EE demo — app2/3: MDB, CDI, EJB, WebSocket;
-│   │                               #     consumers ↔ producers (cross-repo links)
+│   ├── order-service/              #   Spring Boot demo: REST + RabbitMQ producer + event listener
+│   ├── fulfillment-service/        #   Spring Boot demo: RabbitMQ consumer + Kafka producer
+│   ├── notification-service/       #   Spring Boot demo: Kafka + RabbitMQ consumers
+│   ├── java-ee-order-service/      #   Java EE demo (app1): JAX-RS, @MessageMapping,
+│   │                               #     @Scheduled; producers → order-events
+│   ├── java-ee-fulfillment-service/ #   Java EE demo (app2): JMS MDB, array-topics Kafka;
+│   │                               #     producer → shipment-events
+│   ├── java-ee-notification-service/ #   Java EE demo (app3): CDI @Observes, EJB @Schedule,
+│   │                               #     WebSocket @ServerEndpoint; Kafka consumer
 │   └── sample-spring-kafka-microservices/  # Real cloned repo (3 services)
 │
-├── output/                         # Generated graphs
+├── output/                         # Generated graphs + project store (gitignored)
 │   ├── graph.json                  #   Spring Boot demo graph (test repos)
+│   ├── graph-java-ee.json          #   Java EE demo graph (cross-repo links)
+│   ├── projects.json               #   Multi-project index
+│   └── projects/<pid>/             #   Per-project: graph.json + cloned repos/
 │
 ├── start.sh                        # Linux/macOS startup
 ├── start.bat                       # Windows startup
@@ -145,40 +172,60 @@ The graph tools are pure functions in `engine/graph_tools.py`. They're exposed t
 
 ### 1. Web UI
 
-Three zoom levels:
+Projects list, then per-project zoom levels:
 
 | View | What You See |
 |------|-------------|
-| **Galaxy** | All repos as clusters, message channels as curved connections with channel names |
+| **Projects** | All ingested projects (each is its own graph — e.g. "Spring Boot", "Java EE") |
+| **Galaxy** | All repos in the project as clusters, message channels as curved connections with channel names |
 | **Solar System** | Entry points in a repo as stars (sized by complexity, colored by type) |
 | **Path** | Call tree for one entry point — the full execution chain from request to response |
 | **Detail Panel** | Source code with line highlighting, relationships, and AI chat |
 
 ### 2. REST API
 
+All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (the legacy flat `/api/graph`, `/api/tools/*`, `/api/ai/*` routes were replaced):
+
 ```bash
-# List all tools
-curl http://localhost:8765/api/tools
+# List projects
+curl http://localhost:8765/api/projects
+
+# List tools for a project (pid comes from the projects list)
+curl http://localhost:8765/api/projects/<pid>/tools
 
 # Search the codebase
-curl "http://localhost:8765/api/tools/search?q=OrderService"
+curl "http://localhost:8765/api/projects/<pid>/tools/search?q=OrderService"
 
 # Find all callers of a method
-curl "http://localhost:8765/api/tools/callers?method=save"
+curl "http://localhost:8765/api/projects/<pid>/tools/callers?method=save"
 
 # Get message channel flow
-curl "http://localhost:8765/api/tools/channel/order-events"
+curl "http://localhost:8765/api/projects/<pid>/tools/channel/order-events"
 
 # Architecture overview
-curl http://localhost:8765/api/tools/overview
+curl http://localhost:8765/api/projects/<pid>/tools/overview
 
 # Trace a path between two methods
-curl "http://localhost:8765/api/tools/trace?from_method=createOrder&to_method=save"
+curl "http://localhost:8765/api/projects/<pid>/tools/trace?from_method=createOrder&to_method=save"
 
 # Execute any tool via POST
-curl -X POST http://localhost:8765/api/tools/find_callers \
+curl -X POST http://localhost:8765/api/projects/<pid>/tools/find_callers \
   -H "Content-Type: application/json" \
   -d '{"method_name": "save"}'
+```
+
+Projects can also be created/via API (UI-driven ingestion clones git repos):
+
+```bash
+# Create a project from one or more git URLs
+curl -X POST http://localhost:8765/api/projects \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Stack", "repos": ["https://github.com/me/a.git", "https://github.com/me/b.git"]}'
+
+# Add a repo to an existing project
+curl -X POST http://localhost:8765/api/projects/<pid>/repos \
+  -H "Content-Type: application/json" \
+  -d '{"repos": ["https://github.com/me/c.git"]}'
 ```
 
 ### 3. MCP Server (for coding agents)
@@ -231,34 +278,37 @@ Eight tools, shared across all three interfaces:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/graph` | Full graph data |
-| `GET` | `/api/graph/entry-points` | All entry points |
-| `GET` | `/api/graph/entry-point/{id}` | Single entry point |
-| `GET` | `/api/graph/cross-repo-links` | Cross-repo connections |
-| `GET` | `/api/graph/repos` | Repo summary |
-| `GET` | `/api/source?file_path=X` | Source file contents |
-| `POST` | `/api/analyze` | Re-run engine on new repo paths |
+| `GET` | `/api/projects` | List projects |
+| `GET` | `/api/projects/{pid}` | Project metadata |
+| `POST` | `/api/projects` | Create project from git URLs (streams `[clone]/[scan]/[link]`) |
+| `POST` | `/api/projects/{pid}/repos` | Add repos to a project |
+| `POST` | `/api/projects/{pid}/rescan` | Re-run the engine on the project |
+| `GET` | `/api/projects/{pid}/updates` | Upstream change detection (stale repos) |
+| `DELETE` | `/api/projects/{pid}` | Delete a project |
+| `GET` | `/api/projects/{pid}/graph` | Full graph data |
+| `GET` | `/api/projects/{pid}/source?file_path=X` | Source file contents |
 
 ### AI Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/ai/chat` | Conversational chat with tool-use (structured context) |
-| `POST` | `/api/ai/explain` | Legacy single-call endpoint |
+| `POST` | `/api/projects/{pid}/ai/chat` | Conversational chat with tool-use (structured context) |
+| `POST` | `/api/projects/{pid}/ai/chat/stream` | Streaming SSE variant (token + tool-call events) |
+| `POST` | `/api/projects/{pid}/ai/explain` | Legacy single-call endpoint |
 | `GET` | `/api/ai/models` | Available LLM models |
 
 ### Tool Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/tools` | List all tools + schemas |
-| `POST` | `/api/tools/{name}` | Execute any tool with JSON args |
-| `GET` | `/api/tools/search?q=X` | Quick search |
-| `GET` | `/api/tools/callers?method=X` | Find callers |
-| `GET` | `/api/tools/channels` | List channels |
-| `GET` | `/api/tools/channel/{name}` | Channel flow |
-| `GET` | `/api/tools/overview` | Architecture summary |
-| `GET` | `/api/tools/trace?from_method=X&to_method=Y` | Path trace |
+| `GET` | `/api/projects/{pid}/tools` | List all tools + schemas |
+| `POST` | `/api/projects/{pid}/tools/{name}` | Execute any tool with JSON args |
+| `GET` | `/api/projects/{pid}/tools/search?q=X` | Quick search |
+| `GET` | `/api/projects/{pid}/tools/callers?method=X` | Find callers |
+| `GET` | `/api/projects/{pid}/tools/channels` | List channels |
+| `GET` | `/api/projects/{pid}/tools/channel/{name}` | Channel flow |
+| `GET` | `/api/projects/{pid}/tools/overview` | Architecture summary |
+| `GET` | `/api/projects/{pid}/tools/trace?from_method=X&to_method=Y` | Path trace |
 
 ---
 
@@ -290,16 +340,17 @@ Source Code (.java files)
         ▼
   tree-sitter AST parsing        ← deterministic, no LLM
         │
-        ├──→ Annotation scan     ← finds @RabbitListener, @GetMapping, etc.
-        ├──→ Producer scan       ← finds convertAndSend(), send(), publishEvent()
+        ├──→ Symbol index        ← one pass: classes, imports, fields, methods, config (java_index.py)
+        ├──→ Annotation scan     ← Spring + Java EE: @RabbitListener, @GetMapping, JAX-RS, MDB, CDI, EJB, WS
+        ├──→ Producer scan       ← by declared field type (KafkaTemplate, RabbitTemplate, …)
         ├──→ Call tree build     ← BFS through method invocations, depth-limited
-        └──→ Channel matching    ← string comparison of queue/topic names
+        └──→ Channel matching    ← literals, constants, ${} placeholders → cross-repo links
         │
         ▼
-    graph.json
+    graph.json (per project)
         │
-        ├──→ Web UI             ← galaxy → solar system → path → detail
-        ├──→ REST API           ← /api/tools/* endpoints
+        ├──→ Web UI             ← projects → galaxy → solar system → path → detail
+        ├──→ REST API           ← /api/projects/{pid}/tools/* endpoints
         ├──→ MCP Server         ← stdio JSON-RPC for coding agents
         └──→ AI Context         ← structured system prompt + tool-use loop
 ```
@@ -319,6 +370,7 @@ Every relationship in the graph is tagged with confidence:
 |----------|---------|-------------|
 | `CONSTELLATION_PORT` | `8765` | Web server port |
 | `CONSTELLATION_GRAPH` | `output/graph.json` | Graph file path (MCP server) |
+| `CONSTELLATION_API_TOKEN` | — | Optional bearer token; API is open when unset |
 | `OPENAI_API_KEY` | — | API key for AI features |
 | `OPENAI_BASE_URL` | `https://api.openai.com` | OpenAI-compatible base URL |
 | `OPENAI_MODEL` | `nemotron-3-ultra-free` | Default model |
@@ -343,31 +395,35 @@ Every relationship in the graph is tagged with confidence:
 ## Roadmap
 
 ### In Progress
-- **Import-aware call resolution** — resolve calls using Java import statements for accurate targeting
 - **Python language support** — FastAPI entry detector + tree-sitter-python
-- **API key hardening** — `.env` file support, no env var exports needed
+- **Local-variable type tracking** — chained calls currently stay `INFERRED`
+- **Overload resolution by parameter types** — only arity matching today
 
 ### Planned
 - TypeScript/Express, Go, C# language support
 - Apache Camel DSL route detection
+- `@Bean` / Spring Cloud Stream consumer discovery
+- Java EE SOAP (`@WebService`) and Servlets (`@WebServlet`, `HttpServlet` overrides)
 - Dynamic queue name resolution (config + concatenation)
 - Agent tool-use for Anthropic API format
-- Streaming AI responses (SSE)
 
 ---
 
 ## Limitations (Honest)
 
 **What works well:**
-- Java Spring Boot annotation-based detection (RabbitMQ, Kafka, JMS, REST, Events)
-- Producer/consumer cross-repo linking via channel name matching
+- Java Spring + Java EE / Jakarta annotation detection (RabbitMQ, Kafka, JMS, REST, JAX-RS, Events, CDI, EJB, WebSocket, Scheduled)
+- Producers matched by declared field type (no variable-name false positives)
+- Cross-repo linking via channel names — literals, `Class.CONST`, `${...}` config placeholders
+- Import-aware call resolution with interface→impl linking
 - Call tree extraction to depth 4 with cycle prevention
 - Confidence tagging (`EXTRACTED` vs `INFERRED`)
 
 **What doesn't work yet:**
-- Dynamic dispatch (interface method → which implementation?) — follows most common match
-- Cross-file call resolution without imports — uses name matching (can produce false positives)
+- Local-variable type tracking (chained calls stay `INFERRED`)
+- Overload resolution by parameter *types* (arity only)
 - Apache Camel DSL routes, manual `channel.basicConsume`
+- `@Bean`/Cloud Stream consumer discovery, Java EE SOAP + Servlets
 - Non-Java languages (Python/TypeScript/Go support planned)
 - True data flow / taint analysis (this is call-graph, not data-flow)
 

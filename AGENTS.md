@@ -14,7 +14,10 @@ The **core analysis is deterministic** — every relationship is read from sourc
 - Runtime deps (installed ad hoc by the startup scripts — **there is no `requirements.txt` / `pyproject.toml`**):
   - `tree-sitter`, `tree-sitter-java` (AST parsing)
   - `fastapi`, `uvicorn` (web server)
-- **No test suite.** `tests/` contains only sample Java repos used as analysis input (`tests/repos/{order-service,fulfillment-service,notification-service}`). There are no `test_*.py` files.
+- **Test suite: stdlib-only.** `tests/run_tests.py` discovers and runs `tests/test_*.py`
+  modules (no pytest, no deps — run `python tests/run_tests.py`). `tests/repos/` holds sample
+  Java repos used as analysis input (`tests/repos/{order-service,fulfillment-service,notification-service}`
+  plus `java-ee-*`).
 - Frontend is **React 18 via CDN + Babel standalone** — there is **no build step and no `package.json`**. Do not introduce a bundler without a strong reason.
 - LLM calls use stdlib `urllib` only (no `requests`/`httpx`). Keep it that way — adding an HTTP dep is a regression against the "no extra deps" convention.
 
@@ -81,10 +84,11 @@ The app is **multi-project**: each project is an isolated collection of repos wi
 
 1. **Ingest** — the UI creates a project (`POST /api/projects`, git URLs) or adds repos to one (`POST /api/projects/{pid}/repos`). `engine/project_store.py` shallow-clones each repo into `output/projects/<pid>/repos/`, then re-runs the engine over the project's full repo set (cross-repo linking needs all repos together), streaming `[clone]/[scan]/[link]` progress over SSE.
 2. **Parse** — `entry_detector.py` scans `*.java` files (skipping `/test/` and `*Test*` paths), using `parser.py` to find annotated methods and producer call patterns.
-3. **Index & link** — methods are indexed for call resolution; `cross_repo.py` links producers to consumers by matching channel names.
+3. **Index** — methods are indexed for import-aware call resolution.
 4. **Call trees** — `call_graph.py` builds a depth-limited (MAX_DEPTH=4, MAX_NODES=50) BFS tree per entry point, resolving each invocation to a definition and tagging confidence.
-5. **Serialize** — `constellation.py` assembles a `ConstellationGraph` → the project's `graph.json` with `repo_roots` for safe path resolution.
-6. **Serve** — `server.py` serves each project's graph via **project-scoped** REST + AI endpoints (`/api/projects/{pid}/...`); the single legacy `/api/graph` returns the first ready project. `mcp_server.py` loads a graph file directly for MCP.
+5. **Cross-repo links (two passes)** — `cross_repo.py` pass 1 matches async producers→consumers by exact channel name; pass 2 matches `HTTP_CALL` producers (Feign/RestTemplate/WebClient/HttpClient/etc.) to REST endpoints by **normalized path template** (`/api/orders/123` ≡ `/api/orders/{id}`), cross-repo only, producing `kind:"http"` links with an HTTP `verb`. HTTP links render as solid mint edges in the galaxy view; flows view stays message-only by design.
+6. **Serialize** — `constellation.py` assembles a `ConstellationGraph` → the project's `graph.json` with `repo_roots` for safe path resolution.
+7. **Serve** — `server.py` serves each project's graph via **project-scoped** REST + AI endpoints (`/api/projects/{pid}/...`); the single legacy `/api/graph` returns the first ready project. `mcp_server.py` loads a graph file directly for MCP.
 
 ## Confidence Tags (important for correctness)
 
@@ -121,6 +125,8 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
 
 ## Roadmap Context (README)
 
+- Shipped (PR #9, 2026-08-08): **sync HTTP inter-service call detection** — `HTTP_CALL`
+  producer type, two-pass linker with normalized-path matching, solid mint galaxy edges.
 - In progress: import-aware call resolution, Python (FastAPI) support, `.env`/API-key hardening.
 - Planned: TypeScript/Express, Go, C#; Apache Camel DSL; dynamic queue-name resolution; Anthropic tool-use; SSE streaming.
 

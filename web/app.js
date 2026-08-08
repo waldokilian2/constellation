@@ -356,6 +356,10 @@ function Legend() {
           {TYPE_META[k].label}
         </div>
       ))}
+      <div className="legend-item">
+        <span className="legend-line" style={{ background: "#00e0a8" }}></span>
+        Sync HTTP call
+      </div>
       <div className="legend-hint">Click a repo to zoom in</div>
     </div>
   );
@@ -584,7 +588,11 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
         const key = pr + ">>" + cr + "|" + link.channel;
         if (seen.has(key)) return;
         seen.add(key);
-        out.push({ from: pr, to: cr, channel: link.channel });
+        out.push({
+          from: pr, to: cr, channel: link.channel,
+          kind: link.kind || "message",
+          verb: link.verb || "",
+        });
       }));
     });
     return out;
@@ -638,15 +646,19 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
             const a = posMap[e.from], b = posMap[e.to];
             if (!a || !b) return null;
             const g = edgeGeom(a, b);
-            const pillW = e.channel.length * 6.5 + 22;
+            const isHttp = e.kind === "http";
+            const label = isHttp && e.verb ? (e.verb + " " + e.channel) : e.channel;
+            const pillW = label.length * 6.5 + 22;
             const pillH = 20;
             return (
-              <g className="edge" key={i}>
-                <path d={g.path} fill="none" stroke="#00d4ff" strokeWidth="1.6" opacity="0.5" markerEnd="url(#arrow)"></path>
+              <g className={"edge" + (isHttp ? " edge-http" : "")} key={i}>
+                <path d={g.path} fill="none" stroke={isHttp ? "#00e0a8" : "#00d4ff"}
+                      strokeWidth={isHttp ? 2.2 : 1.6}
+                      opacity={isHttp ? 0.95 : 0.5} markerEnd="url(#arrow)"></path>
                 <g className="edge-label-pill" transform={"translate(" + g.mid.x + "," + g.mid.y + ")"}>
-                  <rect className="edge-label-glow" x={-pillW / 2 - 4} y={-pillH / 2 - 4} width={pillW + 8} height={pillH + 8} rx={(pillH + 8) / 2}></rect>
-                  <rect className="edge-label-bg" x={-pillW / 2} y={-pillH / 2} width={pillW} height={pillH} rx={pillH / 2}></rect>
-                  <text className="edge-label" x={0} y={0} dominantBaseline="central" textAnchor="middle">{e.channel}</text>
+                  <rect className={isHttp ? "edge-label-glow http" : "edge-label-glow"} x={-pillW / 2 - 4} y={-pillH / 2 - 4} width={pillW + 8} height={pillH + 8} rx={(pillH + 8) / 2}></rect>
+                  <rect className={isHttp ? "edge-label-bg http" : "edge-label-bg"} x={-pillW / 2} y={-pillH / 2} width={pillW} height={pillH} rx={pillH / 2}></rect>
+                  <text className="edge-label" x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
             );

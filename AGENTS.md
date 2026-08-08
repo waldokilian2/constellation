@@ -62,8 +62,11 @@ web/                 # React CDN frontend (no build step)
 tests/repos/         # sample Java microservices (input data, not tests)
   order-service / fulfillment-service / notification-service
                      #   Spring Boot demo repos (seeded as the "Spring Boot" project)
-  java-ee-service/   #   Java EE / Jakarta annotations demo (JAX-RS, MDB, CDI, EJB,
-                     #   WebSocket, @Scheduled, @MessageMapping) — seeded as "Java EE"
+  java-ee-order-service / java-ee-fulfillment-service / java-ee-notification-service
+                     #   Java EE / Jakarta annotations demo (JAX-RS, MDB, CDI, EJB,
+                     #   WebSocket, @Scheduled, @MessageMapping) across THREE repos
+                     #   with cross-repo links (order-events, shipment-events) —
+                     #   seeded as "Java EE"
 output/              # graphs + project store (gitignored)
   graph.json         # legacy single-graph (start.sh seed; imported as "Spring Boot")
   graph-java-ee.json # Java EE test graph (start.sh seed; imported as "Java EE")

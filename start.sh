@@ -99,10 +99,12 @@ if [ ! -f "output/graph.json" ] || [ ! -f "output/graph-java-ee.json" ] || [ "$1
                     --output output/graph.json 2>&1 | grep -v RuntimeWarning
             fi
             # Second demo project: Java EE / Jakarta annotations coverage.
-            if [ -d "tests/repos/java-ee-service" ] && [ ! -f "output/graph-java-ee.json" ]; then
-                echo "   Analyzing java-ee-service (Java EE annotations)..."
+            if [ -d "tests/repos/java-ee-order-service" ]; then
+                echo "   Analyzing java-ee services (Java EE annotations)..."
                 python -m engine.constellation \
-                    tests/repos/java-ee-service \
+                    tests/repos/java-ee-order-service \
+                    tests/repos/java-ee-fulfillment-service \
+                    tests/repos/java-ee-notification-service \
                     --output output/graph-java-ee.json 2>&1 | grep -v RuntimeWarning
             fi
         elif [ -d "tests/repos/sample-spring-kafka-microservices" ]; then

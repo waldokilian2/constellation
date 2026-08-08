@@ -126,7 +126,9 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
 ## Roadmap Context (README)
 
 - Shipped (PR #9, 2026-08-08): **sync HTTP inter-service call detection** — `HTTP_CALL`
-  producer type, two-pass linker with normalized-path matching, solid mint galaxy edges.
+  producer type, two-pass linker with normalized-path matching, solid mint galaxy edges,
+  same-pair edge fan-out, REST entry points carry their real HTTP verb (`method_type`,
+  e.g. `GET /api/fulfillment/status/{orderId}`).
 - In progress: import-aware call resolution, Python (FastAPI) support, `.env`/API-key hardening.
 - Planned: TypeScript/Express, Go, C#; Apache Camel DSL; dynamic queue-name resolution; Anthropic tool-use; SSE streaming.
 

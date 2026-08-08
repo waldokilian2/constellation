@@ -76,7 +76,7 @@ fi
 echo -e "${GREEN}✓${NC} Dependencies ready"
 
 # ── Generate graph.json if missing ────────────────────────────────
-if [ ! -f "output/graph.json" ] || [ "$1" != "" ]; then
+if [ ! -f "output/graph.json" ] || [ ! -f "output/graph-java-ee.json" ] || [ "$1" != "" ]; then
     echo -e "${YELLOW}→${NC} Analyzing codebase..."
 
     if [ "$1" != "" ]; then
@@ -90,12 +90,21 @@ if [ ! -f "output/graph.json" ] || [ "$1" != "" ]; then
     else
         # Default: use built-in test repos
         if [ -d "tests/repos/order-service" ]; then
-            echo "   Using built-in test repos..."
-            python -m engine.constellation \
-                tests/repos/order-service \
-                tests/repos/fulfillment-service \
-                tests/repos/notification-service \
-                --output output/graph.json 2>&1 | grep -v RuntimeWarning
+            if [ ! -f "output/graph.json" ]; then
+                echo "   Using built-in test repos..."
+                python -m engine.constellation \
+                    tests/repos/order-service \
+                    tests/repos/fulfillment-service \
+                    tests/repos/notification-service \
+                    --output output/graph.json 2>&1 | grep -v RuntimeWarning
+            fi
+            # Second demo project: Java EE / Jakarta annotations coverage.
+            if [ -d "tests/repos/java-ee-service" ] && [ ! -f "output/graph-java-ee.json" ]; then
+                echo "   Analyzing java-ee-service (Java EE annotations)..."
+                python -m engine.constellation \
+                    tests/repos/java-ee-service \
+                    --output output/graph-java-ee.json 2>&1 | grep -v RuntimeWarning
+            fi
         elif [ -d "tests/repos/sample-spring-kafka-microservices" ]; then
             echo "   Using sample-spring-kafka-microservices..."
             python -m engine.constellation \

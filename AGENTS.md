@@ -60,8 +60,13 @@ web/                 # React CDN frontend (no build step)
   styles.css         # SVG + CSS visualization styles
   mock_server.py     # static in-memory backend for frontend dev
 tests/repos/         # sample Java microservices (input data, not tests)
+  order-service / fulfillment-service / notification-service
+                     #   Spring Boot demo repos (seeded as the "Spring Boot" project)
+  java-ee-service/   #   Java EE / Jakarta annotations demo (JAX-RS, MDB, CDI, EJB,
+                     #   WebSocket, @Scheduled, @MessageMapping) — seeded as "Java EE"
 output/              # graphs + project store (gitignored)
-  graph.json         # legacy single-graph (start.sh seed; imported as "Default")
+  graph.json         # legacy single-graph (start.sh seed; imported as "Spring Boot")
+  graph-java-ee.json # Java EE test graph (start.sh seed; imported as "Java EE")
   projects.json      # multi-project index
   projects/<pid>/    # per-project: graph.json + cloned repos/
 start.sh / start.bat # bootstrap + server launchers
@@ -69,7 +74,7 @@ start.sh / start.bat # bootstrap + server launchers
 
 ## How Data Flows
 
-The app is **multi-project**: each project is an isolated collection of repos with its own graph (`output/projects/<pid>/graph.json`); projects have no relationship to each other. On first load, a pre-existing legacy `output/graph.json` is imported once as a "Default" project (`ProjectStore.ensure_legacy_seed`).
+The app is **multi-project**: each project is an isolated collection of repos with its own graph (`output/projects/<pid>/graph.json`); projects have no relationship to each other. On first load, pre-existing legacy graphs are imported once as named projects — `output/graph.json` → "Spring Boot" and `output/graph-java-ee.json` → "Java EE" (`ProjectStore.ensure_legacy_seed`).
 
 1. **Ingest** — the UI creates a project (`POST /api/projects`, git URLs) or adds repos to one (`POST /api/projects/{pid}/repos`). `engine/project_store.py` shallow-clones each repo into `output/projects/<pid>/repos/`, then re-runs the engine over the project's full repo set (cross-repo linking needs all repos together), streaming `[clone]/[scan]/[link]` progress over SSE.
 2. **Parse** — `entry_detector.py` scans `*.java` files (skipping `/test/` and `*Test*` paths), using `parser.py` to find annotated methods and producer call patterns.

@@ -498,16 +498,30 @@ class ProjectStore:
 
     # ── legacy seeding ─────────────────────────────────────────────
 
+    # Legacy single-graph files (pre-multi-project) that get imported once as
+    # named projects on first load. ``start.sh`` regenerates these.
+    LEGACY_SEEDS: list[tuple[str, str]] = [
+        ("graph.json", "Spring Boot"),
+        ("graph-java-ee.json", "Java EE"),
+    ]
+
     def ensure_legacy_seed(self) -> None:
-        """Import a pre-multi-project ``output/graph.json`` as a "Default" project.
+        """Import legacy single-graph files as named projects on first load.
 
         Keeps the existing demo/start.sh workflow working on first load: the
-        seeded project points at the legacy graph's repo_roots (local test
+        seeded projects point at the legacy graphs' repo_roots (local test
         repos), so source reads keep resolving. Runs only when the index is
         empty and a legacy graph is present.
         """
-        legacy = self.output_dir / "graph.json"
-        if not legacy.exists() or self.list_projects():
+        if self.list_projects():
+            return
+
+        for fname, project_name in self.LEGACY_SEEDS:
+            self._seed_legacy_graph(fname, project_name)
+
+    def _seed_legacy_graph(self, fname: str, project_name: str) -> None:
+        legacy = self.output_dir / fname
+        if not legacy.exists():
             return
 
         try:
@@ -520,14 +534,14 @@ class ProjectStore:
             {"name": name, "source": f"local:{path}", "path": path}
             for name, path in repo_roots.items()
         ]
-        pid = self._new_id("Default")
+        pid = self._new_id(project_name)
         pdir = self.project_dir(pid)
         pdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(legacy, self.graph_path(pid))
 
         meta = {
             "id": pid,
-            "name": "Default",
+            "name": project_name,
             "created_at": graph.get("generated_at") or _now(),
             "updated_at": _now(),
             "repos": repos,

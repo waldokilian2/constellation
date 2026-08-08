@@ -119,9 +119,23 @@ function computeRevealOffset(containerRef, layout, selectedNode, viewport) {
   }
   const chat = document.querySelector(".global-chat.open .chat-window");
   if (chat) {
-    const cr = chat.getBoundingClientRect();
-    clearRight = Math.min(clearRight, cr.left - crect.left - 16);
-    clearBottom = Math.min(clearBottom, cr.top - crect.top - 16);
+    // Same settled-position trick as the panel: the window animates in with
+    // chatSlideUp (translateY + scale 0.95) and the wrapper <transition>s
+    // right, so getBoundingClientRect() mid-animation under-reports edges.
+    // Derive the window's settled box from constants instead:
+    //   wrapper is fixed at bottom:24px, right:24px — or right: calc(panel + 24px)
+    //   when .detail-open (desktop only; mobile forces right:24 via media query).
+    const wrap = chat.closest(".global-chat");
+    const ww = chat.offsetWidth || chat.getBoundingClientRect().width;
+    const wh = chat.offsetHeight || chat.getBoundingClientRect().height;
+    let wrapRight = 24;
+    if (panel && wrap && wrap.classList.contains("detail-open") && window.innerWidth > 720) {
+      wrapRight = (panel.offsetWidth || 460) + 24;
+    }
+    const settledChatLeft = window.innerWidth - wrapRight - ww;
+    const settledChatTop = window.innerHeight - 24 - wh;
+    clearRight = Math.min(clearRight, settledChatLeft - crect.left - 16);
+    clearBottom = Math.min(clearBottom, settledChatTop - crect.top - 16);
   }
 
   let dx = 0, dy = 0;
@@ -849,7 +863,7 @@ const PV_NODE_H = 110;  // estimated height including toggle footer
 const PV_HSPACE = 340;  // horizontal distance between depth levels
 const PV_VGAP = 50;     // vertical gap between sibling nodes
 
-function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNode }) {
+function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNode, chatOpen }) {
   const tree = entryPoint.call_tree;
 
   // Outbound channels for this entry point
@@ -904,7 +918,7 @@ function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNod
       setViewport(nv);
       setTimeout(() => setAnimating(false), 400);
     }
-  }, [selectedNode]); // eslint-disable-line
+  }, [selectedNode, chatOpen]); // eslint-disable-line
 
   const toggleExpand = (path) => {
     setExpanded((prev) => {
@@ -1699,7 +1713,7 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
 
 /* ---------------- Flows Mode: Flow Trace View ---------------- */
 // Path equivalent — shows a repo's trace within a specific flow
-function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, selectedNode }) {
+function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, selectedNode, chatOpen }) {
   // Find this repo's step(s) in the flow
   const steps = useMemo(() => {
     const found = [];
@@ -1875,7 +1889,7 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
       setViewport(nv);
       setTimeout(() => setAnimating(false), 400);
     }
-  }, [selectedNode]); // eslint-disable-line
+  }, [selectedNode, chatOpen]); // eslint-disable-line
 
   const onMouseDown = (e) => {
     if (e.target.closest(".tree-node") || e.target.closest(".exit-point")) return;
@@ -2063,8 +2077,7 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
 
 
 /* ---------------- Global Chat Widget (unified, context-aware) ---------------- */
-function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, pid }) {
-  const [open, setOpen] = useState(false);
+function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, pid, open, onOpenChange }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -2353,7 +2366,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, 
     <div className={"global-chat" + (open ? " open" : "") + (detailOpen ? " detail-open" : "")}>
       {/* Collapsed: floating button */}
       {!open && (
-        <button className="chat-fab" onClick={() => setOpen(true)} aria-label="Open chat">
+        <button className="chat-fab" onClick={() => onOpenChange(true)} aria-label="Open chat">
           <span className="chat-fab-icon">✦</span>
           {messages.length > 0 && (
             <span className="chat-fab-badge">{messages.length}</span>
@@ -2383,7 +2396,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, 
                   {models.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               )}
-              <button className="chat-window-close" onClick={() => setOpen(false)}>✕</button>
+              <button className="chat-window-close" onClick={() => onOpenChange(false)}>✕</button>
             </div>
           </div>
 
@@ -2535,6 +2548,7 @@ function App() {
   const [mode, setMode] = useState("topology"); // "topology" | "flows"
   const [flows, setFlows] = useState([]);
   const [selectedNode, setSelectedNode] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
   const [dims, setDims] = useState({ w: window.innerWidth, h: window.innerHeight });
   // Zoom-drill transition: {x,y} = node center in viewport px, phase in|out
   const [zoomFx, setZoomFx] = useState(null);
@@ -2734,6 +2748,7 @@ function App() {
                 onBack={() => setView({ name: "solar", repo: ep.repo })}
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
+                chatOpen={chatOpen}
               />
             </div>
           );
@@ -2785,6 +2800,7 @@ function App() {
                 onBack={() => setView({ name: "flow", flowId: flow.id })}
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
+                chatOpen={chatOpen}
               />
             </div>
           );
@@ -2827,6 +2843,8 @@ function App() {
         selectedNode={selectedNode}
         flows={flows}
         pid={activeId}
+        open={chatOpen}
+        onOpenChange={setChatOpen}
         entryPoint={(() => {
           if (view.name === "path") return graph.entry_points.find((e) => e.id === view.entryId);
           if (view.name === "flowTrace") {

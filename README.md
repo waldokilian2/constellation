@@ -110,11 +110,13 @@ constellation/
 │   ├── order-service/              #   REST + RabbitMQ producer + event listener
 │   ├── fulfillment-service/        #   RabbitMQ consumer + Kafka producer
 │   ├── notification-service/       #   Kafka + RabbitMQ consumers
+│   ├── java-ee-service/            #   Java EE / Jakarta annotations (JAX-RS, MDB,
+│   │                               #   CDI @Observes, EJB @Schedule, WebSocket,
+│   │                               #   @Scheduled, @MessageMapping, field-type producers)
 │   └── sample-spring-kafka-microservices/  # Real cloned repo (3 services)
 │
 ├── output/                         # Generated graphs
-│   ├── graph.json                  #   Default graph (test repos)
-│   └── real-repo-graph.json        #   Real repo graph
+│   ├── graph.json                  #   Spring Boot demo graph (test repos)
 │
 ├── start.sh                        # Linux/macOS startup
 ├── start.bat                       # Windows startup

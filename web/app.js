@@ -410,15 +410,36 @@ function detectFlows(graph) {
   function publishesChannels(entryPoint) {
     const channels = new Set();
     const repo = entryPoint.repo;
-    const method = entryPoint.method || "";
-    const cls = entryPoint.class_name || "";
-    const fullMethod = cls && method ? (cls + "." + method) : method;
     // Producer id format: "repo:ClassName.method:publishMethod"
     const repoProds = channelByProducerRepo[repo] || [];
+
+    // Collect every class.method reachable from the entry (root + call tree),
+    // so producers invoked through beans/services chain up too.
+    const reachableMethods = new Set();
+    const rootMethod = [entryPoint.class_name, entryPoint.method].filter(Boolean).join(".");
+    if (rootMethod) reachableMethods.add(rootMethod);
+    const tree = entryPoint.call_tree;
+    if (tree && typeof tree === "object") {
+      const stack = [tree];
+      while (stack.length) {
+        const node = stack.pop();
+        if (!node) continue;
+        if (typeof node.method === "string" && node.method) {
+          // Resolved nodes name the class; unresolved use receiver.method — keep both forms.
+          reachableMethods.add(node.method);
+          const mName = node.method.split(".").pop();
+          if (node.class_name && mName) reachableMethods.add(node.class_name + "." + mName);
+        }
+        if (Array.isArray(node.children)) stack.push(...node.children);
+      }
+    }
+
     repoProds.forEach((rp) => {
-      // Match on full "ClassName.method" to avoid false positives from class-only matching
-      const matchTarget = rp.producerId.split(":")[1] || ""; // "ClassName.method" part
-      if (matchTarget === fullMethod || matchTarget.startsWith(fullMethod + ":")) {
+      // "ClassName.method" part of the producer id
+      const matchTarget = rp.producerId.split(":")[1] || "";
+      // Match the producer method exactly, or any call-tree node that
+      // resolves to that class.method (walked transitively by the engine).
+      if (reachableMethods.has(matchTarget)) {
         channels.add(rp.channel);
       }
     });

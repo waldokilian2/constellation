@@ -108,8 +108,14 @@ function computeRevealOffset(containerRef, layout, selectedNode, viewport) {
 
   const panel = document.querySelector(".detail-panel");
   if (panel) {
-    const pr = panel.getBoundingClientRect();
-    clearRight = Math.min(clearRight, pr.left - crect.left - 16);
+    // .detail-panel is position:fixed; right:0, but animates in with `panelIn`
+    // (translateX(40px -> 0)). Reading getBoundingClientRect() mid-animation
+    // overstates pr.left by up to ~40px, so the first nudge comes up short and
+    // a second click later fixes it. Use the SETTLED left instead: viewport
+    // width minus the panel's own width (== its right:0 resting position).
+    const pw = panel.offsetWidth || panel.getBoundingClientRect().width;
+    const settledLeft = window.innerWidth - pw;
+    clearRight = Math.min(clearRight, settledLeft - crect.left - 16);
   }
   const chat = document.querySelector(".global-chat.open .chat-window");
   if (chat) {

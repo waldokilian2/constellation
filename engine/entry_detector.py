@@ -235,7 +235,7 @@ class EntryPointDetector:
 
         return entries, producers
 
-    def _make_entry(self, ci, node, m_name, channel, ep_type, msg_type="") -> EntryPoint:
+    def _make_entry(self, ci, node, m_name, channel, ep_type, msg_type="", method_type="") -> EntryPoint:
         """Construct an EntryPoint (channel already resolved)."""
         ch = channel or "unknown"
         suffix = f":{ch}" if ch and ch != "unknown" else ""
@@ -249,6 +249,7 @@ class EntryPointDetector:
             file=ci.file,
             line=node.start_point[0] + 1,
             message_type=msg_type,
+            method_type=method_type,
         )
 
     def _ee_entries(self, ci, m_node, m_name, annotations, params_ann, jaxrs_prefix, ee_ws_path):
@@ -269,7 +270,7 @@ class EntryPointDetector:
                 channel = self._join_rest_path(jaxrs_prefix, method_path)
             else:
                 channel = jaxrs_prefix or "unknown"
-            out.append(self._make_entry(ci, m_node, m_name, self.index.resolve_channel(channel, ci), EntryPointType.REST_ENDPOINT))
+            out.append(self._make_entry(ci, m_node, m_name, self.index.resolve_channel(channel, ci), EntryPointType.REST_ENDPOINT, method_type=verb))
             return out
 
         # CDI event observer: a parameter annotated @Observes → channel = event type.
@@ -316,7 +317,7 @@ class EntryPointDetector:
         out: list[EntryPoint] = []
         args = self.parser.get_annotation_args(ann)
 
-        def make(channel: str, ep_type: EntryPointType, msg_type: str = "") -> None:
+        def make(channel: str, ep_type: EntryPointType, msg_type: str = "", method_type: str = "") -> None:
             ch = self.index.resolve_channel(channel, ci) or "unknown"
             if ep_type == EntryPointType.REST_ENDPOINT and path_prefix:
                 ch = self._join_rest_path(path_prefix, ch)
@@ -330,12 +331,15 @@ class EntryPointDetector:
                 file=ci.file,
                 line=m_node.start_point[0] + 1,
                 message_type=msg_type or (params[0]["type"] if params else ""),
+                method_type=method_type,
             ))
 
         msg_type = params[0]["type"] if params else ""
 
         if ann_name in REST_ANN:
             # REST: value/path keys (may be an array → one endpoint each).
+            # method_type = the HTTP verb, e.g. GET/POST/PUT/DELETE/PATCH.
+            verb = REST_VERB_BY_ANN.get(ann_name, "")
             chans: list[str] = []
             for k in REST_PATH_KEYS:
                 if k in args:
@@ -344,7 +348,7 @@ class EntryPointDetector:
             if not chans:
                 chans = ["unknown"]
             for c in chans:
-                make(c, REST_ANN[ann_name])
+                make(c, REST_ANN[ann_name], method_type=verb)
             return out
 
         if ann_name in CONSUMER_ANN:

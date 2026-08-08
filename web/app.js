@@ -505,7 +505,7 @@ function detectFlows(graph) {
       name = entry.method || entry.id.split(":").pop();
       // Convert camelCase to Title Case
       name = name.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase()).trim();
-      originLabel = "POST " + (entry.channel || "");
+      originLabel = ((entry.method_type || "POST") + " ") + (entry.channel || "");
     } else {
       name = entry.channel || entry.method || "External Event";
       originLabel = entry.channel || "";

@@ -62,6 +62,7 @@ class EntryPoint:
     file: str
     line: int
     message_type: str = ""  # parameter type (e.g., "OrderMessage")
+    method_type: str = ""  # HTTP verb for REST endpoints (e.g., "GET", "POST"); "" when n/a
     call_tree: Optional[CallNode] = None
     metrics: dict = field(default_factory=dict)
 
@@ -76,6 +77,7 @@ class EntryPoint:
             "file": self.file,
             "line": self.line,
             "message_type": self.message_type,
+            "method_type": self.method_type,
             "call_tree": self.call_tree.to_dict() if self.call_tree else None,
             "metrics": self.metrics,
         }

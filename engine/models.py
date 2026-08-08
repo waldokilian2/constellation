@@ -25,6 +25,7 @@ class ProducerType(Enum):
     KAFKA_PRODUCER = "kafka-producer"
     JMS_PRODUCER = "jms-producer"
     EVENT_PUBLISHER = "event-publisher"
+    HTTP_CALL = "http-call"  # sync HTTP request (Feign/RestTemplate/WebClient/...)
     UNKNOWN = "unknown"
 
 
@@ -107,16 +108,20 @@ class Producer:
 
 @dataclass
 class CrossRepoLink:
-    """A connection between two repos via a shared message channel."""
+    """A connection between two repos via a shared message channel or HTTP call."""
     channel: str
     producers: list[str] = field(default_factory=list)  # producer IDs
     consumers: list[str] = field(default_factory=list)  # entry point IDs
+    kind: str = "message"  # "message" | "http"
+    verb: str = ""         # HTTP method when kind == "http" and known
 
     def to_dict(self) -> dict:
         return {
             "channel": self.channel,
             "producers": self.producers,
             "consumers": self.consumers,
+            "kind": self.kind,
+            "verb": self.verb,
         }
 
 

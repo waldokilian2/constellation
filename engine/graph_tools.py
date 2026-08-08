@@ -460,6 +460,8 @@ def list_channels(graph: dict) -> dict:
         ))
         channels.append({
             "channel": channel,
+            "kind": link.get("kind", "message"),
+            "verb": link.get("verb", ""),
             "producer_repos": prod_repos,
             "consumer_repos": cons_repos,
             "producer_count": len(link.get("producers", [])),

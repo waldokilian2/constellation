@@ -580,6 +580,7 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
   const edges = useMemo(() => {
     const out = [];
     const seen = new Set();
+    const pairCount = {};
     links.forEach((link) => {
       const pRepos = Array.from(new Set((link.producers || []).map(repoFromId)));
       const cRepos = Array.from(new Set((link.consumers || []).map(repoFromId)));
@@ -588,25 +589,46 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
         const key = pr + ">>" + cr + "|" + link.channel;
         if (seen.has(key)) return;
         seen.add(key);
+        const pairKey = pr + ">>" + cr;
+        pairCount[pairKey] = (pairCount[pairKey] || 0) + 1;
         out.push({
           from: pr, to: cr, channel: link.channel,
           kind: link.kind || "message",
           verb: link.verb || "",
+          pairKey,
         });
       }));
+    });
+    // Index each edge within its from→to pair so multiples can fan out
+    const pairIndex = {};
+    out.forEach((e) => {
+      pairIndex[e.pairKey] = pairIndex[e.pairKey] || 0;
+      e.pairIndex = pairIndex[e.pairKey]++;
+      e.pairCount = pairCount[e.pairKey];
     });
     return out;
   }, [graph]);
 
-  const edgeGeom = (a, b) => {
+  const edgeGeom = (a, b, opts = {}) => {
     const GAP = 3; // uniform clearance at both orb edges
+    const EDGE_SEP = 60; // perpendicular fan distance between same-pair edges
     const dx = b.x - a.x, dy = b.y - a.y;
     const d = Math.hypot(dx, dy) || 1;
     const ux = dx / d, uy = dy / d;
     const start = { x: a.x + ux * (a.r + GAP), y: a.y + uy * (a.r + GAP) };
     const end = { x: b.x - ux * (b.r + GAP), y: b.y - uy * (b.r + GAP) };
     const bend = Math.min(130, d * 0.26);
-    const c = { x: (start.x + end.x) / 2 - uy * bend, y: (start.y + end.y) / 2 + ux * bend };
+    let c = { x: (start.x + end.x) / 2 - uy * bend, y: (start.y + end.y) / 2 + ux * bend };
+    // Fan same-pair edges apart along the perpendicular of the a→b axis.
+    // Shift the WHOLE curve (start/end/control) so parallel edges never cross.
+    const total = opts.pairCount || 1, index = opts.pairIndex || 0;
+    const off = (index - (total - 1) / 2) * EDGE_SEP;
+    if (off !== 0) {
+      const ox = -uy * off, oy = ux * off;
+      start.x += ox; start.y += oy;
+      end.x += ox; end.y += oy;
+      c.x += ox; c.y += oy;
+    }
     const mid = {
       x: 0.25 * start.x + 0.5 * c.x + 0.25 * end.x,
       y: 0.25 * start.y + 0.5 * c.y + 0.25 * end.y,
@@ -645,7 +667,7 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
           {edges.map((e, i) => {
             const a = posMap[e.from], b = posMap[e.to];
             if (!a || !b) return null;
-            const g = edgeGeom(a, b);
+            const g = edgeGeom(a, b, { pairIndex: e.pairIndex, pairCount: e.pairCount });
             const isHttp = e.kind === "http";
             const label = isHttp && e.verb ? (e.verb + " " + e.channel) : e.channel;
             const pillW = label.length * 6.5 + 22;

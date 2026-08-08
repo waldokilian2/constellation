@@ -110,9 +110,10 @@ constellation/
 │   ├── order-service/              #   REST + RabbitMQ producer + event listener
 │   ├── fulfillment-service/        #   RabbitMQ consumer + Kafka producer
 │   ├── notification-service/       #   Kafka + RabbitMQ consumers
-│   ├── java-ee-service/            #   Java EE / Jakarta annotations (JAX-RS, MDB,
-│   │                               #   CDI @Observes, EJB @Schedule, WebSocket,
-│   │                               #   @Scheduled, @MessageMapping, field-type producers)
+│   ├── java-ee-order-service/      #   Java EE demo — app1: REST, @MessageMapping,
+│   │   java-ee-fulfillment-service/  #     @Scheduled; producers → order-events
+│   │   java-ee-notification-service/ #   Java EE demo — app2/3: MDB, CDI, EJB, WebSocket;
+│   │                               #     consumers ↔ producers (cross-repo links)
 │   └── sample-spring-kafka-microservices/  # Real cloned repo (3 services)
 │
 ├── output/                         # Generated graphs

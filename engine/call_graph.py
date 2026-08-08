@@ -1,18 +1,18 @@
 """
 Call graph builder — traces execution paths from entry points.
 
-For each entry point, walks the method body, finds all method invocations,
-and resolves them to their definitions in the codebase. Recurses up to
-MAX_DEPTH levels deep.
-
-The output is a tree per entry point showing the full execution chain.
+For each entry point, walks the method body, finds all method invocations, and
+resolves them to their definitions using the type-aware :class:`JavaIndex`
+(field type + interface→impl + import-aware). Recurses up to MAX_DEPTH levels
+deep, tagging each edge with a confidence level.
 """
 from __future__ import annotations
 from typing import Optional
 from tree_sitter import Node
 
 from .parser import JavaParser
-from .models import EntryPoint, CallNode, ClassMethod
+from .java_index import JavaIndex, ClassInfo
+from .models import EntryPoint, CallNode
 
 
 MAX_DEPTH = 4
@@ -22,59 +22,43 @@ MAX_NODES = 50  # Safety valve — don't build infinite trees
 class CallGraphBuilder:
     """Builds execution path trees from entry points."""
 
-    def __init__(self, methods: list[ClassMethod]):
-        """
-        Args:
-            methods: All indexed methods in the codebase, used for resolution.
-        """
-        self.parser = JavaParser()
-        self.method_index = self._build_index(methods)
-
-    def _build_index(self, methods: list[ClassMethod]) -> dict[str, list[ClassMethod]]:
-        """
-        Build a lookup index: method_name → list of matching ClassMethods.
-        Multiple classes may have a method with the same name (overloads,
-        interface implementations).
-        """
-        index: dict[str, list[ClassMethod]] = {}
-        for m in methods:
-            if m.name not in index:
-                index[m.name] = []
-            index[m.name].append(m)
-        return index
+    def __init__(self, index: JavaIndex):
+        self.index = index
+        self.parser = index.parser
 
     def build_tree(
         self,
         entry_point: EntryPoint,
         entry_method_node: Node,
     ) -> CallNode:
-        """
-        Build a call tree starting from the entry point's method.
+        """Build a call tree starting from the entry point's method.
 
-        Uses iterative BFS with a visited set to prevent cycles.
+        Uses iterative BFS with a visited set (keyed on the *resolved target*)
+        to prevent cycles without merging same-named methods across classes.
         """
         visited: set[str] = set()
         node_count = 0
 
-        # Create root node
         root = CallNode(
             method=f"{entry_point.class_name}.{entry_point.method}",
             file=entry_point.file,
             line=entry_point.line,
             class_name=entry_point.class_name,
         )
-        visited.add(root.method)
+        visited.add(self._key(root.method, root.file, root.line))
         node_count += 1
 
-        # BFS worklist: (call_node, tree_node_to_attach_to, depth)
-        # We process the entry method first
+        enclosing_ci = self.index.class_by_loc(
+            entry_point.repo, entry_point.file, entry_point.class_name
+        )
+
         self._expand_node(
             node=entry_method_node,
             call_node=root,
             depth=0,
             visited=visited,
             node_count=[node_count],
-            enclosing_class=entry_point.class_name,
+            enclosing_ci=enclosing_ci,
         )
 
         return root
@@ -86,16 +70,16 @@ class CallGraphBuilder:
         depth: int,
         visited: set[str],
         node_count: list[int],
-        enclosing_class: str,
+        enclosing_ci: Optional[ClassInfo],
     ):
-        """
-        Recursively expand a method body, finding invocations and resolving them.
-        """
+        """Recursively expand a method body, finding invocations and resolving them."""
         if depth >= MAX_DEPTH:
             call_node.confidence = "EXTRACTED"
             return
         if node_count[0] >= MAX_NODES:
             call_node.confidence = "TRUNCATED"
+            return
+        if enclosing_ci is None:
             return
 
         body = self.parser.get_method_body(node)
@@ -111,40 +95,38 @@ class CallGraphBuilder:
             parsed = self.parser.parse_method_invocation(inv)
             method_name = parsed["method"]
             receiver = parsed["receiver"]
+            arity = len(parsed["args"])
 
-            # Build display name
-            if receiver:
-                display_name = f"{receiver}.{method_name}"
-            else:
-                display_name = method_name
+            if not method_name:
+                continue
 
-            # Skip trivial calls (System.out.println, etc.)
+            display_name = f"{receiver}.{method_name}" if receiver else method_name
+
+            # Skip trivial calls (System.out.println, getters/setters, …).
             if self._is_trivial(display_name):
                 continue
 
-            # Skip if already visited (cycle prevention)
-            if display_name in visited:
-                continue
-
-            visited.add(display_name)
-
-            # Try to resolve to a definition
-            resolved, ambiguous = self._resolve_call(
-                method_name, receiver, enclosing_class
+            resolved, ambiguous, _recv_type = self.index.resolve_call(
+                enclosing_ci, receiver, method_name, arity=arity
             )
 
             if resolved:
+                key = self._key(f"{resolved.class_simple}.{resolved.name}", resolved.file, resolved.line)
+                if key in visited:
+                    continue
+                visited.add(key)
+
                 child = CallNode(
                     method=display_name,
                     file=resolved.file,
                     line=resolved.line,
-                    class_name=resolved.class_name,
+                    class_name=resolved.class_simple,
                     confidence="AMBIGUOUS" if ambiguous else "EXTRACTED",
                 )
                 call_node.children.append(child)
                 node_count[0] += 1
 
-                # Recurse into resolved method
+                next_ci = self.index.class_for_method(resolved)
                 if resolved.node:
                     self._expand_node(
                         node=resolved.node,
@@ -152,10 +134,13 @@ class CallGraphBuilder:
                         depth=depth + 1,
                         visited=visited,
                         node_count=node_count,
-                        enclosing_class=resolved.class_name,
+                        enclosing_ci=next_ci,
                     )
             else:
-                # Unresolved — still record the call but mark it
+                # Unresolved — record the call but mark it inferred (no recursion).
+                if display_name in visited:
+                    continue
+                visited.add(display_name)
                 child = CallNode(
                     method=display_name,
                     confidence="INFERRED",
@@ -163,57 +148,9 @@ class CallGraphBuilder:
                 call_node.children.append(child)
                 node_count[0] += 1
 
-    def _resolve_call(
-        self,
-        method_name: str,
-        receiver: str,
-        enclosing_class: str,
-    ) -> tuple[Optional[ClassMethod], bool]:
-        """
-        Resolve a method call to its definition.
-
-        Returns ``(resolved, ambiguous)`` where ``ambiguous`` is True when the
-        call could not be uniquely resolved and we fell back to an arbitrary
-        candidate.
-
-        Strategy:
-        1. Try receiver name as a class name (static call)
-        2. Try receiver name as a field → guess its type from naming conventions
-        3. Try same-class method (no receiver or 'this')
-        4. Fall back to method name only (ambiguous)
-        """
-        candidates = self.method_index.get(method_name, [])
-
-        if not candidates:
-            return None, False
-
-        # Strategy 1: receiver matches a class name directly
-        if receiver:
-            for c in candidates:
-                # receiver "orderService" matches class "OrderService" or "orderService"
-                if (c.class_name == receiver or
-                    c.class_name.lower() == receiver.lower() or
-                    self._camel_to_class(receiver) == c.class_name):
-                    return c, False
-
-        # Strategy 2: same-class method
-        for c in candidates:
-            if c.class_name == enclosing_class:
-                return c, False
-
-        # Strategy 3: single candidate — use it
-        if len(candidates) == 1:
-            return candidates[0], False
-
-        # Strategy 4: multiple candidates, no clear winner — pick first, mark ambiguous
-        return candidates[0], True
-
     @staticmethod
-    def _camel_to_class(field_name: str) -> str:
-        """Convert camelCase field name to ClassName: orderService → OrderService."""
-        if not field_name:
-            return field_name
-        return field_name[0].upper() + field_name[1:]
+    def _key(method: str, file: str, line: int) -> str:
+        return f"{method}@{file}:{line}"
 
     @staticmethod
     def _is_trivial(method_name: str) -> bool:
@@ -238,7 +175,6 @@ class CallGraphBuilder:
         }
         parts = method_name.split(".")
         last = parts[-1]
-        # Filter getters/setters (getXxx, setXxx, isXxx) and trivial methods
         if last in trivial_exact:
             return True
         if last.startswith("get") and len(last) > 3:

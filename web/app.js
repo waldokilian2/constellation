@@ -9,10 +9,12 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect, useCallback } = R
 const repoFromId = (id) => (typeof id === "string" ? id.split(":")[0] : "");
 
 const TYPE_META = {
-  "rest-endpoint":     { color: "#ff4d6d", label: "REST",     glow: "rgba(255,77,109,.55)" },
-  "kafka-consumer":    { color: "#ffd60a", label: "Kafka",    glow: "rgba(255,214,10,.55)" },
-  "rabbitmq-consumer": { color: "#ff8c42", label: "RabbitMQ", glow: "rgba(255,140,66,.55)" },
-  "event-listener":    { color: "#4895ef", label: "Event",    glow: "rgba(72,149,239,.55)" },
+  "rest-endpoint":     { color: "#ff4d6d", label: "REST",      glow: "rgba(255,77,109,.55)" },
+  "kafka-consumer":    { color: "#ffd60a", label: "Kafka",     glow: "rgba(255,214,10,.55)" },
+  "rabbitmq-consumer": { color: "#ff8c42", label: "RabbitMQ",  glow: "rgba(255,140,66,.55)" },
+  "event-listener":    { color: "#4895ef", label: "Event",     glow: "rgba(72,149,239,.55)" },
+  "scheduled-task":    { color: "#34d399", label: "Scheduled", glow: "rgba(52,211,153,.55)" },
+  "websocket":         { color: "#a855f7", label: "WebSocket", glow: "rgba(168,85,247,.55)" },
 };
 const typeMeta = (t) => TYPE_META[t] || { color: "#94a3b8", label: (t || "Unknown"), glow: "rgba(148,163,184,.5)" };
 

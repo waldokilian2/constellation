@@ -99,48 +99,92 @@ class JavaParser:
         return []
 
     @staticmethod
+    def last_seg(scoped_or_text) -> str:
+        """Return the last segment of a dotted name (FQN → simple name)."""
+        t = scoped_or_text.text.decode() if hasattr(scoped_or_text, "text") else str(scoped_or_text)
+        return t.rsplit(".", 1)[-1] if "." in t else t
+
+    @staticmethod
     def get_annotation_name(annotation_node: Node) -> str:
-        """Extract the annotation name (without @)."""
-        # For both annotation and marker_annotation, the name is
-        # the first identifier child after @
+        """Extract the annotation name (without @), supporting FQN forms.
+
+        @KafkaListener           → "KafkaListener"
+        @org.springframework...KafkaListener → "KafkaListener"
+        """
         for child in annotation_node.children:
             if child.type == "identifier":
                 return child.text.decode()
+            if child.type == "scoped_identifier":
+                return JavaParser.last_seg(child)
         return ""
 
     @staticmethod
     def get_annotation_args(annotation_node: Node) -> dict:
         """
-        Extract annotation arguments as a dict.
-        Handles both key=value pairs and bare string values.
+        Extract annotation arguments as ``{key: [values]}``.
+
+        A value is always a list because some args are arrays
+        (``topics = {"a", "b"}``) and callers may create one entry point per
+        element.
 
         @RabbitListener(queues = "order-events")
-          -> {"queues": "order-events", "_raw": "order-events"}
-
-        @KafkaListener(topics = "payment-events")
-          -> {"topics": "payment-events", "_raw": "payment-events"}
-
-        @GetMapping("/api/users")
-          -> {"_raw": "/api/users"}
+          -> {"queues": ["order-events"], "_raw": ["order-events"]}
+        @KafkaListener(topics = {"a", "b"})
+          -> {"topics": ["a", "b"], "_raw": ["a", "b"]}
+        @GetMapping("/api/users")      -> {"_raw": ["/api/users"]}
+        @Scheduled(fixedRate = 5000)   -> {"fixedRate": ["5000"]}
         """
-        result = {}
+        result: dict[str, list[str]] = {}
+
+        def add(key: str, val: str):
+            if key:
+                result.setdefault(key, []).append(val)
+
+        def is_array(node: Node) -> bool:
+            return "array_initializer" in node.type
+
+        def collect_values(node: Node) -> list[str]:
+            vals = []
+            for c in node.children:
+                if c.type == "string_literal":
+                    vals.append(JavaParser._extract_string_value(c))
+                elif c.type in ("decimal_integer_literal", "decimal_floating_point_literal"):
+                    vals.append(c.text.decode())
+                elif is_array(c):
+                    vals.extend(collect_values(c))
+                elif c.type == "identifier":
+                    # enum constant / field reference (e.g. RequestMethod.POST)
+                    vals.append(c.text.decode())
+                elif c.type in ("true", "false"):
+                    vals.append(c.text.decode())
+            return vals
+
         for child in annotation_node.children:
-            if child.type == "annotation_argument_list":
-                for arg in child.children:
-                    if arg.type == "element_value_pair":
-                        # key = value form
-                        key = ""
-                        value = ""
-                        for pair_child in arg.children:
-                            if pair_child.type == "identifier":
-                                key = pair_child.text.decode()
-                            elif pair_child.type == "string_literal":
-                                value = JavaParser._extract_string_value(pair_child)
-                        if key:
-                            result[key] = value
-                    elif arg.type == "string_literal":
-                        # bare string value
-                        result["_raw"] = JavaParser._extract_string_value(arg)
+            if child.type != "annotation_argument_list":
+                continue
+            for arg in child.children:
+                if arg.type == "element_value_pair":
+                    key = ""
+                    vals: list[str] = []
+                    for pair_child in arg.children:
+                        if pair_child.type == "identifier" and not key:
+                            key = pair_child.text.decode()
+                        elif pair_child.type == "string_literal":
+                            vals.append(JavaParser._extract_string_value(pair_child))
+                        elif pair_child.type in ("decimal_integer_literal", "decimal_floating_point_literal"):
+                            vals.append(pair_child.text.decode())
+                        elif is_array(pair_child):
+                            vals.extend(collect_values(pair_child))
+                        elif pair_child.type == "identifier":
+                            vals.append(pair_child.text.decode())
+                    for v in vals:
+                        add(key, v)
+                        add("_raw", v)
+                elif arg.type == "string_literal":
+                    add("_raw", JavaParser._extract_string_value(arg))
+                elif is_array(arg):
+                    for v in collect_values(arg):
+                        add("_raw", v)
         return result
 
     @staticmethod
@@ -262,3 +306,229 @@ class JavaParser:
                 return JavaParser.get_class_name(current)
             current = current.parent
         return ""
+
+    # ── Structural helpers (type-aware detection) ──────────────────
+
+    @staticmethod
+    def get_package(root: Node) -> str:
+        """Package name as a dotted string (empty if default package)."""
+        for child in root.children:
+            if child.type == "package_declaration":
+                for cc in child.children:
+                    if cc.type in ("scoped_identifier", "identifier"):
+                        return cc.text.decode()
+        return ""
+
+    @staticmethod
+    def get_imports(root: Node) -> tuple[list[str], list[str]]:
+        """Return ``(explicit_fqns, wildcard_packages)``.
+
+        ``explicit_fqns`` are fully-qualified imported types; ``wildcard_packages``
+        are packages imported via ``import x.y.*`` (without the trailing ``.*``).
+        """
+        explicit: list[str] = []
+        wildcard: list[str] = []
+        for child in root.children:
+            if child.type != "import_declaration":
+                continue
+            text = child.text.decode()
+            fqn = ""
+            for cc in child.children:
+                if cc.type in ("scoped_identifier", "identifier") and not fqn:
+                    fqn = cc.text.decode()
+            if "*" in text and fqn:
+                wildcard.append(fqn)
+            elif fqn:
+                explicit.append(fqn)
+        return explicit, wildcard
+
+    @staticmethod
+    def find_types(root: Node) -> list[tuple[Node, str]]:
+        """Find all type declarations: (node, kind) where kind is class/interface/enum/record."""
+        results: list[tuple[Node, str]] = []
+
+        def walk(node: Node):
+            if node.type in ("class_declaration", "interface_declaration",
+                             "enum_declaration", "record_declaration"):
+                results.append((node, node.type.replace("_declaration", "")))
+            for child in node.children:
+                walk(child)
+
+        walk(root)
+        return results
+
+    @staticmethod
+    def get_type_name(node: Optional[Node]) -> str:
+        """Reduce a type node to its simple/raw type name.
+
+        ``KafkaTemplate<String, Object>`` → ``KafkaTemplate``;
+        ``com.acme.Foo`` → ``Foo``; ``String[]`` → ``String``.
+        """
+        if node is None:
+            return ""
+        t = node.type
+        if t == "generic_type":
+            for c in node.children:
+                if c.type in ("type_identifier", "scoped_identifier"):
+                    return JavaParser.get_type_name(c)
+            return ""
+        if t == "scoped_identifier":
+            return JavaParser.last_seg(node)
+        if t in ("type_identifier", "basic_type", "void_type"):
+            return node.text.decode()
+        if t == "array_type":
+            for c in node.children:
+                if c.type in ("type_identifier", "generic_type", "scoped_identifier", "basic_type"):
+                    return JavaParser.get_type_name(c)
+        # Fallback: first type-ish descendant.
+        for c in node.children:
+            if c.type in ("type_identifier", "generic_type", "scoped_identifier", "basic_type"):
+                return JavaParser.get_type_name(c)
+        return node.text.decode().strip()
+
+    @staticmethod
+    def get_supertypes(class_node: Node) -> list[str]:
+        """Simple names from ``extends`` and ``implements`` clauses."""
+        out: list[str] = []
+
+        def collect(clause: Node):
+            for c in clause.children:
+                if c.type in ("type_identifier", "generic_type", "scoped_identifier"):
+                    out.append(JavaParser.get_type_name(c))
+                elif c.type in ("type_list", "interface_type_list"):
+                    collect(c)
+
+        for child in class_node.children:
+            if child.type in ("superclass", "super_interfaces"):
+                collect(child)
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for s in out:
+            if s and s not in seen:
+                seen.add(s)
+                uniq.append(s)
+        return uniq
+
+    @staticmethod
+    def get_fields(class_node: Node) -> list[dict]:
+        """All field declarations in a class.
+
+        Returns ``[{name, type, is_static_final, const_value}]`` where
+        ``const_value`` is the string literal initializer of a
+        ``static final String`` constant (else ``None``).
+        """
+        fields: list[dict] = []
+
+        def walk(node: Node):
+            if node.type == "field_declaration":
+                fields.extend(JavaParser._parse_field(node))
+            for child in node.children:
+                walk(child)
+
+        walk(class_node)
+        return fields
+
+    @staticmethod
+    def _parse_field(field_node: Node) -> list[dict]:
+        type_name = ""
+        is_static_final = False
+        for c in field_node.children:
+            if c.type == "modifiers":
+                mods = c.text.decode().split()
+                if "static" in mods and "final" in mods:
+                    is_static_final = True
+            elif c.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier"):
+                type_name = JavaParser.get_type_name(c)
+        out: list[dict] = []
+        for c in field_node.children:
+            if c.type != "variable_declarator":
+                continue
+            name = ""
+            const: Optional[str] = None
+            for vc in c.children:
+                if vc.type == "identifier" and not name:
+                    name = vc.text.decode()
+                elif vc.type == "string_literal":
+                    const = JavaParser._extract_string_value(vc)
+            if name:
+                out.append({
+                    "name": name,
+                    "type": type_name,
+                    "is_static_final": is_static_final,
+                    "const_value": const,
+                })
+        return out
+
+    @staticmethod
+    def get_method_signature(method_node: Node) -> dict:
+        """``{name, param_types: [...], return_type}`` for overload resolution."""
+        name = ""
+        ret = ""
+        params: list[str] = []
+        for c in method_node.children:
+            if c.type == "identifier" and not name:
+                name = c.text.decode()
+            elif c.type in ("type_identifier", "generic_type", "basic_type", "void_type", "scoped_identifier"):
+                if not ret:
+                    ret = JavaParser.get_type_name(c)
+            elif c.type == "formal_parameters":
+                for pc in c.children:
+                    if pc.type != "formal_parameter":
+                        continue
+                    ptype = ""
+                    for fpc in pc.children:
+                        if fpc.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier"):
+                            if not ptype:
+                                ptype = JavaParser.get_type_name(fpc)
+                    if ptype:
+                        params.append(ptype)
+        return {"name": name, "param_types": params, "return_type": ret}
+
+    @staticmethod
+    def find_nested_annotations(annotation_node: Node) -> list[Node]:
+        """All annotation nodes nested inside an annotation (e.g. each
+        ``@ActivationConfigProperty`` inside ``@MessageDriven(activationConfig={...})``).
+
+        Does not include the annotation itself.
+        """
+        out: list[Node] = []
+
+        def walk(n: Node):
+            for c in n.children:
+                if c.type in ("annotation", "marker_annotation"):
+                    out.append(c)
+                else:
+                    walk(c)
+
+        walk(annotation_node)
+        return out
+
+    @staticmethod
+    def get_method_params_annotated(method_node: Node) -> list[dict]:
+        """Method params with their annotation names: ``[{name, type, annotations}]``.
+
+        Used for CDI ``@Observes`` (a parameter annotation) and ``@PathParam``.
+        """
+        out: list[dict] = []
+        for c in method_node.children:
+            if c.type != "formal_parameters":
+                continue
+            for pc in c.children:
+                if pc.type != "formal_parameter":
+                    continue
+                name = ""
+                ptype = ""
+                anns: list[str] = []
+                for fpc in pc.children:
+                    if fpc.type == "modifiers":
+                        for mc in fpc.children:
+                            if mc.type in ("annotation", "marker_annotation"):
+                                anns.append(JavaParser.get_annotation_name(mc))
+                    elif fpc.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier"):
+                        if not ptype:
+                            ptype = JavaParser.get_type_name(fpc)
+                    elif fpc.type == "identifier" and not name:
+                        name = fpc.text.decode()
+                if name or ptype:
+                    out.append({"name": name, "type": ptype, "annotations": anns})
+        return out

@@ -16,6 +16,7 @@ class EntryPointType(Enum):
     REST_ENDPOINT = "rest-endpoint"
     EVENT_LISTENER = "event-listener"
     SCHEDULED_TASK = "scheduled-task"
+    WEBSOCKET = "websocket"
     UNKNOWN = "unknown"
 
 

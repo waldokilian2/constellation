@@ -201,6 +201,16 @@ code { font-family: var(--mono); color: var(--cyan); }
   pointer-events: none;
 }
 .edge-label-pill { pointer-events: none; }
+.edge-label-bg.http {
+  stroke: rgba(0,224,168,.55);
+}
+.edge-label-glow.http {
+  fill: rgba(0,224,168,.14);
+  stroke: rgba(0,224,168,.25);
+}
+.edge-label.http {
+  fill: var(--mint, #00e0a8);
+}
 
 /* ---------- Galaxy view ---------- */
 .galaxy { height: 100%; }
@@ -301,6 +311,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 .legend-title { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 2px; }
 .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); }
 .legend-dot { width: 9px; height: 9px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
+.legend-line { width: 18px; height: 2px; border-radius: 2px; box-shadow: 0 0 6px currentColor; }
 .legend-hint { font-size: 10px; color: var(--text-faint); margin-top: 4px; border-top: 1px solid var(--border); padding-top: 6px; }
 
 /* ---------- Solar system view ---------- */

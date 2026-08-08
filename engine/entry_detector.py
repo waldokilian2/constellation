@@ -22,13 +22,38 @@ from typing import Optional
 from tree_sitter import Node
 
 from .parser import JavaParser
-from .java_index import JavaIndex, PRODUCER_TYPES, EVENT_PUBLISHER_TYPES
+from .java_index import (
+    JavaIndex,
+    PRODUCER_TYPES,
+    EVENT_PUBLISHER_TYPES,
+    HTTP_CLIENT_TYPES,
+)
 from .models import (
     EntryPoint,
     EntryPointType,
     Producer,
     ProducerType,
 )
+
+
+# ── Sync HTTP client detection ────────────────────────────────────
+# Feign client interfaces: outbound HTTP calls, NOT REST entry points.
+FEIGN_ANNOTATION = "FeignClient"
+# Method-level REST annotations on a Feign client interface → the HTTP verb
+# of each outbound call.
+REST_VERB_BY_ANN = {
+    "GetMapping": "GET",
+    "PostMapping": "POST",
+    "PutMapping": "PUT",
+    "DeleteMapping": "DELETE",
+    "PatchMapping": "PATCH",
+}
+# RestTemplate method → HTTP verb (exchange/execute take the verb as an arg).
+HTTP_METHOD_BY_TEMPLATE_CALL = {
+    "getForObject": "GET", "getForEntity": "GET",
+    "postForObject": "POST", "postForEntity": "POST",
+    "put": "PUT", "patchForObject": "PATCH", "delete": "DELETE",
+}
 
 
 # ── Annotation → (EntryPointType, channel_arg_key) ─────────────────
@@ -97,6 +122,17 @@ PRODUCER_TYPE_LABEL: dict[str, ProducerType] = {
 }
 
 
+def _walk_nodes(node) -> iter:
+    """Depth-first walk of a tree-sitter node's descendants."""
+    if node is None:
+        return
+    stack = list(node.children)
+    while stack:
+        cur = stack.pop()
+        yield cur
+        stack.extend(reversed(cur.children))
+
+
 class EntryPointDetector:
     """Detects entry points and producers across an indexed codebase."""
 
@@ -129,10 +165,18 @@ class EntryPointDetector:
                         break
                 break
 
+        # Feign client interface? Its REST-annotated methods are OUTBOUND HTTP
+        # calls, never server-side entry points (see _feign_calls).
+        class_anns = self.parser.get_class_annotations(class_node)
+        is_feign = any(
+            self.parser.get_annotation_name(a) == FEIGN_ANNOTATION
+            for a in class_anns
+        )
+
         # Java EE class context: @Path prefix, @ServerEndpoint path, @MessageDriven.
         jaxrs_prefix = ""
         ee_ws_path = ""
-        for ann in self.parser.get_class_annotations(class_node):
+        for ann in class_anns:
             name = self.parser.get_annotation_name(ann)
             args = self.parser.get_annotation_args(ann)
             if name == "Path":
@@ -161,6 +205,12 @@ class EntryPointDetector:
             annotations = self.parser.get_method_annotations(m_node)
             params = self.parser.get_method_parameters(m_node)
 
+            # Feign client interface: every REST-annotated method is an
+            # outbound HTTP call — never a server-side entry point.
+            if is_feign:
+                producers.extend(self._feign_calls(ci, m_node, m_name, annotations))
+                continue
+
             # Spring-style annotation entries.
             for ann in annotations:
                 ann_name = self.parser.get_annotation_name(ann)
@@ -181,10 +231,11 @@ class EntryPointDetector:
             if body:
                 for inv in self.parser.find_method_invocations(body):
                     producers.extend(self._producers_from_invocation(ci, m_name, inv))
+                    producers.extend(self._http_calls_from_invocation(ci, m_name, inv))
 
         return entries, producers
 
-    def _make_entry(self, ci, node, m_name, channel, ep_type, msg_type="") -> EntryPoint:
+    def _make_entry(self, ci, node, m_name, channel, ep_type, msg_type="", method_type="") -> EntryPoint:
         """Construct an EntryPoint (channel already resolved)."""
         ch = channel or "unknown"
         suffix = f":{ch}" if ch and ch != "unknown" else ""
@@ -198,6 +249,7 @@ class EntryPointDetector:
             file=ci.file,
             line=node.start_point[0] + 1,
             message_type=msg_type,
+            method_type=method_type,
         )
 
     def _ee_entries(self, ci, m_node, m_name, annotations, params_ann, jaxrs_prefix, ee_ws_path):
@@ -218,7 +270,7 @@ class EntryPointDetector:
                 channel = self._join_rest_path(jaxrs_prefix, method_path)
             else:
                 channel = jaxrs_prefix or "unknown"
-            out.append(self._make_entry(ci, m_node, m_name, self.index.resolve_channel(channel, ci), EntryPointType.REST_ENDPOINT))
+            out.append(self._make_entry(ci, m_node, m_name, self.index.resolve_channel(channel, ci), EntryPointType.REST_ENDPOINT, method_type=verb))
             return out
 
         # CDI event observer: a parameter annotated @Observes → channel = event type.
@@ -265,7 +317,7 @@ class EntryPointDetector:
         out: list[EntryPoint] = []
         args = self.parser.get_annotation_args(ann)
 
-        def make(channel: str, ep_type: EntryPointType, msg_type: str = "") -> None:
+        def make(channel: str, ep_type: EntryPointType, msg_type: str = "", method_type: str = "") -> None:
             ch = self.index.resolve_channel(channel, ci) or "unknown"
             if ep_type == EntryPointType.REST_ENDPOINT and path_prefix:
                 ch = self._join_rest_path(path_prefix, ch)
@@ -279,12 +331,15 @@ class EntryPointDetector:
                 file=ci.file,
                 line=m_node.start_point[0] + 1,
                 message_type=msg_type or (params[0]["type"] if params else ""),
+                method_type=method_type,
             ))
 
         msg_type = params[0]["type"] if params else ""
 
         if ann_name in REST_ANN:
             # REST: value/path keys (may be an array → one endpoint each).
+            # method_type = the HTTP verb, e.g. GET/POST/PUT/DELETE/PATCH.
+            verb = REST_VERB_BY_ANN.get(ann_name, "")
             chans: list[str] = []
             for k in REST_PATH_KEYS:
                 if k in args:
@@ -293,7 +348,7 @@ class EntryPointDetector:
             if not chans:
                 chans = ["unknown"]
             for c in chans:
-                make(c, REST_ANN[ann_name])
+                make(c, REST_ANN[ann_name], method_type=verb)
             return out
 
         if ann_name in CONSUMER_ANN:
@@ -335,6 +390,133 @@ class EntryPointDetector:
         if not channel.startswith("/"):
             return f"{prefix}/{channel}"
         return f"{prefix}{channel}"
+
+    # ── sync HTTP calls ───────────────────────────────────────────
+
+    def _feign_calls(self, ci, m_node, m_name, annotations) -> list[Producer]:
+        """Outbound HTTP calls declared by a @FeignClient interface method.
+
+        Channel = base url (from @FeignClient url attr, resolved) + method path.
+        """
+        out: list[Producer] = []
+        base = ""
+        for ann in self.parser.get_class_annotations(ci.node):
+            if self.parser.get_annotation_name(ann) != FEIGN_ANNOTATION:
+                continue
+            args = self.parser.get_annotation_args(ann)
+            raw_url = (args.get("url") or args.get("value") or [""])[0]
+            if raw_url:
+                base = self.index.resolve_channel(raw_url, ci)
+            break
+        for ann in annotations:
+            ann_name = self.parser.get_annotation_name(ann)
+            if ann_name not in REST_VERB_BY_ANN:
+                continue
+            args = self.parser.get_annotation_args(ann)
+            paths: list[str] = []
+            for k in REST_PATH_KEYS:
+                if k in args:
+                    paths = args[k]
+                    break
+            for p in (paths or ["unknown"]):
+                path = self._join_rest_path(base, p) if base else p
+                path = self._strip_http_origin(path) or "/"
+                out.append(Producer(
+                    id=f"{ci.repo}:{ci.simple_name}.{m_name}:http:{p}",
+                    repo=ci.repo,
+                    type=ProducerType.HTTP_CALL,
+                    channel=path,
+                    method=f"{ci.simple_name}.{m_name}",
+                    file=ci.file,
+                    line=m_node.start_point[0] + 1,
+                    message_type=REST_VERB_BY_ANN[ann_name],
+                ))
+        return out
+
+    def _http_calls_from_invocation(self, ci, m_name, inv) -> list[Producer]:
+        """RestTemplate/WebClient/RestClient/HttpClient/OkHttp/JAX-RS sync calls."""
+        parsed = self.parser.parse_method_invocation(inv)
+        receiver = parsed["receiver"]
+        method_called = parsed["method"]
+        if not receiver:
+            return []
+        field_type = self.index.field_type(ci, receiver)
+        if not field_type or field_type not in HTTP_CLIENT_TYPES:
+            return []
+        if method_called not in HTTP_CLIENT_TYPES[field_type]:
+            return []
+
+        verb = HTTP_METHOD_BY_TEMPLATE_CALL.get(method_called, "")
+        if method_called == "exchange":
+            # RestTemplate.exchange(HttpMethod.GET, ...) or (url, HttpMethod, ...)
+            for a in parsed["args"]:
+                up = str(a).upper()
+                if up in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+                    verb = up
+                    break
+
+        path = self._extract_http_path(inv, field_type)
+        if not path:
+            return []
+        channel = self.index.resolve_channel(path, ci) or path
+        channel = self._strip_http_origin(channel)
+        if not channel or channel == "unknown":
+            return []
+        return [Producer(
+            id=f"{ci.repo}:{ci.simple_name}.{m_name}:http:{channel}",
+            repo=ci.repo,
+            type=ProducerType.HTTP_CALL,
+            channel=channel,
+            method=f"{ci.simple_name}.{m_name}",
+            file=ci.file,
+            line=inv.start_point[0] + 1,
+            message_type=verb,
+        )]
+
+    def _extract_http_path(self, invocation: Node, field_type: str) -> str:
+        """First URL-ish argument: direct string for RestTemplate; nested
+        .uri(/.url(/.path(/.target( calls for fluent/builder clients."""
+        parsed = self.parser.parse_method_invocation(invocation)
+        for a in parsed["args"]:
+            if isinstance(a, str) and (a.startswith("/") or a.startswith("http") or "${" in a or "#{" in a):
+                return a
+        # Builder/fluent style: walk nested invocations for a URI-bearing call.
+        for child in _walk_nodes(invocation):
+            if child.type != "method_invocation":
+                continue
+            inner = self.parser.parse_method_invocation(child)
+            if inner["method"] in ("uri", "url", "target", "path") and inner["args"]:
+                a = inner["args"][0]
+                if isinstance(a, str) and (a.startswith("/") or a.startswith("http") or "${" in a or "#{" in a):
+                    return a
+        return ""
+
+    @staticmethod
+    def _strip_http_origin(channel: str) -> str:
+        """'http://host:port/api/x' → '/api/x'; '/api/x' stays as-is."""
+        for scheme in ("https://", "http://"):
+            if channel.startswith(scheme):
+                rest = channel[len(scheme):]
+                slash = rest.find("/")
+                return rest[slash:] if slash >= 0 else "/"
+        return channel
+
+    @staticmethod
+    def _normalize_http_path(path: str) -> str:
+        """Canonical form for HTTP path matching: replace {id} and literal-id
+        segments with a placeholder. '/api/orders/123' == '/api/orders/{id}'."""
+        segs = path.strip("/").split("/")
+        norm = []
+        for s in segs:
+            if not s:
+                continue
+            if "{" in s or "}" in s:
+                norm.append("{p}")
+            elif s.isdigit() or (len(s) == 36 and "-" in s):  # numeric id / uuid
+                norm.append("{p}")
+            else:
+                norm.append(s)
+        return "/" + "/".join(norm)
 
     # ── producers ──────────────────────────────────────────────────
 

@@ -25,6 +25,7 @@ class ProducerType(Enum):
     KAFKA_PRODUCER = "kafka-producer"
     JMS_PRODUCER = "jms-producer"
     EVENT_PUBLISHER = "event-publisher"
+    HTTP_CALL = "http-call"  # sync HTTP request (Feign/RestTemplate/WebClient/...)
     UNKNOWN = "unknown"
 
 
@@ -61,6 +62,7 @@ class EntryPoint:
     file: str
     line: int
     message_type: str = ""  # parameter type (e.g., "OrderMessage")
+    method_type: str = ""  # HTTP verb for REST endpoints (e.g., "GET", "POST"); "" when n/a
     call_tree: Optional[CallNode] = None
     metrics: dict = field(default_factory=dict)
 
@@ -75,6 +77,7 @@ class EntryPoint:
             "file": self.file,
             "line": self.line,
             "message_type": self.message_type,
+            "method_type": self.method_type,
             "call_tree": self.call_tree.to_dict() if self.call_tree else None,
             "metrics": self.metrics,
         }
@@ -107,16 +110,20 @@ class Producer:
 
 @dataclass
 class CrossRepoLink:
-    """A connection between two repos via a shared message channel."""
+    """A connection between two repos via a shared message channel or HTTP call."""
     channel: str
     producers: list[str] = field(default_factory=list)  # producer IDs
     consumers: list[str] = field(default_factory=list)  # entry point IDs
+    kind: str = "message"  # "message" | "http"
+    verb: str = ""         # HTTP method when kind == "http" and known
 
     def to_dict(self) -> dict:
         return {
             "channel": self.channel,
             "producers": self.producers,
             "consumers": self.consumers,
+            "kind": self.kind,
+            "verb": self.verb,
         }
 
 

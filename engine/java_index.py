@@ -79,6 +79,29 @@ PRODUCER_TYPES: dict[str, set[str]] = {
 EVENT_PUBLISHER_TYPES = {"ApplicationEventPublisher"}
 
 
+# Field-type → HTTP client method set. RestTemplate is method-based; WebClient
+# is fluent (get().uri(...).retrieve()) so we match the fluent entry calls and
+# dig the URI out of the nested .uri(...) invocation.
+#
+# ⭐ Java-only scope: beyond the Spring big three we also cover the JDK's
+# java.net.http.HttpClient (send/sendAsync with HttpRequest builder), OkHttp,
+# JAX-RS Client/WebTarget (target().path()...request()), and Spring 6.1+
+# RestClient (get()/post()/... fluent, same shape as WebClient). Feign is NOT
+# here — Feign client interfaces are handled via @FeignClient in the detector.
+HTTP_CLIENT_TYPES: dict[str, set[str]] = {
+    "RestTemplate": {
+        "getForObject", "getForEntity", "postForObject", "postForEntity",
+        "put", "patchForObject", "delete", "exchange", "execute",
+    },
+    "WebClient": {"get", "post", "put", "patch", "delete", "exchange"},
+    "RestClient": {"get", "post", "put", "patch", "delete"},  # Spring 6.1 fluent
+    "HttpClient": {"send", "sendAsync"},   # java.net.http — URI from HttpRequest.newBuilder().uri(...)
+    "OkHttpClient": {"newCall"},           # Request.Builder().url(...) — URI from nested builder
+    "Client": {"target", "invoke"},        # JAX-RS — URI from .target("...")
+    "WebTarget": {"request", "path"},
+}
+
+
 class JavaIndex:
     """Repo-wide symbol table + type-aware resolution."""
 

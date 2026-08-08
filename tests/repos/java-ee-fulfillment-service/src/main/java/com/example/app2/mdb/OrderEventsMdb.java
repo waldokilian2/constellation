@@ -1,5 +1,7 @@
 package com.example.app2.mdb;
 
+import com.example.app2.producer.ShipmentEventProducer;
+
 import javax.jms.Message;
 import javax.jms.MessageListener;
 import javax.ejb.MessageDriven;
@@ -15,8 +17,15 @@ import javax.ejb.ActivationConfigProperty;
 })
 public class OrderEventsMdb implements MessageListener {
 
+    private final ShipmentEventProducer shipmentEventProducer;
+
+    public OrderEventsMdb(ShipmentEventProducer shipmentEventProducer) {
+        this.shipmentEventProducer = shipmentEventProducer;
+    }
+
     @Override
     public void onMessage(Message message) {
-        // fulfill the order
+        // fulfill the order, then publish progress downstream
+        shipmentEventProducer.emitShipped("SHP-1");
     }
 }

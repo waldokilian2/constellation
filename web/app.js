@@ -15,6 +15,8 @@ const TYPE_META = {
   "event-listener":    { color: "#4895ef", label: "Event",     glow: "rgba(72,149,239,.55)" },
   "scheduled-task":    { color: "#34d399", label: "Scheduled", glow: "rgba(52,211,153,.55)" },
   "websocket":         { color: "#a855f7", label: "WebSocket", glow: "rgba(168,85,247,.55)" },
+  "jms-consumer":      { color: "#2dd4bf", label: "JMS",       glow: "rgba(45,212,191,.55)" },
+  "sqs-consumer":      { color: "#e879f9", label: "SQS",       glow: "rgba(232,121,249,.55)" },
 };
 
 // Galaxy edge colors by link kind: async (message-only), sync (HTTP-only), both (mixed)
@@ -398,6 +400,27 @@ function Legend({ types = [] }) {
 
 const PUBLISH_KEYWORDS = ["convertandsend", "send", "publish", "emit"];
 
+// Human-readable origin descriptors for non-REST flow origins.
+// Keyed by the entry-point type string the engine serializes (EntryPointType).
+// The tag/label colors reuse TYPE_META so flow cards match the rest of the UI.
+const ORIGIN_KINDS = {
+  "scheduled-task":   { tag: "SCHEDULED", cls: "scheduled", noun: "scheduled job" },
+  "event-listener":   { tag: "EVENT",     cls: "event",     noun: "event listener" },
+  websocket:          { tag: "WEBSOCKET", cls: "websocket", noun: "websocket" },
+  "kafka-consumer":   { tag: "KAFKA",     cls: "kafka",     noun: "Kafka topic" },
+  "rabbitmq-consumer":{ tag: "RABBITMQ",  cls: "rabbitmq",  noun: "RabbitMQ queue" },
+  "jms-consumer":     { tag: "JMS",       cls: "jms",       noun: "JMS queue" },
+  "sqs-consumer":     { tag: "SQS",       cls: "sqs",       noun: "SQS queue" },
+};
+
+// Describe a flow's origin: rest vs. a specific external trigger type.
+// Falls back to a generic "EXTERNAL" for unknown/uncategorized types.
+function originDescriptor(entry, isRest) {
+  if (isRest) return { kind: "rest", tag: "REST", cls: "rest", noun: "REST endpoint" };
+  const meta = ORIGIN_KINDS[entry.type] || { tag: "EXTERNAL", cls: "external", noun: "external event" };
+  return { kind: entry.type || "external", tag: meta.tag, cls: meta.cls, noun: meta.noun };
+}
+
 function detectFlows(graph) {
   const entries = graph.entry_points || [];
   const links = graph.cross_repo_links || [];
@@ -546,13 +569,27 @@ function detectFlows(graph) {
     const depth = stepDepth(step);
     const hasCrossRepo = repos.size > 1;
 
-    // Generate flow name
+    // Generate flow name + a human-readable origin descriptor.
+    // originKind = the engine entry type ("scheduled-task", "kafka-consumer", ...)
+    // so external origins aren't all lumped under a vague "EXTERNAL".
+    const desc = originDescriptor(entry, isRest);
     let name, originLabel;
     if (isRest) {
       name = entry.method || entry.id.split(":").pop();
       // Convert camelCase to Title Case
       name = name.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase()).trim();
       originLabel = ((entry.method_type || "POST") + " ") + (entry.channel || "");
+    } else if (desc.kind === "scheduled-task") {
+      // Cron / fixed-rate / EJB-timer jobs: name by the method, label the trigger
+      // explicitly. Only prefix "cron " when the channel is a real cron expression
+      // (5+ whitespace-separated fields) — EJB @Schedule channels aren't cron.
+      name = entry.method || entry.id.split(":").pop();
+      name = name.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase()).trim();
+      const schedCh = entry.channel || "";
+      const cronLike = /\s/.test(schedCh) && schedCh.split(/\s+/).length >= 5;
+      originLabel = cronLike ? "cron " + schedCh
+        : (/^\d+$/.test(schedCh) ? "every " + schedCh + " ms"
+          : (schedCh.indexOf("@Schedule") === 0 ? "EJB timer" : (schedCh || "scheduled")));
     } else {
       name = entry.channel || entry.method || "External Event";
       originLabel = entry.channel || "";
@@ -563,6 +600,10 @@ function detectFlows(graph) {
       name,
       originLabel,
       originType: isRest ? "rest" : "external",
+      originKind: desc.kind,
+      originTag: desc.tag,
+      originClass: desc.cls,
+      originNoun: desc.noun,
       originChannel: entry.channel || "",
       originMethodType: entry.method_type || "",
       step,
@@ -1588,11 +1629,9 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
             >
               <div className="flow-card-glow" />
               <div className="flow-card-origin">
-                {f.originType === "rest" ? (
-                  <span className="flow-origin-tag rest">REST</span>
-                ) : (
-                  <span className="flow-origin-tag external">EXTERNAL</span>
-                )}
+                <span className={"flow-origin-tag " + (f.originClass || "external")}>
+                  {f.originTag || "EXTERNAL"}
+                </span>
                 <span className="flow-origin-label mono">{f.originLabel}</span>
               </div>
               <div className="flow-card-name">{f.name}</div>
@@ -1661,10 +1700,10 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
     }
 
     if (flow.originType === "external") {
-      externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo, kind: "external" });
+      externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo, kind: "external", tag: flow.originTag || "EXTERNAL", cls: flow.originClass || "external" });
     }
     if (flow.originType === "rest") {
-      externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo, kind: "rest", verb: flow.originMethodType || "POST" });
+      externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo, kind: "rest", verb: flow.originMethodType || "POST", tag: "REST", cls: "rest" });
     }
 
     walk(flow.step, 0);
@@ -1784,7 +1823,7 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
         ]} />
         <div className="view-hint">
           {flow.repoCount} repos · {flow.hopCount} hop{flow.hopCount === 1 ? "" : "s"} ·
-          {" "}origin: {flow.originType === "rest" ? "REST endpoint" : "external event"}
+          {" "}origin: {flow.originNoun || (flow.originType === "rest" ? "REST endpoint" : "external event")}
         </div>
       </div>
       <div
@@ -1859,12 +1898,12 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
         {externalInputs.map((ei, i) => (
           <div
             key={"ext-node-" + i}
-            className={ei.kind === "rest" ? "flow-external-node rest-origin" : "flow-external-node"}
+            className={"flow-external-node " + (ei.cls ? ei.cls + "-origin" : (ei.kind === "rest" ? "rest-origin" : ""))}
             style={{ left: layout.externalPos[i].x - 80, top: layout.externalPos[i].y - 50 }}
           >
-            <div className="flow-external-icon">{ei.kind === "rest" ? "⟶" : "⌁"}</div>
+            <div className="flow-external-icon">{ei.kind === "rest" ? "⟶" : (ei.cls === "scheduled" ? "⏰" : "⌁")}</div>
             <div className="flow-external-label">{ei.kind === "rest" ? (ei.verb + " " + ei.channel) : ei.channel}</div>
-            <div className="flow-external-sub">{ei.kind === "rest" ? "REST" : "external"}</div>
+            <div className="flow-external-sub">{ei.tag || (ei.kind === "rest" ? "REST" : "external")}</div>
           </div>
         ))}
 
@@ -1904,7 +1943,7 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
         found.push({
           step,
           entersVia: parentChannel || (flow.originType === "external" ? flow.originChannel : flow.originLabel),
-          entersFrom: parentRepo || (flow.originType === "external" ? "external" : flow.originLabel),
+          entersFrom: parentRepo || (flow.originType === "external" ? (flow.originNoun || "external") : flow.originLabel),
         });
       }
       step.children.forEach((child) => {
@@ -2357,6 +2396,8 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, 
           payload: { entry_point_id: "", node: {}, flow_context: {
             name: flow.name,
             origin_type: flow.originType,
+            origin_kind: flow.originKind || "",
+            origin_tag: flow.originTag || "",
             origin_label: flow.originLabel,
             repos: flow.repos,
             repo_count: flow.repoCount,

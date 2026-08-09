@@ -1409,6 +1409,36 @@ code { font-family: var(--mono); color: var(--cyan); }
   background: rgba(148, 163, 184, .15);
   color: #94a3b8;
 }
+/* Origin-type variants — make external triggers specific, not vague "EXTERNAL".
+   Colors mirror TYPE_META in app.js so flow cards match the rest of the UI. */
+.flow-origin-tag.kafka {
+  background: rgba(255, 214, 10, .15);
+  color: #ffd60a;
+}
+.flow-origin-tag.rabbitmq {
+  background: rgba(255, 140, 66, .15);
+  color: #ff8c42;
+}
+.flow-origin-tag.event {
+  background: rgba(72, 149, 239, .15);
+  color: #4895ef;
+}
+.flow-origin-tag.scheduled {
+  background: rgba(52, 211, 153, .15);
+  color: #34d399;
+}
+.flow-origin-tag.websocket {
+  background: rgba(168, 85, 247, .15);
+  color: #a855f7;
+}
+.flow-origin-tag.jms {
+  background: rgba(45, 212, 191, .15);
+  color: #2dd4bf;
+}
+.flow-origin-tag.sqs {
+  background: rgba(232, 121, 249, .15);
+  color: #e879f9;
+}
 .flow-origin-label {
   font-size: 11px;
   color: rgba(255, 255, 255, .5);
@@ -1568,6 +1598,29 @@ code { font-family: var(--mono); color: var(--cyan); }
 .flow-external-node.rest-origin .flow-external-sub {
   color: rgba(0, 224, 168, .5);
 }
+
+/* Origin-type variants of the external input node — match the flow-card tags */
+.flow-external-node.scheduled-origin .flow-external-icon,
+.flow-external-node.scheduled-origin .flow-external-sub { color: rgba(52, 211, 153, .65); }
+.flow-external-node.scheduled-origin .flow-external-label { color: rgba(52, 211, 153, .75); }
+.flow-external-node.event-origin .flow-external-icon,
+.flow-external-node.event-origin .flow-external-sub { color: rgba(72, 149, 239, .65); }
+.flow-external-node.event-origin .flow-external-label { color: rgba(72, 149, 239, .75); }
+.flow-external-node.websocket-origin .flow-external-icon,
+.flow-external-node.websocket-origin .flow-external-sub { color: rgba(168, 85, 247, .65); }
+.flow-external-node.websocket-origin .flow-external-label { color: rgba(168, 85, 247, .75); }
+.flow-external-node.kafka-origin .flow-external-icon,
+.flow-external-node.kafka-origin .flow-external-sub { color: rgba(255, 214, 10, .65); }
+.flow-external-node.kafka-origin .flow-external-label { color: rgba(255, 214, 10, .75); }
+.flow-external-node.rabbitmq-origin .flow-external-icon,
+.flow-external-node.rabbitmq-origin .flow-external-sub { color: rgba(255, 140, 66, .65); }
+.flow-external-node.rabbitmq-origin .flow-external-label { color: rgba(255, 140, 66, .75); }
+.flow-external-node.jms-origin .flow-external-icon,
+.flow-external-node.jms-origin .flow-external-sub { color: rgba(45, 212, 191, .65); }
+.flow-external-node.jms-origin .flow-external-label { color: rgba(45, 212, 191, .75); }
+.flow-external-node.sqs-origin .flow-external-icon,
+.flow-external-node.sqs-origin .flow-external-sub { color: rgba(232, 121, 249, .65); }
+.flow-external-node.sqs-origin .flow-external-label { color: rgba(232, 121, 249, .75); }
 
 /* ================================================================
    FLOW TRACE VIEW (path equivalent — repo's trace in a flow)

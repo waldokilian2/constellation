@@ -231,6 +231,65 @@ class JavaParser:
         return params
 
     @staticmethod
+    def get_method_parameters(method_node: Node) -> list[dict]:
+        """
+        Extract method parameters.
+        Returns list of {name, type}.
+        """
+        params = []
+        for child in method_node.children:
+            if child.type == "formal_parameters":
+                for param in child.children:
+                    if param.type == "formal_parameter":
+                        p = {"name": "", "type": ""}
+                        for pc in param.children:
+                            if pc.type in ("type_identifier", "generic_type",
+                                           "basic_type"):
+                                p["type"] = pc.text.decode()
+                            elif pc.type == "identifier":
+                                p["name"] = pc.text.decode()
+                        if p["name"]:
+                            params.append(p)
+        return params
+
+    @staticmethod
+    def get_local_variables(method_body: Node) -> dict[str, str]:
+        """Map of local variable name → declared type within a method body.
+
+        Handles single- and multi-declarator statements (``Order a = ...``,
+        ``Order a = ..., b = ...;``) and generic types (``List<Order>`` → the
+        raw simple type is kept). Lets the call graph resolve chained calls on
+        locals instead of marking them ``INFERRED``.
+        """
+        out: dict[str, str] = {}
+
+        def collect(decl: Node):
+            type_name = ""
+            for c in decl.children:
+                if c.type in ("type_identifier", "generic_type", "basic_type",
+                              "scoped_identifier", "array_type"):
+                    type_name = JavaParser.get_type_name(c)
+                    break
+            for c in decl.children:
+                if c.type != "variable_declarator":
+                    continue
+                name = ""
+                for vc in c.children:
+                    if vc.type == "identifier" and not name:
+                        name = vc.text.decode()
+                if name and type_name:
+                    out[name] = type_name
+
+        stack = [method_body]
+        while stack:
+            node = stack.pop()
+            if node.type == "local_variable_declaration":
+                collect(node)
+            for child in node.children:
+                stack.append(child)
+        return out
+
+    @staticmethod
     def find_method_invocations(method_body: Node) -> list[Node]:
         """Find all method_invocation nodes within a method body."""
         results = []

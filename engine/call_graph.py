@@ -86,6 +86,15 @@ class CallGraphBuilder:
         if not body:
             return
 
+        # Type map for local receivers: method parameters + local variables,
+        # so chained calls on locals resolve instead of staying INFERRED.
+        local_types = {
+            p["name"]: p["type"]
+            for p in self.parser.get_method_parameters(node)
+            if p.get("name") and p.get("type")
+        }
+        local_types.update(self.parser.get_local_variables(body))
+
         invocations = self.parser.find_method_invocations(body)
 
         for inv in invocations:
@@ -107,7 +116,7 @@ class CallGraphBuilder:
                 continue
 
             resolved, ambiguous, _recv_type = self.index.resolve_call(
-                enclosing_ci, receiver, method_name, arity=arity
+                enclosing_ci, receiver, method_name, arity=arity, local_types=local_types
             )
 
             if resolved:

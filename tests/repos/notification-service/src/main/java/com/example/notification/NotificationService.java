@@ -1,33 +1,51 @@
 package com.example.notification;
 
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
+/**
+ * Orchestrates outbound notifications. Consumed by the shipment and order
+ * event listeners.
+ *
+ * <p>Confidence-tag demo:
+ * <ul>
+ *   <li>{@code notifier.send(...)} resolves via the {@link Notifier} interface
+ *       to two implementations → {@code AMBIGUOUS}.</li>
+ *   <li>{@code templateEngine.render(...)} targets a type that is absent from
+ *       this repo → {@code INFERRED}.</li>
+ *   <li>{@code preferencesRepository.find(...)} resolves to a concrete method
+ *       → {@code EXTRACTED}.</li>
+ * </ul>
+ */
 @Service
 public class NotificationService {
 
-    private final EmailGateway emailGateway;
-    private final SmsGateway smsGateway;
+    private final Notifier notifier;
+    private final CustomerPreferencesRepository preferencesRepository;
+    private final TemplateEngine templateEngine;
 
-    public NotificationService(EmailGateway emailGateway, SmsGateway smsGateway) {
-        this.emailGateway = emailGateway;
-        this.smsGateway = smsGateway;
+    public NotificationService(Notifier notifier,
+                               CustomerPreferencesRepository preferencesRepository,
+                               TemplateEngine templateEngine) {
+        this.notifier = notifier;
+        this.preferencesRepository = preferencesRepository;
+        this.templateEngine = templateEngine;
     }
 
-    @KafkaListener(topics = "shipment-events")
-    public void handleShipmentEvent(ShipmentEvent event) {
-        String customerId = event.getCustomerId();
-        if (event.getType().equals("CREATED")) {
-            emailGateway.send(customerId, "Your shipment has been created");
-        } else if (event.getType().equals("READY")) {
-            emailGateway.send(customerId, "Your shipment is ready for delivery");
-            smsGateway.send(customerId, "Shipment ready: " + event.getTrackingNumber());
-        }
+    public void notifyShipmentCreated(String orderId) {
+        CustomerPreferences prefs = preferencesRepository.findByOrderId(orderId);
+        String message = templateEngine.render("shipment.created", orderId);
+        notifier.send(prefs.getEmail(), message);
     }
 
-    @RabbitListener(queues = "order-events")
-    public void handleOrderEvent(OrderEvent event) {
-        emailGateway.send(event.getCustomerEmail(), "Order confirmed: " + event.getOrderId());
+    public void notifyShipmentReady(String orderId) {
+        CustomerPreferences prefs = preferencesRepository.findByOrderId(orderId);
+        String message = templateEngine.render("shipment.ready", orderId);
+        notifier.send(prefs.getPhone(), message);
+    }
+
+    public void notifyOrderConfirmed(String orderId) {
+        CustomerPreferences prefs = preferencesRepository.findByOrderId(orderId);
+        String message = templateEngine.render("order.confirmed", orderId);
+        notifier.send(prefs.getEmail(), message);
     }
 }

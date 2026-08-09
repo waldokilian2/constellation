@@ -1,46 +1,70 @@
 package com.example.orders;
 
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.web.bind.annotation.*;
 
+/**
+ * Application service orchestrating the order lifecycle.
+ *
+ * <p>This class drives a deep, resolvable call tree: each method fans out to
+ * a repository, a pricing service, an event producer, and (for status) the
+ * Feign client — all of which resolve to concrete definitions in this repo,
+ * yielding {@code EXTRACTED} confidence edges.
+ */
 @Service
 public class OrderService {
 
-    private final RabbitTemplate rabbitTemplate;
     private final OrderRepository orderRepository;
+    private final OrderEventProducer eventProducer;
+    private final PricingService pricingService;
+    private final FulfillmentStatusClient fulfillmentClient;
 
-    public OrderService(RabbitTemplate rabbitTemplate, OrderRepository orderRepository) {
-        this.rabbitTemplate = rabbitTemplate;
+    public OrderService(OrderRepository orderRepository,
+                        OrderEventProducer eventProducer,
+                        PricingService pricingService,
+                        FulfillmentStatusClient fulfillmentClient) {
         this.orderRepository = orderRepository;
+        this.eventProducer = eventProducer;
+        this.pricingService = pricingService;
+        this.fulfillmentClient = fulfillmentClient;
     }
 
-    @PostMapping("/api/orders")
     public Order createOrder(OrderRequest request) {
-        Order order = new Order(request.getProductId(), request.getQuantity());
+        Order order = new Order(
+            request.getProductId(),
+            request.getQuantity(),
+            request.getCustomerEmail()
+        );
         order.validate();
+        order.setTotalCents(
+            pricingService.calculateTotal(request.getProductId(), request.getQuantity())
+        );
         orderRepository.save(order);
-        rabbitTemplate.convertAndSend("order-events", new OrderMessage(order));
+        eventProducer.publishCreated(order);
         return order;
     }
 
-    @GetMapping("/api/orders/{id}")
     public Order getOrder(String id) {
-        return orderRepository.findById(id);
+        return orderRepository.requireById(id);
     }
 
-    @EventListener
-    public void handlePaymentConfirmed(PaymentConfirmedEvent event) {
-        Order order = orderRepository.findById(event.getOrderId());
-        order.markAsPaid();
+    public OrderStatus getOrderStatus(String id) {
+        Order order = orderRepository.requireById(id);
+        FulfillmentStatus fulfillment = fulfillmentClient.getFulfillmentStatus(id);
+        return new OrderStatus(order.getStatus(), fulfillment.getStatus());
+    }
+
+    public Order confirmPaid(String orderId) {
+        Order order = orderRepository.requireById(orderId);
+        order.markPaid();
         orderRepository.save(order);
-        rabbitTemplate.convertAndSend("order-events", new OrderMessage(order));
+        eventProducer.publishPaid(order);
+        return order;
     }
 
-    @KafkaListener(topics = "inventory-updates")
-    public void handleInventoryUpdate(InventoryUpdateEvent event) {
-        if (event.getStockLevel() == 0) {
-            orderRepository.flagOrdersAsBackordered(event.getProductId());
-        }
+    public Order markFulfilled(String orderId) {
+        Order order = orderRepository.requireById(orderId);
+        order.markFulfilled();
+        orderRepository.save(order);
+        return order;
     }
 }

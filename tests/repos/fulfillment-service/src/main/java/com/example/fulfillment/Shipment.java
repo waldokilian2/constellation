@@ -1,6 +1,8 @@
 package com.example.fulfillment;
 
+/** Shipment aggregate — lifecycle transitions that resolve in the call graph. */
 public class Shipment {
+
     private String id;
     private String orderId;
     private String status;
@@ -16,6 +18,10 @@ public class Shipment {
 
     public void release() {
         this.status = "READY";
+    }
+
+    public void markDelivered() {
+        this.status = "DELIVERED";
     }
 
     public String getId() { return id; }

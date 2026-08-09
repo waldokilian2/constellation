@@ -1,11 +1,13 @@
 package com.example.app1.producer;
 
 import com.example.app1.config.Channels;
+
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 /**
- * Producers in app1 (order service) — all resolve to the "order-events" channel:
+ * Producers in app1 (order service) — all resolve to the "order-events"
+ * channel:
  *  - literal        → "order-events"
  *  - constant       → Channels.ORDER_EVENTS
  *  - ${...}         → from application.properties

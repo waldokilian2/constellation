@@ -3269,7 +3269,7 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
                     <input
                       className="text-input mono"
                       type="text"
-                      placeholder="https://github.com/org/repo.git"
+                      placeholder="https://github.com/org/repo.git  or  local:path/to/repo"
                       value={u}
                       onChange={(e) => setUrlAt(i, e.target.value)}
                       disabled={busy}
@@ -3287,6 +3287,7 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
           {!isRescan && (
             <p className="muted small">
               Repos are cloned (shallow) and analysed together so cross-service links are detected.
+              Use <code>local:path</code> to add an existing folder on disk (git-backed ones are still tracked for updates).
               {!isCreate && " The project is re-analysed as a whole when you add a repo."}
             </p>
           )}

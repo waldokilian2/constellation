@@ -396,7 +396,7 @@ Every relationship in the graph is tagged with confidence:
 
 ### In Progress
 - **Python language support** — FastAPI entry detector + tree-sitter-python
-- **Local-variable type tracking** — chained calls currently stay `INFERRED`
+- **Local-variable type tracking** — chained calls on locals now resolve to `EXTRACTED` (params + local declarations fed into call resolution)
 - **Overload resolution by parameter types** — only arity matching today
 
 ### Planned
@@ -415,12 +415,11 @@ Every relationship in the graph is tagged with confidence:
 - Java Spring + Java EE / Jakarta annotation detection (RabbitMQ, Kafka, JMS, REST, JAX-RS, Events, CDI, EJB, WebSocket, Scheduled)
 - Producers matched by declared field type (no variable-name false positives)
 - Cross-repo linking via channel names — literals, `Class.CONST`, `${...}` config placeholders
-- Import-aware call resolution with interface→impl linking
+- Import-aware call resolution with interface→impl linking, plus local-variable and parameter-typed receivers (chained calls resolve to `EXTRACTED`)
 - Call tree extraction to depth 4 with cycle prevention
-- Confidence tagging (`EXTRACTED` vs `INFERRED`)
+- Confidence tagging (`EXTRACTED` vs `INFERRED` vs `AMBIGUOUS`)
 
 **What doesn't work yet:**
-- Local-variable type tracking (chained calls stay `INFERRED`)
 - Overload resolution by parameter *types* (arity only)
 - Apache Camel DSL routes, manual `channel.basicConsume`
 - `@Bean`/Cloud Stream consumer discovery, Java EE SOAP + Servlets

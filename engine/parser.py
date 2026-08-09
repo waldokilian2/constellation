@@ -204,7 +204,8 @@ class JavaParser:
         """Extract the return type of a method."""
         for child in method_node.children:
             if child.type in ("type_identifier", "generic_type",
-                              "void_type", "basic_type"):
+                              "void_type", "basic_type",
+                              "scoped_identifier", "scoped_type_identifier"):
                 return child.text.decode()
         return ""
 
@@ -222,7 +223,8 @@ class JavaParser:
                         p = {"name": "", "type": ""}
                         for pc in param.children:
                             if pc.type in ("type_identifier", "generic_type",
-                                           "basic_type"):
+                                           "basic_type", "scoped_identifier",
+                                           "scoped_type_identifier"):
                                 p["type"] = pc.text.decode()
                             elif pc.type == "identifier":
                                 p["name"] = pc.text.decode()
@@ -244,7 +246,8 @@ class JavaParser:
                         p = {"name": "", "type": ""}
                         for pc in param.children:
                             if pc.type in ("type_identifier", "generic_type",
-                                           "basic_type"):
+                                           "basic_type", "scoped_identifier",
+                                           "scoped_type_identifier"):
                                 p["type"] = pc.text.decode()
                             elif pc.type == "identifier":
                                 p["name"] = pc.text.decode()
@@ -267,7 +270,7 @@ class JavaParser:
             type_name = ""
             for c in decl.children:
                 if c.type in ("type_identifier", "generic_type", "basic_type",
-                              "scoped_identifier", "array_type"):
+                              "scoped_identifier", "scoped_type_identifier", "array_type"):
                     type_name = JavaParser.get_type_name(c)
                     break
             for c in decl.children:
@@ -317,34 +320,44 @@ class JavaParser:
         rabbitTemplate.convertAndSend("order-events", msg)
           -> {"receiver": "rabbitTemplate", "method": "convertAndSend",
               "args": ["order-events", "msg"]}
+
+        from("kafka:orders").to("kafka:ship")   # chained — receiver is itself a call
+          -> the inner from() -> {"receiver": "", "method": "from", ...}
+          -> the outer to()   -> {"receiver": "", "method": "to", ...}
         """
         result = {"receiver": "", "method": "", "args": []}
+        children = list(invocation_node.children)
+        has_dot = any(c.type == "." for c in children)
 
-        for child in invocation_node.children:
-            if child.type == "identifier":
-                # Could be receiver or method name — depends on position
-                if not result["receiver"] and any(
-                    sib.type == "." for sib in invocation_node.children
-                ):
-                    result["receiver"] = child.text.decode()
-                else:
-                    result["method"] = child.text.decode()
-            elif child.type == "field_access":
-                # obj.field.method() — extract receiver
-                result["receiver"] = child.text.decode()
-            elif child.type == "argument_list":
-                # Extract arguments
-                for arg in child.children:
-                    if arg.type == "string_literal":
-                        result["args"].append(
-                            JavaParser._extract_string_value(arg)
-                        )
-                    elif arg.type == "identifier":
-                        result["args"].append(arg.text.decode())
-                    elif arg.type in ("method_invocation", "field_access"):
-                        result["args"].append(arg.text.decode())
-                    elif arg.type == "decimal_integer_literal":
-                        result["args"].append(arg.text.decode())
+        # Method name = the identifier immediately preceding the argument_list.
+        arglist_idx = next(
+            (i for i, c in enumerate(children) if c.type == "argument_list"), -1
+        )
+        if arglist_idx > 0 and children[arglist_idx - 1].type == "identifier":
+            result["method"] = children[arglist_idx - 1].text.decode()
+
+        # Receiver = the object expression (first child) only when it is a
+        # simple/field name followed by ".". Chained receivers (themselves
+        # method_invocations) are left empty so callers don't treat the method
+        # name as a receiver.
+        if (children and has_dot
+                and children[0].type in ("identifier", "field_access")
+                and len(children) > 1 and children[1].type == "."):
+            result["receiver"] = children[0].text.decode()
+
+        # Arguments.
+        if arglist_idx >= 0:
+            for arg in children[arglist_idx].children:
+                if arg.type == "string_literal":
+                    result["args"].append(
+                        JavaParser._extract_string_value(arg)
+                    )
+                elif arg.type == "identifier":
+                    result["args"].append(arg.text.decode())
+                elif arg.type in ("method_invocation", "field_access"):
+                    result["args"].append(arg.text.decode())
+                elif arg.type == "decimal_integer_literal":
+                    result["args"].append(arg.text.decode())
 
         return result
 
@@ -428,20 +441,20 @@ class JavaParser:
         t = node.type
         if t == "generic_type":
             for c in node.children:
-                if c.type in ("type_identifier", "scoped_identifier"):
+                if c.type in ("type_identifier", "scoped_identifier", "scoped_type_identifier"):
                     return JavaParser.get_type_name(c)
             return ""
-        if t == "scoped_identifier":
+        if t in ("scoped_identifier", "scoped_type_identifier"):
             return JavaParser.last_seg(node)
         if t in ("type_identifier", "basic_type", "void_type"):
             return node.text.decode()
         if t == "array_type":
             for c in node.children:
-                if c.type in ("type_identifier", "generic_type", "scoped_identifier", "basic_type"):
+                if c.type in ("type_identifier", "generic_type", "scoped_identifier", "scoped_type_identifier", "basic_type"):
                     return JavaParser.get_type_name(c)
         # Fallback: first type-ish descendant.
         for c in node.children:
-            if c.type in ("type_identifier", "generic_type", "scoped_identifier", "basic_type"):
+            if c.type in ("type_identifier", "generic_type", "scoped_identifier", "scoped_type_identifier", "basic_type"):
                 return JavaParser.get_type_name(c)
         return node.text.decode().strip()
 
@@ -452,7 +465,7 @@ class JavaParser:
 
         def collect(clause: Node):
             for c in clause.children:
-                if c.type in ("type_identifier", "generic_type", "scoped_identifier"):
+                if c.type in ("type_identifier", "generic_type", "scoped_identifier", "scoped_type_identifier"):
                     out.append(JavaParser.get_type_name(c))
                 elif c.type in ("type_list", "interface_type_list"):
                     collect(c)
@@ -496,7 +509,7 @@ class JavaParser:
                 mods = c.text.decode().split()
                 if "static" in mods and "final" in mods:
                     is_static_final = True
-            elif c.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier"):
+            elif c.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier", "scoped_type_identifier"):
                 type_name = JavaParser.get_type_name(c)
         out: list[dict] = []
         for c in field_node.children:
@@ -527,7 +540,7 @@ class JavaParser:
         for c in method_node.children:
             if c.type == "identifier" and not name:
                 name = c.text.decode()
-            elif c.type in ("type_identifier", "generic_type", "basic_type", "void_type", "scoped_identifier"):
+            elif c.type in ("type_identifier", "generic_type", "basic_type", "void_type", "scoped_identifier", "scoped_type_identifier"):
                 if not ret:
                     ret = JavaParser.get_type_name(c)
             elif c.type == "formal_parameters":
@@ -536,7 +549,7 @@ class JavaParser:
                         continue
                     ptype = ""
                     for fpc in pc.children:
-                        if fpc.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier"):
+                        if fpc.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier", "scoped_type_identifier"):
                             if not ptype:
                                 ptype = JavaParser.get_type_name(fpc)
                     if ptype:
@@ -583,7 +596,7 @@ class JavaParser:
                         for mc in fpc.children:
                             if mc.type in ("annotation", "marker_annotation"):
                                 anns.append(JavaParser.get_annotation_name(mc))
-                    elif fpc.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier"):
+                    elif fpc.type in ("type_identifier", "generic_type", "basic_type", "scoped_identifier", "scoped_type_identifier"):
                         if not ptype:
                             ptype = JavaParser.get_type_name(fpc)
                     elif fpc.type == "identifier" and not name:

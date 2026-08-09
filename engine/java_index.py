@@ -68,12 +68,15 @@ class MethodInfo:
 # Framework types whose field/method calls mark a producer.
 # Matched by the *declared field type*, not the variable name.
 PRODUCER_TYPES: dict[str, set[str]] = {
+    # KafkaTemplate.send(...) — every overload takes the topic as args[0].
     "KafkaTemplate": {"send"},
-    "RabbitTemplate": {"convertAndSend", "send"},
-    "AmqpTemplate": {"convertAndSend", "send"},
-    "JmsTemplate": {"convertAndSend", "send"},
+    "RabbitTemplate": {"convertAndSend", "convertSendAndReceive", "send"},
+    "AmqpTemplate": {"convertAndSend", "convertSendAndReceive", "send"},
+    "JmsTemplate": {"convertAndSend", "convertSendAndReceive", "send"},
     "ApplicationEventPublisher": {"publishEvent"},
     "StreamBridge": {"send"},  # Spring Cloud Stream
+    "PulsarTemplate": {"send", "sendAsync"},  # Apache Pulsar (topic = first arg)
+    "Connection": {"publish"},  # NATS / nats.java (subject = first arg)
 }
 
 EVENT_PUBLISHER_TYPES = {"ApplicationEventPublisher"}
@@ -95,10 +98,24 @@ HTTP_CLIENT_TYPES: dict[str, set[str]] = {
     },
     "WebClient": {"get", "post", "put", "patch", "delete", "exchange"},
     "RestClient": {"get", "post", "put", "patch", "delete"},  # Spring 6.1 fluent
-    "HttpClient": {"send", "sendAsync"},   # java.net.http — URI from HttpRequest.newBuilder().uri(...)
+    "HttpClient": {"send", "sendAsync", "execute"},   # java.net.http (send*) OR apache (execute)
     "OkHttpClient": {"newCall"},           # Request.Builder().url(...) — URI from nested builder
     "Client": {"target", "invoke"},        # JAX-RS — URI from .target("...")
     "WebTarget": {"request", "path"},
+    # Apache HttpComponents (sync): execute(new HttpGet("http://...")); URI dug out of the
+    # request's constructor, verb from the request class (HttpGet→GET).
+    "CloseableHttpClient": {"execute"},
+    "DefaultCloseableHttpClient": {"execute"},
+    # Async HTTP client (async-http-client): prepareGet("http://...").execute();
+    # URI is a direct string arg, verb encoded in the prepare* method name.
+    "AsyncHttpClient": {
+        "prepareGet", "preparePost", "preparePut", "preparePatch",
+        "prepareDelete", "prepareHead", "prepareOptions", "execute",
+    },
+    "DefaultAsyncHttpClient": {
+        "prepareGet", "preparePost", "preparePut", "preparePatch",
+        "prepareDelete", "prepareHead", "prepareOptions", "execute",
+    },
 }
 
 
@@ -116,6 +133,9 @@ class JavaIndex:
         self.config: dict[str, str] = {}
         # interface simple name -> impl ClassInfos
         self._impls_cache: dict[str, list[ClassInfo]] = {}
+        # (class_simple, method_name) -> resolved methods (incl. negatives), so the
+        # supertype chain is walked at most once per (class, method) per index.
+        self._hierarchy_cache: dict[tuple[str, str], list] = {}
 
     # ── build ──────────────────────────────────────────────────────
 
@@ -339,6 +359,45 @@ class JavaIndex:
             if m.name == method_name and m.class_simple == class_simple
         ]
 
+    def find_methods_in_hierarchy(
+        self, ci: ClassInfo, method_name: str, _seen: Optional[set[str]] = None,
+    ) -> list[MethodInfo]:
+        """Resolve a method up the supertype chain (transitive).
+
+        ``find_methods`` only matches a method declared *directly* on a class
+        by simple name. Real call edges often land on a base class (e.g.
+        ``orderService.process()`` where ``process`` lives on an abstract
+        ``BaseOrderService``). This walks ``ci`` → each resolved supertype
+        (recursively, import-aware) until the method is found, returning the
+        first non-empty level. Memoized per (class, method) so the chain is
+        walked at most once per index; used only as a fallback, so direct hits
+        keep their original behaviour and confidence.
+        """
+        key = (ci.simple_name, method_name)
+        cached = self._hierarchy_cache.get(key)
+        if cached is not None:
+            return cached
+        result = self._walk_hierarchy(ci, method_name, set())
+        self._hierarchy_cache[key] = result
+        return result
+
+    def _walk_hierarchy(
+        self, ci: ClassInfo, method_name: str, seen: set[str],
+    ) -> list[MethodInfo]:
+        if ci.simple_name in seen:
+            return []
+        seen.add(ci.simple_name)
+        direct = self.find_methods(ci.simple_name, method_name)
+        if direct:
+            return direct
+        for sup in ci.supertypes:
+            sup_ci = self.find_class(ci, sup)
+            if sup_ci:
+                found = self._walk_hierarchy(sup_ci, method_name, seen)
+                if found:
+                    return found
+        return []
+
     def class_by_loc(self, repo: str, file: str, simple: str) -> Optional[ClassInfo]:
         """ClassInfo for a class located at (repo, file, simple name)."""
         matches = self.by_simple.get(simple, [])
@@ -396,6 +455,14 @@ class JavaIndex:
         cands: list[MethodInfo] = []
         for cc in candidate_classes:
             cands.extend(self.find_methods(cc.simple_name, method_name))
+
+        # Fallback: if none of the candidate classes declare the method, walk
+        # up the supertype chain of each (multi-level dispatch). This only adds
+        # hits where the direct search found nothing, so direct resolutions
+        # keep their original (non-ambiguous) behaviour.
+        if not cands:
+            for cc in candidate_classes:
+                cands.extend(self.find_methods_in_hierarchy(cc, method_name))
 
         # Arity filter (when known and it narrows the set).
         if arity is not None and arity >= 0:

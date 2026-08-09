@@ -1,15 +1,24 @@
 """
-Entry point + producer detector for Java Spring applications.
+Entry point + producer detector for Java applications.
 
 Driven by the type-aware :mod:`engine.java_index` symbol table:
 
   * **Producers** are matched by the *declared type* of the receiver field
     (``KafkaTemplate``, ``RabbitTemplate``, ``JmsTemplate``,
-    ``ApplicationEventPublisher``, ``StreamBridge``) — not by variable name,
-    which avoided false positives like any ``template.send(...)``.
+    ``ApplicationEventPublisher``, ``StreamBridge``, ``PulsarTemplate``,
+    NATS ``Connection``) — not by variable name, which avoided false positives
+    like any ``template.send(...)``.
   * **Entry points** cover the Spring annotation set, including
     ``@Scheduled`` and ``@MessageMapping`` (WebSocket/STOMP), plus RocketMQ
-    ``@RocketMQMessageListener``.
+    ``@RocketMQMessageListener`` and Java EE (JAX-RS, CDI, EJB, WebSocket).
+  * **Extra frameworks (Tier 1/2)**: ``main()``, lifecycle hooks
+    (``@PostConstruct``, ``CommandLineRunner``/``ApplicationRunner``/
+    ``InitializingBean``), Servlet API (``@WebServlet``/``@WebFilter``),
+    SOAP (JAX-WS ``@WebService``/``@WebMethod``), Spring for GraphQL
+    (``@QueryMapping``/…), gRPC (``extends *ImplBase``), Spring Cloud
+    Function (``@Bean`` ``Function``/``Supplier``/``Consumer``), STOMP
+    return-side producers (``@SendTo``), and Apache Camel
+    (``RouteBuilder`` ``from()``/``to()`` routes).
   * **Channel names** are resolved through the index: string literals,
     ``Class.CONST`` / bare constant references, ``${...}`` placeholders (via
     ``application.properties``/``.yml``), and ``#{...}`` SpEL (preserved as a
@@ -54,6 +63,23 @@ HTTP_METHOD_BY_TEMPLATE_CALL = {
     "postForObject": "POST", "postForEntity": "POST",
     "put": "PUT", "patchForObject": "PATCH", "delete": "DELETE",
 }
+# Async HTTP client (async-http-client): verb encoded in the prepare* method name.
+HTTP_VERB_BY_ASYNC_METHOD = {
+    "prepareGet": "GET", "preparePost": "POST", "preparePut": "PUT",
+    "preparePatch": "PATCH", "prepareDelete": "DELETE",
+    "prepareHead": "HEAD", "prepareOptions": "OPTIONS",
+}
+# Apache HttpComponents: verb from the request class (new HttpGet("…") → GET).
+HTTP_VERB_BY_APACHE_REQUEST = {
+    "HttpGet": "GET", "HttpPost": "POST", "HttpPut": "PUT",
+    "HttpDelete": "DELETE", "HttpPatch": "PATCH", "HttpHead": "HEAD",
+    "HttpOptions": "OPTIONS", "HttpTrace": "TRACE",
+}
+# Field types treated as Apache HttpComponents clients (the request arg carries
+# the URI). Also: a plain ``HttpClient`` field calling ``execute`` is apache
+# (java.net.http uses ``send``/``sendAsync``).
+APACHE_CLIENT_TYPES = {"CloseableHttpClient", "DefaultCloseableHttpClient", "HttpClient"}
+ASYNC_CLIENT_TYPES = {"AsyncHttpClient", "DefaultAsyncHttpClient"}
 
 
 # ── Annotation → (EntryPointType, channel_arg_key) ─────────────────
@@ -106,7 +132,69 @@ JAXRS_VERB_ANN = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 # Java EE WebSocket handler methods on a @ServerEndpoint class.
 EE_WS_HANDLER_ANN = {"OnMessage", "OnOpen", "OnClose", "OnError"}
 # EJB timer methods.
-EJB_SCHEDULE_ANN = {"Schedule", "Schedules"}
+EJB_SCHEDULE_ANN = {"Schedule", "Schedules", "Timeout"}
+
+
+# ── Extra framework entry points (Tier 1 / Tier 2) ────────────────
+# All detected deterministically from annotations / interface contracts.
+
+# Lifecycle / startup hooks (method annotations).
+LIFECYCLE_ANN = {"PostConstruct", "PreDestroy"}
+# Interface contract (simple name in supertypes) → the triggering method name.
+# A class implementing CommandLineRunner has its run(...) invoked at startup.
+LIFECYCLE_IFACE_METHODS: dict[str, str] = {
+    "CommandLineRunner": "run",
+    "ApplicationRunner": "run",
+    "InitializingBean": "afterPropertiesSet",
+    "SmartInitializingSingleton": "afterSingletonsInstantiated",
+    "DisposableBean": "destroy",
+}
+
+# Servlet API: @WebServlet class → one entry per doX verb found.
+SERVLET_VERB_BY_METHOD = {
+    "doGet": "GET", "doPost": "POST", "doPut": "PUT",
+    "doDelete": "DELETE", "doPatch": "PATCH", "doHead": "HEAD", "doOptions": "OPTIONS",
+    "service": "",
+}
+
+# JAX-WS SOAP: class @WebService + method @WebMethod.
+SOAP_METHOD_ANN = {"WebMethod"}
+
+# Spring for GraphQL — annotation → GraphQL operation kind (for method_type).
+GRAPHQL_ANN: dict[str, str] = {
+    "QueryMapping": "Query",
+    "MutationMapping": "Mutation",
+    "SubscriptionMapping": "Subscription",
+    "SchemaMapping": "Schema",
+    "BatchMapping": "Batch",
+}
+
+# STOMP return-side producers (Spring messaging): the return value is brokered.
+STOMP_PRODUCER_ANN = {"SendTo", "SendToUser"}
+
+# Spring Cloud Function: @Bean returning Function/Supplier/Consumer.
+CLOUD_FUNCTION_TYPES = {"Function", "Supplier", "Consumer"}
+
+# ── Apache Camel (RouteBuilder DSL) ───────────────────────────────
+# A class extending RouteBuilder declares routes via from(...)/to(...). The
+# endpoint URI scheme picks the broker; the remainder is the channel.
+CAMEL_ROUTE_BASES = {"RouteBuilder", "RoutesBuilder", "RouteConfigurationBuilder"}
+CAMEL_CONSUME_METHODS = {"from"}
+# Produce-side routing methods (send a message to the endpoint). NOTE: enrich /
+# pollEnrich request-reply/poll FROM the endpoint (consume-side) and are
+# intentionally NOT here — they would invert link direction.
+CAMEL_PRODUCE_METHODS = {"to", "toD", "toF", "wireTap"}
+# Endpoint scheme → (consumer EntryPointType, producer ProducerType). Schemes
+# not listed here (direct, seda, file, log, http, ...) are skipped to keep the
+# graph focused on cross-service message edges.
+CAMEL_SCHEME_TYPE: dict[str, tuple["EntryPointType", "ProducerType"]] = {
+    "kafka":    (EntryPointType.KAFKA_CONSUMER,    ProducerType.KAFKA_PRODUCER),
+    "rabbitmq": (EntryPointType.RABBITMQ_CONSUMER, ProducerType.RABBITMQ_PRODUCER),
+    "jms":      (EntryPointType.JMS_CONSUMER,      ProducerType.JMS_PRODUCER),
+    "sqs":      (EntryPointType.SQS_CONSUMER,      ProducerType.UNKNOWN),
+    "aws2-sqs": (EntryPointType.SQS_CONSUMER,      ProducerType.UNKNOWN),
+    "aws-sqs":  (EntryPointType.SQS_CONSUMER,      ProducerType.UNKNOWN),
+}
 
 
 # ── Field-type → producer mapping ──────────────────────────────────
@@ -119,6 +207,8 @@ PRODUCER_TYPE_LABEL: dict[str, ProducerType] = {
     "JmsTemplate": ProducerType.JMS_PRODUCER,
     "ApplicationEventPublisher": ProducerType.EVENT_PUBLISHER,
     "StreamBridge": ProducerType.UNKNOWN,  # links by channel; broker-agnostic
+    "PulsarTemplate": ProducerType.PULSAR_PRODUCER,
+    "Connection": ProducerType.NATS_PRODUCER,  # NATS publish(subject, …)
 }
 
 
@@ -190,6 +280,37 @@ class EntryPointDetector:
                         ee_ws_path = args[k][0]
                         break
 
+        # ── Extra-framework class context (Tier 1/2) ───────────────
+        # Servlet paths from @WebServlet / @WebFilter (class level).
+        servlet_paths: list[str] = []
+        is_web_filter = False
+        # SOAP: @WebService on the class enables @WebMethod entries.
+        is_webservice = any(
+            self.parser.get_annotation_name(a) == "WebService" for a in class_anns
+        )
+        for ann in class_anns:
+            name = self.parser.get_annotation_name(ann)
+            if name in ("WebServlet", "WebFilter"):
+                if name == "WebFilter":
+                    is_web_filter = True
+                aargs = self.parser.get_annotation_args(ann)
+                for k in ("urlPatterns", "value", "_raw"):
+                    if aargs.get(k):
+                        servlet_paths = aargs[k]
+                        break
+        if servlet_paths:
+            servlet_paths = [self.index.resolve_channel(p, ci) or p for p in servlet_paths]
+
+        # gRPC: class extends a generated *ImplBase → service name is the base
+        # minus "ImplBase".
+        grpc_service = next(
+            (s[:-len("ImplBase")] for s in ci.supertypes if s.endswith("ImplBase")),
+            "",
+        )
+
+        # Apache Camel: a RouteBuilder subclass declares from()/to() routes.
+        is_camel = any(s in CAMEL_ROUTE_BASES for s in ci.supertypes)
+
         entries: list[EntryPoint] = []
         producers: list[Producer] = []
 
@@ -226,12 +347,34 @@ class EntryPointDetector:
                 jaxrs_prefix, ee_ws_path,
             ))
 
+            # Extra-framework entries (main, lifecycle, SOAP, GraphQL, Servlet,
+            # gRPC, Spring Cloud Function).
+            entries.extend(self._extra_entries(
+                ci, m_node, m_name, annotations, params,
+                ctx=dict(
+                    is_webservice=is_webservice,
+                    servlet_paths=servlet_paths,
+                    is_web_filter=is_web_filter,
+                    grpc_service=grpc_service,
+                ),
+            ))
+
+            # STOMP return-side producer (@SendTo / @SendToUser).
+            producers.extend(self._stomp_producer(ci, m_node, m_name, annotations))
+
             # Producers within the method body (type-based).
             body = self.parser.get_method_body(m_node)
             if body:
+                # Apache request-variable map built once per method (not per call).
+                apache_map = self._apache_request_map(body)
                 for inv in self.parser.find_method_invocations(body):
                     producers.extend(self._producers_from_invocation(ci, m_name, inv))
-                    producers.extend(self._http_calls_from_invocation(ci, m_name, inv))
+                    producers.extend(self._http_calls_from_invocation(ci, m_name, inv, apache_map))
+                    # Apache Camel routes (only on RouteBuilder subclasses).
+                    if is_camel:
+                        cam_entries, cam_producers = self._camel_from_invocation(ci, m_name, inv)
+                        entries.extend(cam_entries)
+                        producers.extend(cam_producers)
 
         return entries, producers
 
@@ -310,6 +453,206 @@ class EntryPointDetector:
             # MDB implements MessageListener.onMessage — that is the handler.
             return self._make_entry(ci, class_node, "onMessage", channel, EntryPointType.JMS_CONSUMER, msg_type="javax.jms.Message")
         return None
+
+    # ── extra-framework entries (Tier 1 / Tier 2) ─────────────────
+
+    def _is_static(self, method_node) -> bool:
+        """True when the method has a ``static`` modifier."""
+        for c in method_node.children:
+            if c.type == "modifiers":
+                return "static" in c.text.decode().split()
+        return False
+
+    @staticmethod
+    def _first_generic_arg(type_text: str) -> str:
+        """``Function<OrderIn, OrderOut>`` → ``OrderIn`` (input type)."""
+        if "<" in type_text and ">" in type_text:
+            inner = type_text[type_text.find("<") + 1:type_text.rfind(">")]
+            return inner.split(",", 1)[0].split("<", 1)[0].strip()
+        return ""
+
+    def _extra_entries(self, ci, m_node, m_name, annotations, params, ctx):
+        """Tier 1/2 entries: main, lifecycle, SOAP, GraphQL, Servlet, gRPC,
+        Spring Cloud Function. All deterministic — annotation/contract based."""
+        out: list[EntryPoint] = []
+        ann_names = [self.parser.get_annotation_name(a) for a in annotations]
+        n_params = len(params)
+
+        # ── public static void main(String[]) ──
+        # Validate the JVM entry signature, not just the name: a static method
+        # named main with one param must take String[]/String... and return void.
+        if m_name == "main" and self._is_static(m_node) and n_params == 1:
+            fparams = next((c for c in m_node.children if c.type == "formal_parameters"), None)
+            fparams_text = fparams.text.decode() if fparams is not None else ""
+            ret = self.parser.get_method_return_type(m_node)
+            if ("String[]" in fparams_text or "String..." in fparams_text) and ret == "void":
+                out.append(self._make_entry(ci, m_node, m_name, "main", EntryPointType.MAIN))
+                return out
+
+        # ── Lifecycle: @PostConstruct / @PreDestroy ──
+        lc = next((n for n in ann_names if n in LIFECYCLE_ANN), None)
+        if lc:
+            out.append(self._make_entry(ci, m_node, m_name, f"@{lc}:{m_name}", EntryPointType.LIFECYCLE))
+            return out
+
+        # ── Lifecycle: interface contract (CommandLineRunner.run, …) ──
+        for iface, trigger in LIFECYCLE_IFACE_METHODS.items():
+            if iface in ci.supertypes and m_name == trigger:
+                out.append(self._make_entry(ci, m_node, m_name, f"@{iface}:{trigger}", EntryPointType.LIFECYCLE))
+                return out
+
+        # ── SOAP: @WebMethod on a @WebService class ──
+        if ctx["is_webservice"] and any(n in SOAP_METHOD_ANN for n in ann_names):
+            op = m_name
+            for a in annotations:
+                if self.parser.get_annotation_name(a) == "WebMethod":
+                    op = (self.parser.get_annotation_args(a).get("operationName") or [m_name])[0]
+                    break
+            out.append(self._make_entry(ci, m_node, m_name, op, EntryPointType.SOAP_SERVICE, method_type="SOAP"))
+            return out
+
+        # ── GraphQL: @QueryMapping / @MutationMapping / … ──
+        gql = next((n for n in ann_names if n in GRAPHQL_ANN), None)
+        if gql:
+            gargs = next(
+                (self.parser.get_annotation_args(a) for a in annotations
+                 if self.parser.get_annotation_name(a) == gql), {}
+            )
+            name = (gargs.get("name") or gargs.get("value") or gargs.get("_raw") or [m_name])[0]
+            msg_type = params[0]["type"] if params else ""
+            out.append(self._make_entry(ci, m_node, m_name, name, EntryPointType.GRAPHQL, msg_type=msg_type, method_type=GRAPHQL_ANN[gql]))
+            return out
+
+        # ── Servlet API: @WebServlet doX / @WebFilter doFilter ──
+        sp = ctx["servlet_paths"]
+        if sp:
+            if ctx["is_web_filter"] and m_name == "doFilter":
+                for pth in sp:
+                    out.append(self._make_entry(ci, m_node, m_name, pth, EntryPointType.SERVLET, method_type="FILTER"))
+                return out
+            if m_name in SERVLET_VERB_BY_METHOD:
+                verb = SERVLET_VERB_BY_METHOD[m_name]
+                for pth in sp:
+                    out.append(self._make_entry(ci, m_node, m_name, pth, EntryPointType.SERVLET, method_type=verb))
+                return out
+
+        # ── gRPC: @Override service methods on an *ImplBase subclass ──
+        # Requires a StreamObserver parameter — the defining signature of every
+        # gRPC service method (unary/server-streaming/bidi/client-streaming). A
+        # bare "endswith ImplBase" match is too broad (AuditServiceImplBase, …);
+        # StreamObserver disambiguates generated gRPC bases from hand-written ones.
+        svc = ctx["grpc_service"]
+        if svc and "Override" in ann_names and any(
+            "StreamObserver" in (p.get("type") or "") for p in params
+        ):
+            msg_type = next((p["type"] for p in params if "StreamObserver" not in (p["type"] or "")), "")
+            out.append(self._make_entry(ci, m_node, m_name, f"/{svc}/{m_name}", EntryPointType.GRPC_SERVICE, msg_type=msg_type, method_type="GRPC"))
+            return out
+
+        # ── Spring Cloud Function: @Bean returning Function/Supplier/Consumer ──
+        if "Bean" in ann_names:
+            ret = self.parser.get_method_return_type(m_node) or ""
+            head = ret.split("<", 1)[0].strip()
+            if head in CLOUD_FUNCTION_TYPES:
+                bean = m_name
+                for a in annotations:
+                    if self.parser.get_annotation_name(a) == "Bean":
+                        ba = self.parser.get_annotation_args(a)
+                        bean = (ba.get("name") or ba.get("value") or ba.get("_raw") or [m_name])[0]
+                        break
+                msg_type = self._first_generic_arg(ret) if head in ("Function", "Consumer") else ""
+                out.append(self._make_entry(ci, m_node, m_name, bean, EntryPointType.CLOUD_FUNCTION, msg_type=msg_type, method_type=head.upper()))
+                return out
+
+        return out
+
+    def _stomp_producer(self, ci, m_node, m_name, annotations) -> list[Producer]:
+        """STOMP return-side producers: @SendTo / @SendToUser destinations."""
+        out: list[Producer] = []
+        ret = self.parser.get_method_return_type(m_node) or ""
+        for a in annotations:
+            name = self.parser.get_annotation_name(a)
+            if name not in STOMP_PRODUCER_ANN:
+                continue
+            dests = self.parser.get_annotation_args(a).get("_raw") or ["unknown"]
+            for d in dests:
+                resolved = self.index.resolve_channel(d, ci) or d
+                out.append(Producer(
+                    id=f"{ci.repo}:{ci.simple_name}.{m_name}:sendTo:{resolved}",
+                    repo=ci.repo,
+                    type=ProducerType.UNKNOWN,  # broker-agnostic STOMP destination
+                    channel=resolved,
+                    method=f"{ci.simple_name}.{m_name}",
+                    file=ci.file,
+                    line=m_node.start_point[0] + 1,
+                    message_type=ret,
+                ))
+        return out
+
+    # ── Apache Camel (RouteBuilder DSL) ────────────────────────────
+
+    def _camel_from_invocation(self, ci, m_name, inv):
+        """Camel from()/to() on a RouteBuilder subclass → consumer entry or
+        producer edge. The endpoint URI scheme selects the broker."""
+        parsed = self.parser.parse_method_invocation(inv)
+        method = parsed["method"]
+        if method not in CAMEL_CONSUME_METHODS and method not in CAMEL_PRODUCE_METHODS:
+            return [], []
+        uri = parsed["args"][0] if parsed["args"] else ""
+        # Only literal endpoint URIs with a scheme (kafka:topic, jms:queue:x, …).
+        if not isinstance(uri, str) or ":" not in uri:
+            return [], []
+        scheme, channel, entry_type, prod_type = self._parse_camel_endpoint(uri)
+        # Keep the graph focused on real broker edges; skip internal/utility
+        # schemes (direct, seda, file, log, mock, http, …).
+        if scheme not in CAMEL_SCHEME_TYPE or not channel:
+            return [], []
+        resolved = self.index.resolve_channel(channel, ci) or channel
+        if method in CAMEL_CONSUME_METHODS:
+            return [self._make_entry(ci, inv, m_name, resolved, entry_type)], []
+        return [], [Producer(
+            id=f"{ci.repo}:{ci.simple_name}.{m_name}:{method}:{resolved}",
+            repo=ci.repo,
+            type=prod_type,
+            channel=resolved,
+            method=f"{ci.simple_name}.{m_name}",
+            file=ci.file,
+            line=inv.start_point[0] + 1,
+            message_type="",
+        )]
+
+    def _parse_camel_endpoint(self, uri: str):
+        """Split a Camel endpoint URI into ``(scheme, channel, entry_type, prod_type)``.
+
+        Schemes mapped in :data:`CAMEL_SCHEME_TYPE` resolve to real broker types;
+        others fall back to UNKNOWN (and the caller may drop them).
+        """
+        main = uri.split("?", 1)[0]
+        if ":" not in main:
+            return "", main, EntryPointType.UNKNOWN, ProducerType.UNKNOWN
+        scheme, rest = main.split(":", 1)
+        types = CAMEL_SCHEME_TYPE.get(scheme)
+        entry_type = types[0] if types else EntryPointType.UNKNOWN
+        prod_type = types[1] if types else ProducerType.UNKNOWN
+        channel = self._camel_channel(scheme, rest)
+        return scheme, channel, entry_type, prod_type
+
+    @staticmethod
+    def _camel_channel(scheme: str, rest: str) -> str:
+        """Channel name from the URI remainder (query string already stripped)."""
+        rest = rest.strip()
+        if scheme == "jms":
+            low = rest.lower()
+            for p in ("temp-topic:", "temp-queue:", "queue:", "topic:"):
+                if low.startswith(p):
+                    rest = rest[len(p):]
+                    break
+            return rest.rsplit("/", 1)[-1]
+        # kafka / rabbitmq / sqs / generic: take the last path segment. For
+        # rabbitmq://host[:port]/exchange this yields the exchange name.
+        if "//" in rest:
+            rest = rest.split("//", 1)[1]
+        return rest.rsplit("/", 1)[-1]
 
     # ── entry points ───────────────────────────────────────────────
 
@@ -433,8 +776,14 @@ class EntryPointDetector:
                 ))
         return out
 
-    def _http_calls_from_invocation(self, ci, m_name, inv) -> list[Producer]:
-        """RestTemplate/WebClient/RestClient/HttpClient/OkHttp/JAX-RS sync calls."""
+    def _http_calls_from_invocation(self, ci, m_name, inv, apache_map=None) -> list[Producer]:
+        """Sync HTTP clients: RestTemplate/WebClient/RestClient, java.net.http,
+        OkHttp, JAX-RS, Apache HttpComponents, and async-http-client.
+
+        ``apache_map`` (var name → (url, verb)) is the per-method Apache
+        request-variable map built once by the caller; other client families
+        ignore it.
+        """
         parsed = self.parser.parse_method_invocation(inv)
         receiver = parsed["receiver"]
         method_called = parsed["method"]
@@ -446,18 +795,35 @@ class EntryPointDetector:
         if method_called not in HTTP_CLIENT_TYPES[field_type]:
             return []
 
-        verb = HTTP_METHOD_BY_TEMPLATE_CALL.get(method_called, "")
-        if method_called == "exchange":
-            # RestTemplate.exchange(HttpMethod.GET, ...) or (url, HttpMethod, ...)
-            for a in parsed["args"]:
-                up = str(a).upper()
-                if up in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
-                    verb = up
-                    break
+        # Apache HttpComponents: URI + verb live on the request argument
+        # (``httpClient.execute(new HttpGet("http://…"))`` or a request var).
+        is_apache = (
+            field_type in APACHE_CLIENT_TYPES and method_called == "execute"
+            and field_type != "HttpClient"
+        ) or (field_type == "HttpClient" and method_called == "execute")
+        if is_apache:
+            path, verb = self._apache_request_info(inv, apache_map)
+            if not path:
+                return []
+        elif field_type in ASYNC_CLIENT_TYPES:
+            # async-http-client: verb from prepare* method name, URI = first arg.
+            verb = HTTP_VERB_BY_ASYNC_METHOD.get(method_called, "")
+            path = self._extract_http_path(inv, field_type)
+            if not path:
+                return []
+        else:
+            verb = HTTP_METHOD_BY_TEMPLATE_CALL.get(method_called, "")
+            if method_called == "exchange":
+                # RestTemplate.exchange(HttpMethod.GET, ...) or (url, HttpMethod, …)
+                for a in parsed["args"]:
+                    up = str(a).upper()
+                    if up in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+                        verb = up
+                        break
+            path = self._extract_http_path(inv, field_type)
+            if not path:
+                return []
 
-        path = self._extract_http_path(inv, field_type)
-        if not path:
-            return []
         channel = self.index.resolve_channel(path, ci) or path
         channel = self._strip_http_origin(channel)
         if not channel or channel == "unknown":
@@ -472,6 +838,70 @@ class EntryPointDetector:
             line=inv.start_point[0] + 1,
             message_type=verb,
         )]
+
+    # ── Apache HttpComponents request extraction ──────────────────
+
+    def _apache_request_map(self, body: Node) -> dict:
+        """``var_name → (url, verb)`` for every ``HttpXxx req = new HttpXxx("…")``
+        declared in the method body. Built once per method so each ``execute(req)``
+        is an O(1) lookup instead of re-walking the body."""
+        out: dict[str, tuple[str, str]] = {}
+        for node in _walk_nodes(body):
+            if node.type != "local_variable_declaration":
+                continue
+            for d in node.children:
+                if d.type != "variable_declarator":
+                    continue
+                declared = ""
+                for vc in d.children:
+                    if vc.type == "identifier" and not declared:
+                        declared = vc.text.decode()
+                if not declared:
+                    continue
+                for vc in d.children:
+                    if vc.type == "object_creation_expression":
+                        url, verb = self._apache_request_from_creation(vc)
+                        if url:
+                            out[declared] = (url, verb)
+                        break
+        return out
+
+    def _apache_request_info(self, invocation: Node, apache_map: dict) -> tuple[str, str]:
+        """(url, verb) from an apache ``execute(request)`` call.
+
+        ``request`` is either an inline ``new HttpGet("url")`` or a local variable
+        holding such a request (resolved via the per-method ``apache_map``).
+        """
+        arglist = next(
+            (c for c in invocation.children if c.type == "argument_list"), None
+        )
+        if arglist is None:
+            return "", ""
+        for ac in arglist.children:
+            if ac.type == "object_creation_expression":
+                url, verb = self._apache_request_from_creation(ac)
+                if url:
+                    return url, verb
+            elif ac.type == "identifier" and ac.text.decode() in apache_map:
+                return apache_map[ac.text.decode()]
+        return "", ""
+
+    def _apache_request_from_creation(self, node: Node) -> tuple[str, str]:
+        """``new HttpPost("http://…")`` → (url, verb)."""
+        type_name = ""
+        for c in node.children:
+            if c.type in ("type_identifier", "scoped_identifier", "scoped_type_identifier"):
+                type_name = self.parser.get_type_name(c)
+                break
+        verb = HTTP_VERB_BY_APACHE_REQUEST.get(type_name, "")
+        arglist = next((c for c in node.children if c.type == "argument_list"), None)
+        if arglist is not None:
+            for ac in arglist.children:
+                if ac.type == "string_literal":
+                    val = self.parser._extract_string_value(ac)
+                    if val and (val.startswith("/") or val.startswith("http") or "${" in val or "#{" in val):
+                        return val, verb
+        return "", verb
 
     def _extract_http_path(self, invocation: Node, field_type: str) -> str:
         """First URL-ish argument: direct string for RestTemplate; nested

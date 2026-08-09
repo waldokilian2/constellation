@@ -17,6 +17,14 @@ const TYPE_META = {
   "websocket":         { color: "#a855f7", label: "WebSocket", glow: "rgba(168,85,247,.55)" },
   "jms-consumer":      { color: "#2dd4bf", label: "JMS",       glow: "rgba(45,212,191,.55)" },
   "sqs-consumer":      { color: "#e879f9", label: "SQS",       glow: "rgba(232,121,249,.55)" },
+  // Extra framework entry kinds (deterministic detection).
+  "servlet":           { color: "#38bdf8", label: "Servlet",   glow: "rgba(56,189,248,.55)" },
+  "soap-service":      { color: "#d4a373", label: "SOAP",      glow: "rgba(212,163,115,.55)" },
+  "graphql":           { color: "#f472b6", label: "GraphQL",   glow: "rgba(244,114,182,.55)" },
+  "grpc-service":      { color: "#14b8a6", label: "gRPC",      glow: "rgba(20,184,166,.55)" },
+  "lifecycle":         { color: "#64748b", label: "Lifecycle", glow: "rgba(100,116,139,.55)" },
+  "main":              { color: "#818cf8", label: "Main",      glow: "rgba(129,140,248,.55)" },
+  "cloud-function":    { color: "#c084fc", label: "Function",  glow: "rgba(192,132,252,.55)" },
 };
 
 // Galaxy edge colors by link kind: async (message-only), sync (HTTP-only), both (mixed)
@@ -411,6 +419,14 @@ const ORIGIN_KINDS = {
   "rabbitmq-consumer":{ tag: "RABBITMQ",  cls: "rabbitmq",  noun: "RabbitMQ queue" },
   "jms-consumer":     { tag: "JMS",       cls: "jms",       noun: "JMS queue" },
   "sqs-consumer":     { tag: "SQS",       cls: "sqs",       noun: "SQS queue" },
+  // Extra framework origins.
+  main:               { tag: "MAIN",      cls: "main",      noun: "application bootstrap" },
+  lifecycle:          { tag: "LIFECYCLE", cls: "lifecycle", noun: "lifecycle hook" },
+  servlet:            { tag: "SERVLET",   cls: "servlet",   noun: "servlet endpoint" },
+  "soap-service":     { tag: "SOAP",      cls: "soap",      noun: "SOAP operation" },
+  graphql:            { tag: "GRAPHQL",   cls: "graphql",   noun: "GraphQL resolver" },
+  "grpc-service":     { tag: "GRPC",      cls: "grpc",      noun: "gRPC service method" },
+  "cloud-function":   { tag: "FUNCTION",  cls: "function",  noun: "cloud function" },
 };
 
 // Describe a flow's origin: rest vs. a specific external trigger type.

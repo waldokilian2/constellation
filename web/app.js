@@ -538,6 +538,7 @@ function detectFlows(graph) {
       originLabel,
       originType: isRest ? "rest" : "external",
       originChannel: entry.channel || "",
+      originMethodType: entry.method_type || "",
       step,
       repos: Array.from(repos),
       repoCount: repos.size,
@@ -1538,7 +1539,10 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
     }
 
     if (flow.originType === "external") {
-      externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo });
+      externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo, kind: "external" });
+    }
+    if (flow.originType === "rest") {
+      externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo, kind: "rest", verb: flow.originMethodType || "POST" });
     }
 
     walk(flow.step, 0);
@@ -1729,16 +1733,16 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
           })}
         </svg>
 
-        {/* External input nodes */}
+        {/* External / REST input nodes */}
         {externalInputs.map((ei, i) => (
           <div
             key={"ext-node-" + i}
-            className="flow-external-node"
+            className={ei.kind === "rest" ? "flow-external-node rest-origin" : "flow-external-node"}
             style={{ left: layout.externalPos[i].x - 80, top: layout.externalPos[i].y - 50 }}
           >
-            <div className="flow-external-icon">⌁</div>
-            <div className="flow-external-label">{ei.channel}</div>
-            <div className="flow-external-sub">external</div>
+            <div className="flow-external-icon">{ei.kind === "rest" ? "⟶" : "⌁"}</div>
+            <div className="flow-external-label">{ei.kind === "rest" ? (ei.verb + " " + ei.channel) : ei.channel}</div>
+            <div className="flow-external-sub">{ei.kind === "rest" ? "REST" : "external"}</div>
           </div>
         ))}
 

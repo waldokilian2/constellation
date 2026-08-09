@@ -1624,7 +1624,7 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
               key={f.id}
               ref={(el) => { cardRefs.current[i] = el; }}
               className={"flow-card" + (f.hasCrossRepo ? " cross-repo" : "")}
-              style={{ left: pos.x, top: pos.y, width: pos.w, height: pos.h || undefined }}
+              style={{ left: pos.x, top: pos.y, width: pos.w, height: pos.h || undefined, animationDelay: (i * 45) + "ms" }}
               onClick={(e) => onSelectFlow(f, e)}
             >
               <div className="flow-card-glow" />
@@ -3176,7 +3176,7 @@ function StatusBadge({ status, stale }) {
   return <span className={"status-badge " + m.cls}>{m.label}</span>;
 }
 
-function ProjectCard({ p, updates, onOpen, onAddRepo, onRescan, onDelete }) {
+function ProjectCard({ index, p, updates, onOpen, onAddRepo, onRescan, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const stats = p.stats || {};
   const repos = p.repos || [];
@@ -3196,6 +3196,7 @@ function ProjectCard({ p, updates, onOpen, onAddRepo, onRescan, onDelete }) {
   return (
     <div
       className={"project-card glass" + (busy ? " busy" : "")}
+      style={{ animationDelay: (index || 0) * 70 + "ms" }}
       onClick={() => !busy && onOpen(p)}
     >
       <div className="pc-top">
@@ -3296,9 +3297,10 @@ function ProjectsView({ projects, loading, onOpen, onNew, onDelete, updatesByPid
           </div>
         ) : (
           <div className="project-grid">
-            {projects.map((p) => (
+            {projects.map((p, i) => (
               <ProjectCard
                 key={p.id}
+                index={i}
                 p={p}
                 updates={updatesByPid ? updatesByPid[p.id] : null}
                 onOpen={onOpen}

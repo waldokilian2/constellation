@@ -961,11 +961,11 @@ function ProducersPanel({ producers, graph }) {
             <div className="producer-channel">
               <span className="producer-channel-name">{channel}</span>
               <span className="producer-arrow">→</span>
-              <span className="producer-flow-targets">
-                {consumerRepos.length > 0
-                  ? consumerRepos.join(", ")
-                  : "no consumer found"}
-              </span>
+            </div>
+            <div className="producer-flow-targets">
+              {consumerRepos.length > 0
+                ? consumerRepos.join(", ")
+                : "no consumer found"}
             </div>
             <div className="producer-flow">
               {prods.map((p) => (
@@ -1481,7 +1481,9 @@ function DetailPanel({ node, entryPoint, onClose, pid }) {
 function FlowIndexView({ graph, dims, onSelectFlow }) {
   const flows = useMemo(() => detectFlows(graph), [graph]);
   const W = dims.w, H = dims.h;
-  const cx = W / 2, cy = H / 2;
+  const TOPBAR_H = 72; // matches --topbar-h in styles.css
+  // Center within the VISIBLE stage area (below the fixed topbar), not the full window
+  const cx = W / 2, cy = (H - TOPBAR_H) / 2;
   const pz = usePanZoom(".flow-card");
 
   // Uniform card height: all cards share the tallest card's height
@@ -1496,26 +1498,33 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
     setUniformH((prev) => (prev === maxH ? prev : maxH));
   }, [flows]);
 
-  // Position flow cards in a grid-like arrangement
-  const positions = useMemo(() => {
+  // Position flow cards in a grid that FITS the visible stage. The whole grid is
+  // scaled down (transform: scale) when it would overflow, so cards never clip.
+  const layout = useMemo(() => {
     const n = flows.length;
     const cols = Math.min(n, n <= 4 ? 2 : 3);
     const cardW = 240;
     const gapX = 50, gapY = 36;
-    const totalW = cols * cardW + (cols - 1) * gapX;
+    const rows = Math.ceil(n / cols);
     // Uniform height across the whole grid (fall back to a reasonable estimate
     // before the first measurement lands)
     const cardH = uniformH || 196;
-    const rows = Math.ceil(n / cols);
+    const totalW = cols * cardW + (cols - 1) * gapX;
     const totalH = rows * cardH + (rows - 1) * gapY;
+    // Shrink-to-fit with a small margin around the visible stage
+    const margin = 24;
+    const fit = Math.min(1, (W - margin * 2) / totalW, (cy * 2 - margin * 2) / totalH);
+    const scaledW = totalW * fit;
+    const scaledH = totalH * fit;
+
     const positions = [];
-    let y = cy - totalH / 2;
+    let y = 0;
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const idx = r * cols + c;
         if (idx >= n) break;
         positions.push({
-          x: cx - totalW / 2 + c * (cardW + gapX),
+          x: c * (cardW + gapX),
           y: y,
           w: cardW,
           h: uniformH || null, // null = keep natural (auto) height until measured
@@ -1523,7 +1532,15 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
       }
       y += cardH + gapY;
     }
-    return positions;
+    return {
+      positions,
+      // Wrapper placed so the scaled grid is centered in the visible area
+      left: cx - scaledW / 2,
+      top: cy - scaledH / 2,
+      width: totalW,
+      height: totalH,
+      fit,
+    };
   }, [flows, cx, cy, uniformH]);
 
   return (
@@ -1547,8 +1564,20 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
             transformOrigin: "0 0",
           }}
         >
+        <div
+          className="flow-grid"
+          style={{
+            position: "absolute",
+            left: layout.left,
+            top: layout.top,
+            width: layout.width,
+            height: layout.height,
+            transform: "scale(" + layout.fit + ")",
+            transformOrigin: "top left",
+          }}
+        >
         {flows.map((f, i) => {
-          const pos = positions[i];
+          const pos = layout.positions[i];
           return (
             <div
               key={f.id}
@@ -1594,6 +1623,7 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
             </div>
           );
         })}
+        </div>
         </div>
       </div>
       {pz.zoomControls}

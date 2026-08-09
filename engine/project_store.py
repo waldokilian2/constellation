@@ -246,7 +246,15 @@ class ProjectStore:
 
     @staticmethod
     def _current_commit(repo_dir: Path) -> Optional[str]:
-        """Return the short-ish HEAD sha of a cloned repo, or ``None``."""
+        """Return the short-ish HEAD sha of a cloned repo, or ``None``.
+
+        Only resolves when ``repo_dir`` is itself a git working tree (a
+        ``.git`` entry). Without that guard, ``git -C`` on a plain directory
+        nested inside a larger repo would walk up and report the enclosing
+        repo's HEAD, falsely tracking a non-repo as a git checkout.
+        """
+        if not (repo_dir / ".git").exists():
+            return None
         try:
             out = subprocess.run(
                 ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
@@ -311,16 +319,52 @@ class ProjectStore:
         url: str,
         log: Callable[[str], None] = lambda _msg: None,
     ) -> dict:
-        """Clone a single git URL into the project's ``repos/`` dir.
+        """Register a repo in a project.
+
+        Accepts either an https/http git URL (shallow-cloned into the
+        project's ``repos/`` dir) or a ``local:<path>`` spec pointing at an
+        existing directory on disk (recorded in place, never cloned). If a
+        ``local:`` path is a git repository its current HEAD is recorded so
+        change detection / sync can still track it.
 
         Returns the repo source record ``{name, source, path, commit}``.
-        Raises ``RuntimeError`` if the clone fails.
+        Raises ``RuntimeError`` if the clone fails or the local path is bad.
         """
+        url = url.strip()
+        if url.startswith("local:"):
+            return self._add_local_repo(pid, url, log)
+
         url = _validate_url(url)
         repo_name = self._unique_repo_name(pid, repo_name_from_url(url))
         dest = self.repos_dir(pid) / _safe_repo_dirname(repo_name)
         commit = self._git_clone(url, dest, log, repo_name)
         return {"name": repo_name, "source": url, "path": str(dest), "commit": commit}
+
+    def _add_local_repo(
+        self,
+        pid: str,
+        spec: str,
+        log: Callable[[str], None] = lambda _msg: None,
+    ) -> dict:
+        """Record an existing on-disk directory as a project repo (no clone).
+
+        ``spec`` is ``local:<path>``, where the path is resolved against
+        ``base_dir`` when relative. If the directory is a git repo its HEAD is
+        captured so ``check_updates`` / ``pull_repos`` can track it.
+        """
+        raw = (spec[len("local:"):] or ".").strip() or "."
+        path = Path(raw)
+        if not path.is_absolute():
+            path = (self.base_dir / path).resolve()
+        if not path.exists() or not path.is_dir():
+            raise RuntimeError(f"Local path is not an existing directory: {path}")
+        name = self._unique_repo_name(pid, path.name or "repo")
+        commit = self._current_commit(path)
+        log(
+            f"[clone] Using local repo {name} ← {path}"
+            + (f" @ {commit[:8]}" if commit else " (not a git repo)")
+        )
+        return {"name": name, "source": f"local:{path}", "path": str(path), "commit": commit}
 
     def analyze_project(
         self,
@@ -408,8 +452,10 @@ class ProjectStore:
 
         Compares the commit recorded at clone time against ``git ls-remote
         <url> HEAD``. No source is downloaded, so this is cheap and safe to
-        poll. Repos ingested as ``local:`` (legacy seed) have no remote and
-        are skipped. Returns one entry per remote-backed repo::
+        poll. Local (``local:``) repos have no remote; instead their on-disk
+        HEAD is compared against the recorded commit so a changed checkout
+        surfaces as ``stale`` (git-backed local repos only; plain dirs report
+        up to date). Returns one entry per repo::
 
             {name, source, current_commit, remote_commit, stale, error}
         """
@@ -420,10 +466,21 @@ class ProjectStore:
         out: list[dict] = []
         for r in meta.get("repos", []):
             source = r.get("source", "")
-            if source.startswith("local:"):
-                continue  # no remote to query
-            remote, err = self._remote_head(source)
             current = r.get("commit")
+            if source.startswith("local:"):
+                path = Path(r.get("path", ""))
+                head = self._current_commit(path) if path else None
+                entry = {
+                    "name": r.get("name"),
+                    "source": source,
+                    "current_commit": current,
+                    "remote_commit": head,
+                    "stale": bool(head) and bool(current) and head != current,
+                    "error": None,
+                }
+                out.append(entry)
+                continue
+            remote, err = self._remote_head(source)
             entry = {
                 "name": r.get("name"),
                 "source": source,
@@ -447,7 +504,9 @@ class ProjectStore:
         are re-fetched; unchanged repos are left untouched. Each refreshed repo
         is re-cloned in place at its existing path and its recorded ``commit``
         is updated. This does *not* re-analyse — call ``analyze_project`` after
-        to regenerate the graph. Local-seed repos (``local:``) are skipped.
+        to regenerate the graph. Remote repos are re-cloned; ``local:`` repos
+        that are git repositories are pulled in place (``--ff-only``) and their
+        recorded commit is updated; plain local directories are left untouched.
         """
         meta = self.get_project(pid)
         if not meta:
@@ -463,13 +522,14 @@ class ProjectStore:
         refreshed = 0
         for r in meta.get("repos", []):
             source = r.get("source", "")
-            if source.startswith("local:"):
-                continue
             if stale_names is not None and r.get("name") not in stale_names:
                 continue
             dest = Path(r["path"])
             try:
-                r["commit"] = self._git_clone(source, dest, log, r.get("name", "?"))
+                if source.startswith("local:"):
+                    r["commit"] = self._pull_local(dest, log, r.get("name", "?"))
+                else:
+                    r["commit"] = self._git_clone(source, dest, log, r.get("name", "?"))
                 refreshed += 1
             except (RuntimeError, ValueError) as e:
                 log(f"[clone] {e}")
@@ -478,6 +538,26 @@ class ProjectStore:
         self._upsert(meta)
         log(f"[clone] Synced {refreshed} repo(s) to latest.")
         return meta
+
+    @staticmethod
+    def _pull_local(dest: Path, log: Callable[[str], None], name: str) -> Optional[str]:
+        """Fetch/pull a local git repo in place and return its new HEAD.
+
+        Non-git directories are left untouched and report ``None`` (the caller
+        may still count them as refreshed; they carry no commit to update).
+        ``--ff-only`` keeps the local checkout clean on conflicting changes.
+        """
+        if not (dest / ".git").exists():
+            return None
+        log(f"[clone] Pulling local repo {name} ← {dest}")
+        try:
+            subprocess.run(
+                ["git", "-C", str(dest), "pull", "--ff-only"],
+                check=False, capture_output=True, text=True, timeout=120,
+            )
+        except (subprocess.SubprocessError, OSError):
+            pass
+        return ProjectStore._current_commit(dest)
 
     def mark_status(self, pid: str, status: str, message: str = "") -> None:
         """Set a project's status (``analyzing`` / ``ready`` / ``error``)."""
@@ -529,15 +609,34 @@ class ProjectStore:
         except (json.JSONDecodeError, OSError):
             return
 
-        repo_roots = graph.get("repo_roots") or {}
-        repos = [
-            {"name": name, "source": f"local:{path}", "path": path}
-            for name, path in repo_roots.items()
-        ]
         pid = self._new_id(project_name)
         pdir = self.project_dir(pid)
         pdir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(legacy, self.graph_path(pid))
+
+        # Copy each recorded repo into the project's own repos/ dir so every
+        # project's repos live in the same per-project structure as URL-cloned
+        # ones. The graph stores repo-relative paths, so only repo_roots needs
+        # rewriting to point at the copies.
+        repo_roots = graph.get("repo_roots") or {}
+        repos: list[dict] = []
+        new_roots: dict[str, str] = {}
+        for name, path in repo_roots.items():
+            dest = self.repos_dir(pid) / _safe_repo_dirname(name)
+            src = Path(path)
+            if src.is_dir():
+                if dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
+                new_roots[name] = str(dest)
+            else:
+                new_roots[name] = str(path)  # missing source — keep original root
+            repos.append(
+                {"name": name, "source": f"local:{new_roots[name]}", "path": new_roots[name]}
+            )
+
+        if new_roots:
+            graph["repo_roots"] = new_roots
+        self.graph_path(pid).write_text(json.dumps(graph))
 
         meta = {
             "id": pid,

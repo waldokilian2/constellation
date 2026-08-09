@@ -286,10 +286,12 @@ function ErrorScreen({ message }) {
 }
 
 /* ---------------- Header ---------------- */
-function Header({ graph, mode, onModeChange, projectName, onHome }) {
+function Header({ graph, mode, onModeChange, projectName, onHome, stale }) {
   const gen = graph && graph.generated_at
     ? new Date(graph.generated_at).toLocaleString()
     : "";
+  const statusLabel = stale ? "Stale" : "Up to date";
+  const statusCls = stale ? "stale" : "ok";
   return (
     <header className="topbar glass">
       <div className="brand">
@@ -301,7 +303,9 @@ function Header({ graph, mode, onModeChange, projectName, onHome }) {
           <div className="brand-sub">
             {onHome && projectName ? (
               <span className="brand-crumb">
-                <button className="crumb link" onClick={onHome}>Projects</button>
+                <button className="crumb back link" onClick={onHome} title="Back to projects">
+                  <span className="crumb-arrow">←</span> Projects
+                </button>
                 <span className="crumb-sep">›</span>
                 <span className="crumb">{projectName}</span>
               </span>
@@ -322,8 +326,15 @@ function Header({ graph, mode, onModeChange, projectName, onHome }) {
         </div>
       )}
       <div className="meta">
-        {graph && graph.engine_version && <span className="meta-pill">engine v{graph.engine_version}</span>}
-        {gen && <span className="meta-pill">{gen}</span>}
+        {gen && (
+          <span className={"meta-pill status-" + statusCls}>
+            <span className="pill-date" aria-hidden="true">{gen ? "Last scanned: " + gen : ""}</span>
+            <span className="pill-status">
+              <span className="status-dot" />
+              <span className="status-label">{statusLabel}</span>
+            </span>
+          </span>
+        )}
       </div>
     </header>
   );
@@ -346,20 +357,29 @@ function Breadcrumb({ items }) {
 }
 
 /* ---------------- Legend ---------------- */
-function Legend() {
+function Legend({ types = [], hasHttp = false }) {
+  const shown = Object.keys(TYPE_META).filter((k) => types.includes(k));
   return (
     <div className="legend glass">
       <div className="legend-title">Entry point types</div>
-      {Object.keys(TYPE_META).map((k) => (
-        <div className="legend-item" key={k}>
-          <span className="legend-dot" style={{ background: TYPE_META[k].color, color: TYPE_META[k].color }}></span>
-          {TYPE_META[k].label}
-        </div>
-      ))}
-      <div className="legend-item">
-        <span className="legend-line" style={{ background: "#00e0a8" }}></span>
-        Sync HTTP call
-      </div>
+      {shown.length === 0 && !hasHttp ? (
+        <div className="legend-item">No entry points</div>
+      ) : (
+        <>
+          {shown.map((k) => (
+            <div className="legend-item" key={k}>
+              <span className="legend-dot" style={{ background: TYPE_META[k].color, color: TYPE_META[k].color }}></span>
+              {TYPE_META[k].label}
+            </div>
+          ))}
+          {hasHttp && (
+            <div className="legend-item">
+              <span className="legend-line" style={{ background: "#00e0a8" }}></span>
+              Sync HTTP call
+            </div>
+          )}
+        </>
+      )}
       <div className="legend-hint">Click a repo to zoom in</div>
     </div>
   );
@@ -573,6 +593,19 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
     return m;
   }, [graph]);
 
+  // Which entry point types does the whole project use (drives the legend)?
+  const usedTypes = useMemo(() => {
+    const s = new Set();
+    entryPoints.forEach((ep) => s.add(ep.type));
+    return Array.from(s);
+  }, [graph]);
+
+  // Does the project have any sync HTTP inter-service calls (legend line)?
+  const hasHttp = useMemo(
+    () => (graph.cross_repo_links || []).some((l) => l.kind === "http"),
+    [graph]
+  );
+
   const W = dims.w;
   const H = dims.h;
   const cx = W / 2, cy = H / 2;
@@ -753,7 +786,7 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
         })}
         </div>
       </div>
-      <Legend />
+      <Legend types={usedTypes} hasHttp={hasHttp} />
       {pz.zoomControls}
     </div>
   );
@@ -1020,30 +1053,52 @@ function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNod
 
     walk(tree || { method: "?", children: [] }, 0, "0");
 
-    // Build edges — parent right-center → child left-center
-    const edges = [];
-    placed.forEach((node) => {
+    const maxX = Math.max(...placed.map((p) => p.x)) + PV_NODE_W;
+    const maxY = Math.max(...placed.map((p) => p.y)) + PV_NODE_H;
+
+    return { nodes: placed, maxX, maxY };
+  }, [tree, expanded]);
+
+  // ── Edges — parent right-center → child left-center ─────────
+  // The expand toggle sits INSIDE the node's PV_NODE_W width (body flexes, toggle is a
+  // fixed 32px right column), so the node's right edge is simply node.x + PV_NODE_W.
+  // Vertical anchors use each button's MEASURED center — node bodies grow with content
+  // (method name, loc, confidence badge), so the fixed PV_NODE_H estimate can't give a
+  // true center and the line would miss short nodes.
+  const [nodeHeights, setNodeHeights] = useState([]);
+  const edges = useMemo(() => {
+    const result = [];
+    layout.nodes.forEach((node, idx) => {
       if (node.isExpanded && node.children.length > 0) {
         node.children.forEach((ci) => {
-          const child = placed[ci];
-          edges.push({
-            x1: node.x + PV_NODE_W + (node.hasKids ? PV_TOGGLE_W : 0),
-            y1: node.y + PV_NODE_H / 2,
+          const child = layout.nodes[ci];
+          const parentH = nodeHeights[idx] || PV_NODE_H;
+          const childH = nodeHeights[ci] || PV_NODE_H;
+          result.push({
+            x1: node.x + PV_NODE_W,
+            y1: node.y + parentH / 2,
             x2: child.x,
-            y2: child.y + PV_NODE_H / 2,
+            y2: child.y + childH / 2,
           });
         });
       }
     });
-
-    const maxX = Math.max(...placed.map((p) => p.x)) + PV_NODE_W;
-    const maxY = Math.max(...placed.map((p) => p.y)) + PV_NODE_H;
-
-    return { nodes: placed, edges, maxX, maxY };
-  }, [tree, expanded]);
+    return result;
+  }, [layout.nodes, nodeHeights]);
 
   // ── Infinite canvas viewport ────────────────────────────────
   const containerRef = useRef(null);
+
+  // Measure real node heights after each layout so edge anchors hit true centers.
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const nodes = Array.from(el.querySelectorAll(".pv-node"));
+    if (nodes.length === layout.nodes.length) {
+      setNodeHeights(nodes.map((n) => n.offsetHeight));
+    }
+  }, [layout.nodes]); // eslint-disable-line
+
   const [viewport, setViewport] = useState({ x: 100, y: 50, zoom: 1 });
   const [animating, setAnimating] = useState(false);
   const dragRef = useRef({ active: false, startX: 0, startY: 0, vpX: 0, vpY: 0, moved: false });
@@ -1173,7 +1228,7 @@ function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNod
             height={layout.maxY + 200}
             style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}
           >
-            {layout.edges.map((edge, i) => {
+            {edges.map((edge, i) => {
               const midX = (edge.x1 + edge.x2) / 2;
               return (
                 <path
@@ -1860,7 +1915,7 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
   };
 
   const layout = useMemo(() => {
-    if (!tree) return { nodes: [], edges: [], maxX: 0, maxY: 0 };
+    if (!tree) return { nodes: [], maxX: 0, maxY: 0 };
     const placed = [];
     let leafIdx = 0;
 
@@ -1890,28 +1945,47 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
 
     walk(tree, 0, "0");
 
-    const edges = [];
-    placed.forEach((node) => {
+    const maxX = Math.max(...placed.map((p) => p.x), 0) + PV_NODE_W;
+    const maxY = Math.max(...placed.map((p) => p.y), 0) + PV_NODE_H;
+    return { nodes: placed, maxX, maxY };
+  }, [tree, expanded]);
+
+  // ── Edges — parent right-center → child left-center ─────────
+  // Same measured-center anchoring as PathView.
+  const [nodeHeights, setNodeHeights] = useState([]);
+  const edges = useMemo(() => {
+    const result = [];
+    layout.nodes.forEach((node, idx) => {
       if (node.isExpanded && node.children.length > 0) {
         node.children.forEach((ci) => {
-          const child = placed[ci];
-          edges.push({
-            x1: node.x + PV_NODE_W + (node.hasKids ? PV_TOGGLE_W : 0),
-            y1: node.y + PV_NODE_H / 2,
+          const child = layout.nodes[ci];
+          const parentH = nodeHeights[idx] || PV_NODE_H;
+          const childH = nodeHeights[ci] || PV_NODE_H;
+          result.push({
+            x1: node.x + PV_NODE_W,
+            y1: node.y + parentH / 2,
             x2: child.x,
-            y2: child.y + PV_NODE_H / 2,
+            y2: child.y + childH / 2,
           });
         });
       }
     });
-
-    const maxX = Math.max(...placed.map((p) => p.x), 0) + PV_NODE_W;
-    const maxY = Math.max(...placed.map((p) => p.y), 0) + PV_NODE_H;
-    return { nodes: placed, edges, maxX, maxY };
-  }, [tree, expanded]);
+    return result;
+  }, [layout.nodes, nodeHeights]);
 
   // Infinite canvas pan/zoom (reuse PathView's logic)
   const containerRef = useRef(null);
+
+  // Measure real node heights after each layout so edge anchors hit true centers.
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const nodes = Array.from(el.querySelectorAll(".pv-node"));
+    if (nodes.length === layout.nodes.length) {
+      setNodeHeights(nodes.map((n) => n.offsetHeight));
+    }
+  }, [layout.nodes]); // eslint-disable-line
+
   const [viewport, setViewport] = useState({ x: 100, y: 50, zoom: 1 });
   const [animating, setAnimating] = useState(false);
   const dragRef = useRef({ active: false, startX: 0, startY: 0, vpX: 0, vpY: 0, moved: false });
@@ -2052,7 +2126,7 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
             height={layout.maxY + 200}
             style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}
           >
-            {layout.edges.map((edge, i) => {
+            {edges.map((edge, i) => {
               const midX = (edge.x1 + edge.x2) / 2;
               return (
                 <path
@@ -2765,6 +2839,7 @@ function App() {
         onModeChange={switchMode}
         projectName={(activeMeta && activeMeta.name) || "Project"}
         onHome={backToProjects}
+        stale={!!(updatesByPid[activeId] && updatesByPid[activeId].stale_count > 0)}
       />
       <main className="stage">
         {/* ── Topology mode (existing) ── */}

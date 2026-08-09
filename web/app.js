@@ -406,6 +406,25 @@ function detectFlows(graph) {
   // Index: which channels are produced internally (so we can identify external origins)
   const internalChannels = new Set(links.map((l) => l.channel));
 
+  // Index: sync HTTP callers by target entry id.
+  // Http link consumer = the REST endpoint entry; producer = the caller (e.g. Feign client).
+  const httpInvokersByEntry = {}; // entryId -> [{ repo, method, verb, channel }]
+  links.forEach((link) => {
+    if (link.kind !== "http") return;
+    (link.consumers || []).forEach((cid) => {
+      (link.producers || []).forEach((pid) => {
+        const parts = pid.split(":");
+        if (!httpInvokersByEntry[cid]) httpInvokersByEntry[cid] = [];
+        httpInvokersByEntry[cid].push({
+          repo: parts[0] || "",
+          method: parts[1] || "",
+          verb: link.verb || "",
+          channel: link.channel || "",
+        });
+      });
+    });
+  });
+
   // Check if a call tree contains a publish to a channel
   function publishesChannels(entryPoint) {
     const channels = new Set();
@@ -538,6 +557,8 @@ function detectFlows(graph) {
       originLabel,
       originType: isRest ? "rest" : "external",
       originChannel: entry.channel || "",
+      // Sync HTTP callers that invoke this REST origin (Feign etc.), if any
+      invokedBy: isRest ? (httpInvokersByEntry[entry.id] || []) : [],
       step,
       repos: Array.from(repos),
       repoCount: repos.size,
@@ -1498,6 +1519,16 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
                   </span>
                 ))}
               </div>
+              {f.invokedBy && f.invokedBy.length > 0 && (
+                <div className="flow-card-invoked">
+                  <span className="flow-invoked-label">invoked by</span>
+                  {f.invokedBy.map((c, ci) => (
+                    <span key={ci} className="flow-invoked-chip mono">
+                      {c.repo} · {c.method} · {c.verb}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
@@ -1659,6 +1690,16 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
         <div className="view-hint">
           {flow.repoCount} repos · {flow.hopCount} hop{flow.hopCount === 1 ? "" : "s"} ·
           {" "}origin: {flow.originType === "rest" ? "REST endpoint" : "external event"}
+          {flow.invokedBy && flow.invokedBy.length > 0 && (
+            <span className="view-hint-invoked">
+              {" "}· invoked by{" "}
+              {flow.invokedBy.map((c, i) => (
+                <span key={i} className="mono">
+                  {i > 0 ? ", " : ""}{c.repo} · {c.method} · {c.verb}
+                </span>
+              ))}
+            </span>
+          )}
         </div>
       </div>
       <div

@@ -1339,6 +1339,33 @@ code { font-family: var(--mono); color: var(--cyan); }
   padding: 2px 7px;
   border-radius: 4px;
 }
+.flow-card-invoked {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 224, 168, .12);
+  align-items: center;
+}
+.flow-invoked-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: rgba(0, 224, 168, .55);
+}
+.flow-invoked-chip {
+  font-size: 10px;
+  color: rgba(255, 255, 255, .55);
+  background: rgba(0, 224, 168, .08);
+  border: 1px solid rgba(0, 224, 168, .18);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.view-hint-invoked {
+  color: rgba(0, 224, 168, .8);
+}
 
 /* ================================================================
    FLOW VIEW (solar equivalent — repos left-to-right)

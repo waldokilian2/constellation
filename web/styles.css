@@ -1728,13 +1728,16 @@ code { font-family: var(--mono); color: var(--cyan); }
 .pc-top { display: flex; align-items: center; justify-content: flex-end; min-height: 22px; }
 .pc-name { font-size: 19px; font-weight: 700; letter-spacing: .01em; }
 .pc-meta { font-size: 12.5px; }
-.pc-repos { display: flex; flex-wrap: wrap; gap: 6px; min-height: 26px; }
+.pc-repos { display: flex; flex-wrap: nowrap; gap: 6px; min-height: 26px; }
 .repo-chip {
   font-family: var(--mono);
   font-size: 11px; color: var(--text);
   background: rgba(0, 212, 255, .08);
   border: 1px solid rgba(0, 212, 255, .2);
   padding: 3px 9px; border-radius: 999px;
+  /* Shrink + ellipsis so every card renders a single consistent chip row,
+     regardless of repo-name length (long names wrap unevenly otherwise). */
+  min-width: 0; flex: 0 1 auto;
   white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
 }
 .repo-chip.more { background: rgba(255,255,255,.04); border-color: var(--border); color: var(--text-dim); }

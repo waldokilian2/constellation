@@ -1908,6 +1908,32 @@ code { font-family: var(--mono); color: var(--cyan); }
 .badge.busy { color: #fbbf24; border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.08); }
 .badge.ok { color: #34d399; border-color: rgba(52,211,153,.35); background: rgba(52,211,153,.08); }
 .badge.err { color: #f87171; border-color: rgba(248,113,113,.35); background: rgba(248,113,113,.08); }
+
+/* ---- Ingestion progress bar ---- */
+.ingest-progress { padding: 12px 14px 4px; }
+.ingest-progress-track {
+  height: 8px; border-radius: 999px; overflow: hidden;
+  background: rgba(255, 255, 255, .05); border: 1px solid var(--border);
+}
+.ingest-progress-fill {
+  height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #a855f7);
+  transition: width .35s ease;
+}
+.ingest-progress-fill.indeterminate {
+  width: 35%; animation: ingestSlide 1.3s ease-in-out infinite;
+}
+.ingest-progress-fill.done { background: linear-gradient(90deg, #10b981, #34d399); }
+@keyframes ingestSlide {
+  0% { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+.ingest-progress-meta {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  margin-top: 6px; font-size: 11.5px; color: var(--text-dim);
+}
+.ingest-progress-label { letter-spacing: .02em; }
+.ingest-progress-pct { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
 .log-stream {
   max-height: 220px; overflow-y: auto; padding: 10px 14px;
   font-size: 12px; line-height: 1.7;

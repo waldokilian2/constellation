@@ -225,6 +225,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 .canvas { position: relative; width: 100%; }
 .edges { position: absolute; inset: 0; pointer-events: none; z-index: 30; }
 .tree-edges { position: absolute; inset: 0; pointer-events: none; }
+.edge { pointer-events: all; }
 .edge path { transition: opacity .2s, stroke-width .2s; }
 .edge:hover path { opacity: .95 !important; stroke-width: 2.6 !important; }
 .edge-label {
@@ -253,15 +254,74 @@ code { font-family: var(--mono); color: var(--cyan); }
 .edge-label.http {
   fill: var(--mint, #00e0a8);
 }
+.edge-label-bg.both {
+  stroke: rgba(167,139,250,.55);
+}
+.edge-label-glow.both {
+  fill: rgba(167,139,250,.14);
+  stroke: rgba(167,139,250,.25);
+}
+.edge-label.both {
+  fill: #a78bfa;
+}
+
+/* Bundled-edge hover popup (single line per direction) */
+.edge-popup {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 14px));
+  z-index: 60;
+  min-width: 210px;
+  max-width: 340px;
+  background: rgba(10, 14, 26, .96);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.edge-popup-title {
+  font-size: 11px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.edge-popup-arrow { color: var(--cyan); }
+.edge-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text);
+}
+.edge-popup-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.edge-popup-dot.msg { background: #00d4ff; box-shadow: 0 0 8px rgba(0, 212, 255, .7); }
+.edge-popup-dot.http { background: #00e0a8; box-shadow: 0 0 8px rgba(0, 224, 168, .7); }
+.edge-popup-channel { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edge-popup-kind {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-faint); flex-shrink: 0;
+}
+.edge-popup-kind.http { color: #00e0a8; }
+.edge-popup-kind.msg { color: #00d4ff; }
 
 /* ---------- Galaxy view ---------- */
 .galaxy { height: 100%; }
 .repo-wrap {
   position: absolute; transform: translate(-50%, -50%);
   width: 0; height: 0;
-  z-index: 5; transition: transform .25s cubic-bezier(.2,.7,.2,1);
+  z-index: 40; transition: transform .25s cubic-bezier(.2,.7,.2,1);
 }
-.repo-wrap:hover { transform: translate(-50%, -50%) scale(1.08); z-index: 10; }
+.repo-wrap:hover { transform: translate(-50%, -50%) scale(1.08); z-index: 50; }
 .repo-node {
   position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
   border-radius: 50%;
@@ -354,6 +414,11 @@ code { font-family: var(--mono); color: var(--cyan); }
 .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); }
 .legend-dot { width: 9px; height: 9px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
 .legend-line { width: 18px; height: 2px; border-radius: 2px; box-shadow: 0 0 6px currentColor; }
+.legend-sep {
+  font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--text-faint); margin-top: 6px; padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
 .legend-hint { font-size: 10px; color: var(--text-faint); margin-top: 4px; border-top: 1px solid var(--border); padding-top: 6px; }
 
 /* ---------- Solar system view ---------- */
@@ -423,6 +488,8 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 .producer-channel-name {
   font-family: var(--mono); font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .producer-flow {
   display: flex; flex-direction: column; gap: 3px;
@@ -430,8 +497,13 @@ code { font-family: var(--mono); color: var(--cyan); }
   padding-top: 6px; border-top: 1px solid rgba(255,255,255,.04);
 }
 .producer-flow-label { text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim); }
-.producer-flow-method { font-family: var(--mono); color: var(--text-dim); }
-.producer-flow-targets { color: var(--cyan); font-size: 10px; }
+.producer-flow-method { font-family: var(--mono); color: var(--text-dim); overflow-wrap: anywhere; }
+.producer-flow-targets {
+  display: block;
+  color: var(--cyan); font-size: 12px; font-weight: 500;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
 
 /* ---------- Path view — infinite canvas ---------- */
 .path-view { height: 100%; display: flex; flex-direction: column; }
@@ -1296,6 +1368,7 @@ code { font-family: var(--mono); color: var(--cyan); }
   display: flex;
   flex-direction: column;
   gap: 0;
+  overflow: hidden;
 }
 .flow-card:hover {
   border-color: rgba(0, 212, 255, .3);
@@ -1349,6 +1422,7 @@ code { font-family: var(--mono); color: var(--cyan); }
   color: #e2e8f0;
   margin-bottom: 10px;
   line-height: 1.2;
+  overflow-wrap: anywhere; /* long names like @Schedule:generateReport wrap, not overflow */
 }
 .flow-card-stats {
   display: flex;

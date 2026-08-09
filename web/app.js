@@ -16,6 +16,13 @@ const TYPE_META = {
   "scheduled-task":    { color: "#34d399", label: "Scheduled", glow: "rgba(52,211,153,.55)" },
   "websocket":         { color: "#a855f7", label: "WebSocket", glow: "rgba(168,85,247,.55)" },
 };
+
+// Galaxy edge colors by link kind: async (message-only), sync (HTTP-only), both (mixed)
+const EDGE_KINDS = {
+  async: { color: "#00d4ff", label: "Async" },
+  sync:  { color: "#00e0a8", label: "Sync HTTP" },
+  both:  { color: "#a78bfa", label: "Both" },
+};
 const typeMeta = (t) => TYPE_META[t] || { color: "#94a3b8", label: (t || "Unknown"), glow: "rgba(148,163,184,.5)" };
 
 const CONFIDENCE = {
@@ -357,29 +364,28 @@ function Breadcrumb({ items }) {
 }
 
 /* ---------------- Legend ---------------- */
-function Legend({ types = [], hasHttp = false }) {
+function Legend({ types = [] }) {
   const shown = Object.keys(TYPE_META).filter((k) => types.includes(k));
   return (
     <div className="legend glass">
       <div className="legend-title">Entry point types</div>
-      {shown.length === 0 && !hasHttp ? (
+      {shown.length === 0 ? (
         <div className="legend-item">No entry points</div>
       ) : (
-        <>
-          {shown.map((k) => (
-            <div className="legend-item" key={k}>
-              <span className="legend-dot" style={{ background: TYPE_META[k].color, color: TYPE_META[k].color }}></span>
-              {TYPE_META[k].label}
-            </div>
-          ))}
-          {hasHttp && (
-            <div className="legend-item">
-              <span className="legend-line" style={{ background: "#00e0a8" }}></span>
-              Sync HTTP call
-            </div>
-          )}
-        </>
+        shown.map((k) => (
+          <div className="legend-item" key={k}>
+            <span className="legend-dot" style={{ background: TYPE_META[k].color, color: TYPE_META[k].color }}></span>
+            {TYPE_META[k].label}
+          </div>
+        ))
       )}
+      <div className="legend-sep">Links</div>
+      {["async", "sync", "both"].map((k) => (
+        <div className="legend-item" key={k}>
+          <span className="legend-line" style={{ background: EDGE_KINDS[k].color }}></span>
+          {EDGE_KINDS[k].label}
+        </div>
+      ))}
       <div className="legend-hint">Click a repo to zoom in</div>
     </div>
   );
@@ -577,6 +583,9 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
   const links = graph.cross_repo_links || [];
   const pz = usePanZoom(".repo-wrap, .legend, .filter-chip");
 
+  // Hovered direction edge → bundled message details shown in a popup
+  const [hoverEdge, setHoverEdge] = useState(null); // { items, from, to, mid:{x,y} }
+
   const epCount = useMemo(() => {
     const m = {};
     entryPoints.forEach((ep) => { m[ep.repo] = (m[ep.repo] || 0) + 1; });
@@ -599,12 +608,6 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
     entryPoints.forEach((ep) => s.add(ep.type));
     return Array.from(s);
   }, [graph]);
-
-  // Does the project have any sync HTTP inter-service calls (legend line)?
-  const hasHttp = useMemo(
-    () => (graph.cross_repo_links || []).some((l) => l.kind === "http"),
-    [graph]
-  );
 
   const W = dims.w;
   const H = dims.h;
@@ -632,58 +635,42 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
     return m;
   }, [positions]);
 
+  // Group links by direction (from-repo → to-repo): ONE line per direction, bundling
+  // all of that direction's channels / HTTP calls (details shown in a hover popup).
   const edges = useMemo(() => {
-    const out = [];
-    const seen = new Set();
-    const pairCount = {};
+    const map = {};
     links.forEach((link) => {
       const pRepos = Array.from(new Set((link.producers || []).map(repoFromId)));
       const cRepos = Array.from(new Set((link.consumers || []).map(repoFromId)));
       pRepos.forEach((pr) => cRepos.forEach((cr) => {
         if (pr === cr) return;
-        const key = pr + ">>" + cr + "|" + link.channel;
-        if (seen.has(key)) return;
-        seen.add(key);
-        const pairKey = pr + ">>" + cr;
-        pairCount[pairKey] = (pairCount[pairKey] || 0) + 1;
-        out.push({
-          from: pr, to: cr, channel: link.channel,
-          kind: link.kind || "message",
-          verb: link.verb || "",
-          pairKey,
-        });
+        const key = pr + ">>" + cr;
+        if (!map[key]) map[key] = { from: pr, to: cr, items: [] };
+        const items = map[key].items;
+        if (!items.some((it) => it.channel === link.channel)) {
+          items.push({
+            channel: link.channel,
+            kind: link.kind || "message",
+            verb: link.verb || "",
+          });
+        }
       }));
     });
-    // Index each edge within its from→to pair so multiples can fan out
-    const pairIndex = {};
-    out.forEach((e) => {
-      pairIndex[e.pairKey] = pairIndex[e.pairKey] || 0;
-      e.pairIndex = pairIndex[e.pairKey]++;
-      e.pairCount = pairCount[e.pairKey];
-    });
-    return out;
+    return Object.values(map);
   }, [graph]);
 
-  const edgeGeom = (a, b, opts = {}) => {
+  // One curved line per direction pair. Opposite directions bend to opposite sides
+  // automatically (the control point offsets along the perpendicular, which flips
+  // when a→b becomes b→a), so the two directions stay visually separate.
+  const edgeGeom = (a, b) => {
     const GAP = 3; // uniform clearance at both orb edges
-    const EDGE_SEP = 60; // perpendicular fan distance between same-pair edges
     const dx = b.x - a.x, dy = b.y - a.y;
     const d = Math.hypot(dx, dy) || 1;
     const ux = dx / d, uy = dy / d;
     const start = { x: a.x + ux * (a.r + GAP), y: a.y + uy * (a.r + GAP) };
     const end = { x: b.x - ux * (b.r + GAP), y: b.y - uy * (b.r + GAP) };
     const bend = Math.min(130, d * 0.26);
-    let c = { x: (start.x + end.x) / 2 - uy * bend, y: (start.y + end.y) / 2 + ux * bend };
-    // Fan same-pair edges apart along the perpendicular of the a→b axis.
-    // Shift the WHOLE curve (start/end/control) so parallel edges never cross.
-    const total = opts.pairCount || 1, index = opts.pairIndex || 0;
-    const off = (index - (total - 1) / 2) * EDGE_SEP;
-    if (off !== 0) {
-      const ox = -uy * off, oy = ux * off;
-      start.x += ox; start.y += oy;
-      end.x += ox; end.y += oy;
-      c.x += ox; c.y += oy;
-    }
+    const c = { x: (start.x + end.x) / 2 - uy * bend, y: (start.y + end.y) / 2 + ux * bend };
     const mid = {
       x: 0.25 * start.x + 0.5 * c.x + 0.25 * end.x,
       y: 0.25 * start.y + 0.5 * c.y + 0.25 * end.y,
@@ -715,27 +702,53 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
         >
         <svg className="edges" width={W} height={H}>
           <defs>
-            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <marker id="arrow-async" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 z" fill="#00d4ff" opacity="0.9"></path>
             </marker>
+            <marker id="arrow-sync" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#00e0a8" opacity="0.95"></path>
+            </marker>
+            <marker id="arrow-both" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#a78bfa" opacity="0.95"></path>
+            </marker>
           </defs>
-          {edges.map((e, i) => {
+          {edges.map((e) => {
             const a = posMap[e.from], b = posMap[e.to];
             if (!a || !b) return null;
-            const g = edgeGeom(a, b, { pairIndex: e.pairIndex, pairCount: e.pairCount });
-            const isHttp = e.kind === "http";
-            const label = isHttp && e.verb ? (e.verb + " " + e.channel) : e.channel;
+            const g = edgeGeom(a, b);
+            const httpItems = e.items.filter((it) => it.kind === "http");
+            const messages = e.items.filter((it) => it.kind !== "http");
+            // Three line colors: sync (HTTP-only), async (message-only), both (mixed)
+            const kind = (httpItems.length > 0 && messages.length > 0) ? "both"
+              : (httpItems.length > 0 ? "sync" : "async");
+            const km = EDGE_KINDS[kind];
+            const prominent = kind !== "async"; // sync/both lines are bolder
+            let label;
+            if (e.items.length === 1) {
+              const it = e.items[0];
+              label = (it.kind === "http" && it.verb) ? (it.verb + " " + it.channel) : it.channel;
+            } else {
+              label = [
+                messages.length ? messages.length + " msg" + (messages.length > 1 ? "s" : "") : "",
+                httpItems.length ? httpItems.length + " HTTP" : "",
+              ].filter(Boolean).join(" · ");
+            }
             const pillW = label.length * 6.5 + 22;
             const pillH = 20;
             return (
-              <g className={"edge" + (isHttp ? " edge-http" : "")} key={i}>
-                <path d={g.path} fill="none" stroke={isHttp ? "#00e0a8" : "#00d4ff"}
-                      strokeWidth={isHttp ? 2.2 : 1.6}
-                      opacity={isHttp ? 0.95 : 0.5} markerEnd="url(#arrow)"></path>
+              <g
+                className={"edge edge-" + kind}
+                key={e.from + ">>" + e.to}
+                onMouseEnter={() => setHoverEdge({ items: e.items, from: e.from, to: e.to, mid: g.mid })}
+                onMouseLeave={() => setHoverEdge(null)}
+              >
+                <path d={g.path} fill="none" stroke={km.color}
+                      strokeWidth={prominent ? 2.2 : 1.6}
+                      opacity={prominent ? 0.95 : 0.5} markerEnd={"url(#arrow-" + kind + ")"}></path>
                 <g className="edge-label-pill" transform={"translate(" + g.mid.x + "," + g.mid.y + ")"}>
-                  <rect className={isHttp ? "edge-label-glow http" : "edge-label-glow"} x={-pillW / 2 - 4} y={-pillH / 2 - 4} width={pillW + 8} height={pillH + 8} rx={(pillH + 8) / 2}></rect>
-                  <rect className={isHttp ? "edge-label-bg http" : "edge-label-bg"} x={-pillW / 2} y={-pillH / 2} width={pillW} height={pillH} rx={pillH / 2}></rect>
-                  <text className="edge-label" x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
+                  <rect className={"edge-label-glow " + kind} x={-pillW / 2 - 4} y={-pillH / 2 - 4} width={pillW + 8} height={pillH + 8} rx={(pillH + 8) / 2}></rect>
+                  <rect className={"edge-label-bg " + kind} x={-pillW / 2} y={-pillH / 2} width={pillW} height={pillH} rx={pillH / 2}></rect>
+                  <text className={"edge-label " + kind} x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
             );
@@ -785,8 +798,32 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
           );
         })}
         </div>
+        {hoverEdge && (() => {
+          const px = pz.viewport.x + hoverEdge.mid.x * pz.viewport.zoom;
+          const py = Math.max(150, pz.viewport.y + hoverEdge.mid.y * pz.viewport.zoom);
+          return (
+            <div className="edge-popup" style={{ left: px, top: py }}>
+              <div className="edge-popup-title">
+                <span className="mono">{hoverEdge.from}</span>
+                <span className="edge-popup-arrow">→</span>
+                <span className="mono">{hoverEdge.to}</span>
+              </div>
+              {hoverEdge.items.map((it, i) => (
+                <div className="edge-popup-item" key={i}>
+                  <span className={"edge-popup-dot " + (it.kind === "http" ? "http" : "msg")} />
+                  <span className="edge-popup-channel mono">
+                    {it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel}
+                  </span>
+                  <span className={"edge-popup-kind " + (it.kind === "http" ? "http" : "msg")}>
+                    {it.kind === "http" ? "HTTP" : "msg"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
       </div>
-      <Legend types={usedTypes} hasHttp={hasHttp} />
+      <Legend types={usedTypes} />
       {pz.zoomControls}
     </div>
   );
@@ -924,11 +961,11 @@ function ProducersPanel({ producers, graph }) {
             <div className="producer-channel">
               <span className="producer-channel-name">{channel}</span>
               <span className="producer-arrow">→</span>
-              <span className="producer-flow-targets">
-                {consumerRepos.length > 0
-                  ? consumerRepos.join(", ")
-                  : "no consumer found"}
-              </span>
+            </div>
+            <div className="producer-flow-targets">
+              {consumerRepos.length > 0
+                ? consumerRepos.join(", ")
+                : "no consumer found"}
             </div>
             <div className="producer-flow">
               {prods.map((p) => (
@@ -1444,7 +1481,9 @@ function DetailPanel({ node, entryPoint, onClose, pid }) {
 function FlowIndexView({ graph, dims, onSelectFlow }) {
   const flows = useMemo(() => detectFlows(graph), [graph]);
   const W = dims.w, H = dims.h;
-  const cx = W / 2, cy = H / 2;
+  const TOPBAR_H = 72; // matches --topbar-h in styles.css
+  // Center within the VISIBLE stage area (below the fixed topbar), not the full window
+  const cx = W / 2, cy = (H - TOPBAR_H) / 2;
   const pz = usePanZoom(".flow-card");
 
   // Uniform card height: all cards share the tallest card's height
@@ -1459,26 +1498,33 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
     setUniformH((prev) => (prev === maxH ? prev : maxH));
   }, [flows]);
 
-  // Position flow cards in a grid-like arrangement
-  const positions = useMemo(() => {
+  // Position flow cards in a grid that FITS the visible stage. The whole grid is
+  // scaled down (transform: scale) when it would overflow, so cards never clip.
+  const layout = useMemo(() => {
     const n = flows.length;
     const cols = Math.min(n, n <= 4 ? 2 : 3);
     const cardW = 240;
     const gapX = 50, gapY = 36;
-    const totalW = cols * cardW + (cols - 1) * gapX;
+    const rows = Math.ceil(n / cols);
     // Uniform height across the whole grid (fall back to a reasonable estimate
     // before the first measurement lands)
     const cardH = uniformH || 196;
-    const rows = Math.ceil(n / cols);
+    const totalW = cols * cardW + (cols - 1) * gapX;
     const totalH = rows * cardH + (rows - 1) * gapY;
+    // Shrink-to-fit with a small margin around the visible stage
+    const margin = 24;
+    const fit = Math.min(1, (W - margin * 2) / totalW, (cy * 2 - margin * 2) / totalH);
+    const scaledW = totalW * fit;
+    const scaledH = totalH * fit;
+
     const positions = [];
-    let y = cy - totalH / 2;
+    let y = 0;
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const idx = r * cols + c;
         if (idx >= n) break;
         positions.push({
-          x: cx - totalW / 2 + c * (cardW + gapX),
+          x: c * (cardW + gapX),
           y: y,
           w: cardW,
           h: uniformH || null, // null = keep natural (auto) height until measured
@@ -1486,7 +1532,15 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
       }
       y += cardH + gapY;
     }
-    return positions;
+    return {
+      positions,
+      // Wrapper placed so the scaled grid is centered in the visible area
+      left: cx - scaledW / 2,
+      top: cy - scaledH / 2,
+      width: totalW,
+      height: totalH,
+      fit,
+    };
   }, [flows, cx, cy, uniformH]);
 
   return (
@@ -1510,8 +1564,20 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
             transformOrigin: "0 0",
           }}
         >
+        <div
+          className="flow-grid"
+          style={{
+            position: "absolute",
+            left: layout.left,
+            top: layout.top,
+            width: layout.width,
+            height: layout.height,
+            transform: "scale(" + layout.fit + ")",
+            transformOrigin: "top left",
+          }}
+        >
         {flows.map((f, i) => {
-          const pos = positions[i];
+          const pos = layout.positions[i];
           return (
             <div
               key={f.id}
@@ -1557,6 +1623,7 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
             </div>
           );
         })}
+        </div>
         </div>
       </div>
       {pz.zoomControls}

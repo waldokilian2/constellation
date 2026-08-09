@@ -80,9 +80,9 @@ start.sh / start.bat # bootstrap + server launchers
 
 ## How Data Flows
 
-The app is **multi-project**: each project is an isolated collection of repos with its own graph (`output/projects/<pid>/graph.json`); projects have no relationship to each other. On first load, pre-existing legacy graphs are imported once as named projects — `output/graph.json` → "Spring Boot" and `output/graph-java-ee.json` → "Java EE" (`ProjectStore.ensure_legacy_seed`).
+The app is **multi-project**: each project is an isolated collection of repos with its own graph (`output/projects/<pid>/graph.json`); projects have no relationship to each other. On first load, pre-existing legacy graphs are imported once as named projects — `output/graph.json` → "Spring Boot" and `output/graph-java-ee.json` → "Java EE" (`ProjectStore.ensure_legacy_seed`). The seed **copies** each recorded test repo into `output/projects/<pid>/repos/` (same per-project structure as URL-cloned repos) and rewrites the graph's `repo_roots` to point at the copies, so source reads resolve through the per-project roots.
 
-1. **Ingest** — the UI creates a project (`POST /api/projects`, git URLs) or adds repos to one (`POST /api/projects/{pid}/repos`). `engine/project_store.py` shallow-clones each repo into `output/projects/<pid>/repos/`, then re-runs the engine over the project's full repo set (cross-repo linking needs all repos together), streaming `[clone]/[scan]/[link]` progress over SSE.
+1. **Ingest** — the UI creates a project (`POST /api/projects`, git URLs) or adds repos to one (`POST /api/projects/{pid}/repos`). `engine/project_store.py` shallow-clones each repo into `output/projects/<pid>/repos/`, then re-runs the engine over the project's full repo set (cross-repo linking needs all repos together), streaming `[clone]/[scan]/[link]` progress over SSE. A `local:<path>` repo spec registers an existing directory in place (git-backed ones are tracked for updates via `check_updates`/`pull_repos`).
 2. **Parse** — `entry_detector.py` scans `*.java` files (skipping `/test/` and `*Test*` paths), using `parser.py` to find annotated methods and producer call patterns.
 3. **Index** — methods are indexed for import-aware call resolution.
 4. **Call trees** — `call_graph.py` builds a depth-limited (MAX_DEPTH=4, MAX_NODES=50) BFS tree per entry point, resolving each invocation to a definition and tagging confidence.
@@ -121,7 +121,7 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
 - Previously `server.py` referenced undefined names (`run_in_threadpool`, `Request`, `all_models`, `_API_TOKEN`, `_USER_AGENT`, `queue`/`threading`/`asyncio`) that made `/api/analyze`, `/api/ai/models`, auth, and streaming fail at call time. These are **fixed**: the imports/consts are defined, `/api/analyze` is replaced by the streaming ingest endpoints, and `ai_models` falls back to `FREE_MODELS` when the provider can't be reached. `CONSTELLATION_API_TOKEN` auth is still optional (open when unset) and is documented in code but **not** in the README's env-var table.
 - All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (graph, source, tools, ai/chat, ai/chat/stream). The flat `/api/graph`, `/api/source`, `/api/tools/*`, `/api/ai/*` routes no longer exist; only `/api/ai/models` and `/api/graph` (legacy alias → first ready project) remain non-scoped. The frontend builds these via `projPath(pid, rest)` in `web/app.js`.
 - The MCP server loads `graph.json` once at startup; restart to pick up graph changes.
-- Call resolution is name-based (no import-aware resolution yet) and can produce false positives — see the "Limitations" section of `README.md`.
+- Call resolution is import-aware for single types plus interface→impl and local-variable/parameter receivers (see `engine/java_index.py`). It still can produce false positives when a simple name maps to multiple unimported classes across repos — see the "Limitations" section of `README.md`. Do not silently change the `EXTRACTED`/`INFERRED`/`AMBIGUOUS` semantics that the tests and UI depend on.
 
 ## Roadmap Context (README)
 
@@ -129,7 +129,7 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
   producer type, two-pass linker with normalized-path matching, solid mint galaxy edges,
   same-pair edge fan-out, REST entry points carry their real HTTP verb (`method_type`,
   e.g. `GET /api/fulfillment/status/{orderId}`).
-- In progress: import-aware call resolution, Python (FastAPI) support, `.env`/API-key hardening.
+- In progress: Python (FastAPI) support, `.env`/API-key hardening.
 - Planned: TypeScript/Express, Go, C#; Apache Camel DSL; dynamic queue-name resolution; Anthropic tool-use; SSE streaming.
 
 When implementing anything on the roadmap, prefer extending the existing deterministic pipeline (new detector entries, new tools) and keep the "no LLM in the core" principle intact.

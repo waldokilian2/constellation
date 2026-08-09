@@ -17,6 +17,14 @@ class EntryPointType(Enum):
     EVENT_LISTENER = "event-listener"
     SCHEDULED_TASK = "scheduled-task"
     WEBSOCKET = "websocket"
+    # ── additional entry kinds (deterministic AST detection) ──
+    SERVLET = "servlet"            # @WebServlet / @WebFilter (Servlet API)
+    SOAP_SERVICE = "soap-service"  # JAX-WS @WebService / @WebMethod
+    GRAPHQL = "graphql"            # @QueryMapping / @MutationMapping / @SchemaMapping ...
+    GRPC_SERVICE = "grpc-service"  # class extends *ImplBase (generated gRPC base)
+    LIFECYCLE = "lifecycle"        # @PostConstruct / CommandLineRunner / ApplicationRunner / InitializingBean / @WebListener
+    MAIN = "main"                  # public static void main(String[])
+    CLOUD_FUNCTION = "cloud-function"  # @Bean Function/Supplier/Consumer (Spring Cloud Function)
     UNKNOWN = "unknown"
 
 
@@ -25,6 +33,8 @@ class ProducerType(Enum):
     KAFKA_PRODUCER = "kafka-producer"
     JMS_PRODUCER = "jms-producer"
     EVENT_PUBLISHER = "event-publisher"
+    PULSAR_PRODUCER = "pulsar-producer"
+    NATS_PRODUCER = "nats-producer"
     HTTP_CALL = "http-call"  # sync HTTP request (Feign/RestTemplate/WebClient/...)
     UNKNOWN = "unknown"
 

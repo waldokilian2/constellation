@@ -86,7 +86,7 @@ The app is **multi-project**: each project is an isolated collection of repos wi
 2. **Parse** — `entry_detector.py` scans `*.java` files (skipping `/test/` and `*Test*` paths), using `parser.py` to find annotated methods and producer call patterns.
 3. **Index** — methods are indexed for import-aware call resolution.
 4. **Call trees** — `call_graph.py` builds a depth-limited (MAX_DEPTH=4, MAX_NODES=50) BFS tree per entry point, resolving each invocation to a definition and tagging confidence.
-5. **Cross-repo links (two passes)** — `cross_repo.py` pass 1 matches async producers→consumers by exact channel name; pass 2 matches `HTTP_CALL` producers (Feign/RestTemplate/WebClient/HttpClient/etc.) to REST endpoints by **normalized path template** (`/api/orders/123` ≡ `/api/orders/{id}`), cross-repo only, producing `kind:"http"` links with an HTTP `verb`. HTTP links render as solid mint edges in the galaxy view; flows view stays message-only by design.
+5. **Cross-repo links (two passes)** — `cross_repo.py` pass 1 matches async producers→consumers by exact channel name, **but only broker consumer types** (`kafka`/`rabbitmq`/`jms`/`sqs-consumer`, `event-listener`, `websocket`) participate — non-broker entry kinds (REST/SOAP/GraphQL/gRPC/servlet/lifecycle/main/cloud-function/scheduled) use synthetic/semantic channels and are excluded so a GraphQL op named "orders" can't collide with a Kafka topic named "orders". Pass 2 matches `HTTP_CALL` producers (Feign/RestTemplate/WebClient/HttpClient/Apache HttpComponents/async-http-client/etc.) to REST endpoints by **normalized path template** (`/api/orders/123` ≡ `/api/orders/{id}`), cross-repo only, producing `kind:"http"` links with an HTTP `verb`. HTTP links render as solid mint edges in the galaxy view; flows view stays message-only by design.
 6. **Serialize** — `constellation.py` assembles a `ConstellationGraph` → the project's `graph.json` with `repo_roots` for safe path resolution.
 7. **Serve** — `server.py` serves each project's graph via **project-scoped** REST + AI endpoints (`/api/projects/{pid}/...`); the single legacy `/api/graph` returns the first ready project. `mcp_server.py` loads a graph file directly for MCP.
 
@@ -121,7 +121,7 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
 - Previously `server.py` referenced undefined names (`run_in_threadpool`, `Request`, `all_models`, `_API_TOKEN`, `_USER_AGENT`, `queue`/`threading`/`asyncio`) that made `/api/analyze`, `/api/ai/models`, auth, and streaming fail at call time. These are **fixed**: the imports/consts are defined, `/api/analyze` is replaced by the streaming ingest endpoints, and `ai_models` falls back to `FREE_MODELS` when the provider can't be reached. `CONSTELLATION_API_TOKEN` auth is still optional (open when unset) and is documented in code but **not** in the README's env-var table.
 - All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (graph, source, tools, ai/chat, ai/chat/stream). The flat `/api/graph`, `/api/source`, `/api/tools/*`, `/api/ai/*` routes no longer exist; only `/api/ai/models` and `/api/graph` (legacy alias → first ready project) remain non-scoped. The frontend builds these via `projPath(pid, rest)` in `web/app.js`.
 - The MCP server loads `graph.json` once at startup; restart to pick up graph changes.
-- Call resolution is import-aware for single types plus interface→impl and local-variable/parameter receivers (see `engine/java_index.py`). It still can produce false positives when a simple name maps to multiple unimported classes across repos — see the "Limitations" section of `README.md`. Do not silently change the `EXTRACTED`/`INFERRED`/`AMBIGUOUS` semantics that the tests and UI depend on.
+- Call resolution is import-aware for single types plus interface→impl and local-variable/parameter receivers (see `engine/java_index.py`), and resolves methods up a **multi-level supertype chain** via `find_methods_in_hierarchy` (used as a fallback in `resolve_call`). It still can produce false positives when a simple name maps to multiple unimported classes across repos — see the "Limitations" section of `README.md`. Do not silently change the `EXTRACTED`/`INFERRED`/`AMBIGUOUS` semantics that the tests and UI depend on.
 
 ## Roadmap Context (README)
 
@@ -129,7 +129,22 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
   producer type, two-pass linker with normalized-path matching, solid mint galaxy edges,
   same-pair edge fan-out, REST entry points carry their real HTTP verb (`method_type`,
   e.g. `GET /api/fulfillment/status/{orderId}`).
+- Shipped: **broad Java framework coverage** — entry points beyond Spring/Java EE:
+  `main()`, lifecycle hooks (`@PostConstruct`, `CommandLineRunner`/`ApplicationRunner`/
+  `InitializingBean`), Servlet API (`@WebServlet`/`@WebFilter`), SOAP (JAX-WS
+  `@WebService`/`@WebMethod`), Spring for GraphQL (`@QueryMapping`/…), gRPC
+  (`extends *ImplBase`), Spring Cloud Function (`@Bean` `Function`/`Supplier`/`Consumer`);
+  producers for Pulsar (`PulsarTemplate`) and NATS (`Connection.publish`); **Apache Camel**
+  `RouteBuilder` `from()`/`to()` routes (broker schemes → real entry/producer types, linked
+  cross-repo); STOMP return-side `@SendTo` producers; Apache HttpComponents (`execute`)
+  and async-http-client (`prepare*`) HTTP clients. New `EntryPointType` values: `servlet`,
+  `soap-service`, `graphql`, `grpc-service`, `lifecycle`, `main`, `cloud-function`; new
+  `ProducerType` values: `pulsar-producer`, `nats-producer`. Frontend `TYPE_META`/
+  `ORIGIN_KINDS` updated; unmapped types still fall back gracefully.
+- Parser fixes that shipped with the above: `scoped_type_identifier` (nested types like
+  `Outer.Inner`) is now captured in supertypes, field/param/return/local types; chained
+  method calls (`from(x).to(y)`) parse correctly in `parse_method_invocation`.
 - In progress: Python (FastAPI) support, `.env`/API-key hardening.
-- Planned: TypeScript/Express, Go, C#; Apache Camel DSL; dynamic queue-name resolution; Anthropic tool-use; SSE streaming.
+- Planned: TypeScript/Express, Go, C#; dynamic queue-name resolution; Anthropic tool-use; SSE streaming.
 
 When implementing anything on the roadmap, prefer extending the existing deterministic pipeline (new detector entries, new tools) and keep the "no LLM in the core" principle intact.

@@ -21,6 +21,21 @@ from .models import (
 )
 
 
+# Entry kinds whose ``channel`` is a real broker destination / event and may
+# legitimately match a producer channel in the message pass. Non-broker entry
+# kinds (REST/SOAP/GraphQL/gRPC/servlet/lifecycle/main/cloud-function/
+# scheduled-task) use synthetic/semantic channels and are excluded so a GraphQL
+# operation named "orders" doesn't link to a Kafka topic named "orders".
+MESSAGE_CONSUMER_TYPES = {
+    EntryPointType.RABBITMQ_CONSUMER,
+    EntryPointType.KAFKA_CONSUMER,
+    EntryPointType.JMS_CONSUMER,
+    EntryPointType.SQS_CONSUMER,
+    EntryPointType.EVENT_LISTENER,
+    EntryPointType.WEBSOCKET,
+}
+
+
 class CrossRepoLinker:
     """Links repos by matching producer channels to consumer channels."""
 
@@ -43,6 +58,8 @@ class CrossRepoLinker:
         channels: dict[str, dict] = {}
 
         for ep in entry_points:
+            if ep.type not in MESSAGE_CONSUMER_TYPES:
+                continue  # non-broker channels must not collide with broker topics
             ch = ep.channel
             if ch and ch != "unknown" and ch != "unknown-event":
                 if ch not in channels:

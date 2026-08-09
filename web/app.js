@@ -3273,6 +3273,46 @@ function ProjectsView({ projects, loading, onOpen, onNew, onDelete, updatesByPid
   );
 }
 
+// Derives progress-bar state purely from the ingested log stream.
+// Phases run clone → scan → graph → link → done; determinate counts come
+// from per-repo engine lines, indeterminate when no repo total is known
+// (rescan) or the phase has no countable steps.
+const INGEST_PHASE_ORDER = { clone: 0, scan: 1, graph: 2, link: 3, done: 4 };
+const SCANNING_RE = /^\[scan\] .+: scanning /;
+const CLONE_DONE_RE = /^\[clone\] .+ ready at |^\[clone\] Using local repo /;
+
+function computeIngestProgress(logs, repoTotal) {
+  let phase = "info";
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const p = logs[i].phase;
+    if (INGEST_PHASE_ORDER[p] != null) { phase = p; break; }
+  }
+  let determinate = false;
+  let done = 0;
+  const cap = (n) => (repoTotal != null ? Math.min(n, repoTotal) : n);
+  let label = logs.length ? "Working…" : "Starting…";
+  if (phase === "clone") {
+    done = cap(logs.filter((l) => l.phase === "clone" && CLONE_DONE_RE.test(l.message)).length);
+    determinate = repoTotal != null;
+    label = determinate ? "Cloning " + done + "/" + repoTotal + " repos" : "Syncing repositories…";
+  } else if (phase === "scan") {
+    done = cap(logs.filter((l) => l.phase === "scan" && SCANNING_RE.test(l.message)).length);
+    determinate = repoTotal != null;
+    label = determinate ? "Scanning " + done + "/" + repoTotal + " repos" : "Scanning repositories…";
+  } else if (phase === "graph") {
+    label = "Building call trees…";
+  } else if (phase === "link") {
+    label = "Finding cross-repo links…";
+  } else if (phase === "done") {
+    determinate = true;
+    done = repoTotal != null ? repoTotal : 1;
+    label = "Complete";
+  }
+  const total = determinate ? Math.max(done, repoTotal != null ? repoTotal : 1) : 0;
+  const pct = determinate ? Math.min(100, Math.round((done / total) * 100)) : null;
+  return { determinate, pct, label };
+}
+
 // Reads the SSE ingestion stream from /api/projects (create) or
 // /api/projects/<pid>/repos (add). Mirrors the GlobalChat SSE reader.
 function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onScanDone }) {
@@ -3374,6 +3414,8 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
 
   const busy = status === "running";
 
+  const progress = computeIngestProgress(logs, isRescan ? null : validUrls.length);
+
   return (
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose && onClose(); }}>
       <div className="modal-card glass">
@@ -3449,6 +3491,24 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
                 {status === "done" && <span className="badge ok">Done</span>}
                 {status === "error" && <span className="badge err">Failed</span>}
               </div>
+              {status !== "error" && (
+                <div className="ingest-progress">
+                  <div className="ingest-progress-track">
+                    <div
+                      className={
+                        "ingest-progress-fill" +
+                        (progress.determinate ? "" : " indeterminate") +
+                        (status === "done" ? " done" : "")
+                      }
+                      style={progress.determinate ? { width: progress.pct + "%" } : undefined}
+                    />
+                  </div>
+                  <div className="ingest-progress-meta">
+                    <span className="ingest-progress-label">{progress.label}</span>
+                    {progress.determinate && <span className="ingest-progress-pct">{progress.pct}%</span>}
+                  </div>
+                </div>
+              )}
               <div className="log-stream mono">
                 {logs.length === 0 && <div className="muted small">Starting…</div>}
                 {logs.map((l, i) => (

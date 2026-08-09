@@ -1,11 +1,12 @@
 package com.example.fulfillment;
 
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Repository;
 
 import java.util.HashMap;
 import java.util.Map;
 
-@Service
+/** In-memory repository of shipments. */
+@Repository
 public class ShipmentRepository {
 
     private final Map<String, Shipment> store = new HashMap<>();
@@ -14,10 +15,16 @@ public class ShipmentRepository {
         store.put(shipment.getId(), shipment);
     }
 
+    public Shipment findById(String id) {
+        return store.get(id);
+    }
+
     public Shipment findByOrderId(String orderId) {
-        return store.values().stream()
-            .filter(s -> s.getOrderId().equals(orderId))
-            .findFirst()
-            .orElse(null);
+        for (Shipment shipment : store.values()) {
+            if (shipment.getOrderId().equals(orderId)) {
+                return shipment;
+            }
+        }
+        return null;
     }
 }

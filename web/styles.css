@@ -1442,6 +1442,17 @@ code { font-family: var(--mono); color: var(--cyan); }
   letter-spacing: .08em;
 }
 
+/* REST-origin variant of external input node (mint accent) */
+.flow-external-node.rest-origin .flow-external-icon {
+  color: rgba(0, 224, 168, .6);
+}
+.flow-external-node.rest-origin .flow-external-label {
+  color: rgba(0, 224, 168, .7);
+}
+.flow-external-node.rest-origin .flow-external-sub {
+  color: rgba(0, 224, 168, .5);
+}
+
 /* ================================================================
    FLOW TRACE VIEW (path equivalent — repo's trace in a flow)
    ================================================================ */

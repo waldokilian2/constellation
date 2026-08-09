@@ -1369,7 +1369,9 @@ code { font-family: var(--mono); color: var(--cyan); }
   flex-direction: column;
   gap: 0;
   overflow: hidden;
+  animation: flowCardIn .4s cubic-bezier(.2, .7, .2, 1) backwards;
 }
+@keyframes flowCardIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 .flow-card:hover {
   border-color: rgba(0, 212, 255, .3);
   transform: translateY(-2px);
@@ -1704,7 +1706,7 @@ code { font-family: var(--mono); color: var(--cyan); }
   font-size: 34px;
   color: var(--cyan);
   text-shadow: 0 0 18px rgba(0, 212, 255, .7);
-  animation: spin 14s linear infinite;
+  animation: spin 14s linear infinite, fadeIn .5s ease both;
   display: inline-block;
   line-height: 1;
 }
@@ -1714,8 +1716,20 @@ code { font-family: var(--mono); color: var(--cyan); }
   letter-spacing: .04em;
   background: linear-gradient(90deg, #fff, var(--cyan));
   -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: trackingInExpand .7s cubic-bezier(.215, .61, .355, 1) both;
 }
-.projects-sub { margin-top: 6px; max-width: 560px; }
+@keyframes trackingInExpand {
+  0% { letter-spacing: -.5em; opacity: 0; }
+  40% { opacity: .6; }
+  100% { letter-spacing: .04em; opacity: 1; }
+}
+.projects-sub {
+  margin-top: 6px; max-width: 560px;
+  animation: fadeIn .5s ease .2s both;
+}
+.projects-head .btn-primary {
+  animation: fadeInBottom .45s cubic-bezier(.2, .7, .2, 1) .35s both;
+}
 
 /* ---- Buttons ---- */
 .btn-primary {
@@ -1775,7 +1789,9 @@ code { font-family: var(--mono); color: var(--cyan); }
   position: relative;
   transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease;
   display: flex; flex-direction: column; gap: 12px;
+  animation: fadeInBottom .4s cubic-bezier(.2, .7, .2, 1) backwards;
 }
+@keyframes fadeInBottom { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 .project-card:hover { transform: translateY(-3px); border-color: rgba(0, 212, 255, .35); box-shadow: 0 10px 30px rgba(0, 0, 0, .35); }
 .project-card.busy { cursor: progress; opacity: .85; }
 .pc-top { display: flex; align-items: center; justify-content: flex-end; min-height: 22px; }
@@ -1905,6 +1921,7 @@ code { font-family: var(--mono); color: var(--cyan); }
   backdrop-filter: blur(6px);
   display: flex; align-items: center; justify-content: center;
   padding: 24px;
+  animation: fadeIn .25s ease both;
 }
 .modal-card {
   width: 100%; max-width: 620px;
@@ -1912,7 +1929,10 @@ code { font-family: var(--mono); color: var(--cyan); }
   box-shadow: 0 24px 70px rgba(0, 0, 0, .6);
   background: rgba(13, 19, 38, .92);
   max-height: 90vh; display: flex; flex-direction: column;
+  animation: scaleInCenter .32s cubic-bezier(.25, .46, .45, .94) both;
 }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes scaleInCenter { from { transform: scale(.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 20px 24px; border-bottom: 1px solid var(--border);

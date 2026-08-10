@@ -42,6 +42,41 @@ FRONTEND_DIR = BASE_DIR / "web"
 _API_TOKEN = os.environ.get("CONSTELLATION_API_TOKEN", "")
 _USER_AGENT = os.environ.get("CONSTELLATION_USER_AGENT", "Constellation/0.1")
 
+# ── AI provider config (OpenAI-compatible; Zen by default) ─────────
+# Zen (https://opencode.ai/zen) exposes an OpenAI-compatible API. Any
+# OpenAI-compatible gateway works by overriding the *_BASE_URL vars.
+# OPENCODE_* vars are canonical; OPENAI_* are accepted as aliases.
+ZEN_BASE_URL = "https://opencode.ai/zen/v1"
+ZEN_DEFAULT_MODEL = "nemotron-3-ultra-free"
+
+
+def _ai_api_key() -> str:
+    """API key for the OpenAI-compatible provider (Zen by default)."""
+    return os.environ.get("OPENCODE_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+
+
+def _ai_base_url() -> str:
+    """Provider base URL, normalized to end in ``/v1``."""
+    base = (
+        os.environ.get("OPENCODE_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or ZEN_BASE_URL
+    ).rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return base
+
+
+def _ai_model(model: str = "") -> str:
+    """Resolve the model id, honoring per-request overrides."""
+    return (
+        model
+        or os.environ.get("OPENCODE_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or ZEN_DEFAULT_MODEL
+    )
+
+
 from engine.project_store import ProjectStore
 
 PROJECT_STORE = ProjectStore(BASE_DIR)
@@ -411,51 +446,24 @@ def _call_llm(
     the LLM can call tools, we execute them, feed results back, repeat.
     Supports OpenAI function-calling format.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-
+    api_key = _ai_api_key()
     if not api_key:
         return {
             "available": False,
-            "message": "AI features require an API key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment.",
+            "message": "AI features require an API key. Set OPENCODE_API_KEY (or OPENAI_API_KEY) in your .env / environment.",
         }
 
-    model = model or os.environ.get("OPENAI_MODEL", "nemotron-3-ultra-free")
-    is_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
     try:
-        if is_anthropic:
-            # Anthropic — tool use not implemented in this path yet,
-            # fall through to simple completion
-            url = "https://api.anthropic.com/v1/messages"
-            headers = {
-                "Content-Type": "application/json",
-                "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-                "anthropic-version": "2023-06-01",
-            }
-            body = json.dumps({
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 800,
-                "system": system_prompt,
-                "messages": messages,
-            }).encode()
-            req_obj = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            with urllib.request.urlopen(req_obj, timeout=90) as resp:
-                data = json.loads(resp.read().decode())
-            text = data.get("content", [{}])[0].get("text", "")
-            return {"available": True, "response": text.strip()}
-
-        # ── OpenAI-compatible with tool-use loop ───────────────
+        # ── OpenAI-compatible (Zen by default) with tool-use loop ──
         from engine.graph_tools import execute_tool
 
-        base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
-        if not base.endswith("/v1"):
-            base += "/v1"
-        url = base + "/chat/completions"
+        url = _ai_base_url() + "/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "User-Agent": _USER_AGENT,
         }
+        model = _ai_model(model)
 
         # Build messages with system prompt prepended
         full_messages = [{"role": "system", "content": system_prompt}] + messages
@@ -593,27 +601,20 @@ def _stream_llm_events(
     tool_start/tool_result pair appears, then streaming resumes with the
     final answer.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    api_key = _ai_api_key()
     if not api_key:
-        yield {"type": "error", "message": "AI features require an API key. Set OPENAI_API_KEY in the environment."}
-        return
-
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        yield {"type": "error", "message": "Streaming with tool-use requires the OpenAI-compatible provider (OPENAI_BASE_URL)."}
+        yield {"type": "error", "message": "AI features require an API key. Set OPENCODE_API_KEY (or OPENAI_API_KEY) in your .env / environment."}
         return
 
     from engine.graph_tools import execute_tool
 
-    model = model or os.environ.get("OPENAI_MODEL", "nemotron-3-ultra-free")
-    base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-    url = base + "/chat/completions"
+    url = _ai_base_url() + "/chat/completions"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
         "User-Agent": _USER_AGENT,
     }
+    model = _ai_model(model)
     full_messages = [{"role": "system", "content": system_prompt}] + messages
 
     oai_tools = None
@@ -884,24 +885,23 @@ FREE_MODELS = [
 
 @app.get("/api/ai/models")
 async def ai_models():
-    """Return the list of available free models for the model dropdown."""
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    """
+    Return the provider's free models for the chat model dropdown.
+
+    Fetches /models and keeps ONLY the free tier (model ids ending in
+    "-free"); non-free models are never selectable. If the key is missing
+    or the request fails, falls back to the bundled FREE_MODELS list.
+    """
+    api_key = _ai_api_key()
     if not api_key:
         return {"available": False, "models": FREE_MODELS}
 
     try:
-        base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
-        if not base.endswith("/v1"):
-            base += "/v1"
-        req = urllib.request.Request(
-            base + "/models",
-            headers={"Authorization": f"Bearer {api_key}", "User-Agent": _USER_AGENT},
-            method="GET",
-        )
+        base = _ai_base_url()
         data = await run_in_threadpool(_fetch_models_json, base, api_key)
-        free_models = [m for m in all_models if m and m.endswith("-free")]
-        models = free_models or all_models or FREE_MODELS
-        return {"available": True, "models": models}
+        ids = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
+        free_models = sorted({i for i in ids if i and i.endswith("-free")})
+        return {"available": True, "models": free_models or FREE_MODELS}
     except Exception:
         return {"available": False, "models": FREE_MODELS}
 

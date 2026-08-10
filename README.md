@@ -39,7 +39,7 @@ On first load the server seeds two demo projects:
 - **Python 3.10+**
 - **Node.js 18+** (for the Vite frontend build)
 - **A modern browser** (for the web UI)
-- **Optional:** `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` env var for AI features (works without — just disables AI chat)
+- **Optional:** `OPENCODE_API_KEY` env var for AI features (defaults to Zen; works without — just disables AI chat). Add it to the committed `.env` template.
 
 ---
 
@@ -376,10 +376,9 @@ Every relationship in the graph is tagged with confidence:
 | `CONSTELLATION_PORT` | `8765` | Web server port |
 | `CONSTELLATION_GRAPH` | `output/graph.json` | Graph file path (MCP server) |
 | `CONSTELLATION_API_TOKEN` | — | Optional bearer token; API is open when unset |
-| `OPENAI_API_KEY` | — | API key for AI features |
-| `OPENAI_BASE_URL` | `https://api.openai.com` | OpenAI-compatible base URL |
-| `OPENAI_MODEL` | `nemotron-3-ultra-free` | Default model |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key (takes priority if set) |
+| `OPENCODE_API_KEY` | — | API key for AI features (alias: `OPENAI_API_KEY`) |
+| `OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | OpenAI-compatible base URL — Zen by default (alias: `OPENAI_BASE_URL`) |
+| `OPENCODE_MODEL` | `nemotron-3-ultra-free` | Default model (alias: `OPENAI_MODEL`) |
 
 ---
 

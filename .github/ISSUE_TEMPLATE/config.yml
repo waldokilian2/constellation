@@ -1,0 +1,8 @@
+# Issue-template chooser config.
+# Blank issues are disabled — contributors pick a template.
+# (See AGENTS.md for project conventions.)
+blank_issues_enabled: false
+contact_links:
+  - name: Task briefs
+    url: https://github.com/waldokilian2/constellation/tree/main/docs/tasks
+    about: Each engine task pairs with a deep spec in docs/tasks/ — read an existing brief (e.g. 03-blast-radius-mermaid-export.md) for the format.

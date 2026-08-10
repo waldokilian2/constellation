@@ -1,0 +1,54 @@
+name: "📋 Task brief (engine work)"
+description: "A scoped engine task with a deep spec, tracked on the board"
+title: "task: <short summary>"
+labels: ["area/engine"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This mirrors the **task brief** format in `docs/tasks/` (see
+        `03-blast-radius-mermaid-export.md` and `docs/tasks/README.md`).
+        Engine tasks are deterministic — **no LLM in the core.** After creating this
+        issue, add a matching brief file under `docs/tasks/` and link it here.
+  - type: input
+    id: branch
+    attributes:
+      label: Suggested branch
+      placeholder: "feature/<short-name>"
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't be done today, and why it matters. Reference real symbols/files with line numbers.
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The outcome — pure functions, new tools, etc. State explicitly if it is deterministic (no LLM).
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: One checkbox per line. Include tool registration (TOOL_DEFINITIONS / execute_tool / routes) and stdlib-only tests.
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: anchors
+    attributes:
+      label: Suggested anchors
+      description: Files + line numbers (e.g. `engine/graph_tools.py:26` (TOOL_DEFINITIONS), `:582` (execute_tool)).
+  - type: textarea
+    id: anti
+    attributes:
+      label: Anti-goals
+      description: What is explicitly out of scope or violates conventions.
+  - type: textarea
+    id: conventions
+    attributes:
+      label: Conventions
+      description: Reminders (per AGENTS.md) — pure functions, no I/O in graph tools, no extra runtime deps, stdlib-only tests, no frontend build step.

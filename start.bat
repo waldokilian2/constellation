@@ -63,7 +63,7 @@ REM Check if deps need installing
 %PYTHON% -c "import tree_sitter, fastapi" 2>nul
 if errorlevel 1 (
     echo → Installing dependencies...
-    pip install --quiet tree-sitter tree-sitter-java fastapi uvicorn
+    pip install --quiet -r requirements.txt
 )
 echo ✓ Dependencies ready
 

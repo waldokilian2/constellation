@@ -1,0 +1,24 @@
+# Version control / metadata
+.git/
+.gitignore
+.kilo/
+.idea/
+.vscode/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node / frontend build artifacts (the image builds its own fresh copy)
+node_modules/
+web/dist/
+
+# Runtime state (mounted as a volume at /app/output, never baked in)
+output/
+
+# Large gitignored sample repo
+tests/repos/sample-spring-kafka-microservices/
+
+# Docs not needed at runtime
+*.md

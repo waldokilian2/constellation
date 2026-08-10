@@ -79,7 +79,7 @@ fi
 
 if [ "$NEEDS_INSTALL" = true ]; then
     echo -e "${YELLOW}→${NC} Installing dependencies..."
-    pip install --quiet tree-sitter tree-sitter-java fastapi uvicorn 2>&1 | grep -v "already satisfied" || true
+    pip install --quiet -r requirements.txt 2>&1 | grep -v "already satisfied" || true
 fi
 echo -e "${GREEN}✓${NC} Dependencies ready"
 

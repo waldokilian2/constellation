@@ -34,6 +34,44 @@ On first load the server seeds two demo projects:
 - **Spring Boot** — `order-service`, `fulfillment-service`, `notification-service` (Spring Messaging / REST / Kafka / RabbitMQ)
 - **Java EE** — `java-ee-order-service`, `java-ee-fulfillment-service`, `java-ee-notification-service` (JAX-RS, JMS MDB, CDI, EJB, WebSocket, Spring `@Scheduled`/`@MessageMapping`) with real cross-repo links
 
+### Docker (all-in-one)
+
+Prefer containers? The AIO image bundles the engine, server, and a pre-built UI — no Python or Node needed on the host:
+
+```bash
+docker compose up           # http://localhost:8765
+```
+
+- Works offline (React/marked are bundled into the built UI; Google Fonts fall back to system fonts).
+- Graphs and cloned repos persist in the `constellation-output` named volume.
+- Optional AI: `ANTHROPIC_API_KEY=sk-... docker compose up`.
+
+#### Analyze repos you've already cloned
+
+The container has its own filesystem, so a repo on your host isn't visible to it until you mount it. Constellation supports `local:<path>` repos (the same `local:` scheme the UI's "Add repo" field accepts), so:
+
+1. Add a bind mount in `docker-compose.yml` (under `volumes`), pointing your host repos dir at `/repos` inside the container:
+   ```yaml
+   - ./path/to/your/repos:/repos:ro
+   ```
+2. `docker compose up`, then add a repo from the UI's "Add repo" field using the **absolute in-container path**:
+   ```
+   local:/repos/my-service
+   ```
+   …or via the API:
+   ```bash
+   curl -X POST http://localhost:8765/api/projects \
+     -H "Content-Type: application/json" \
+     -d '{"name":"My local stack","repos":["local:/repos/my-service"]}'
+   ```
+
+The `:ro` mount keeps your source read-only; drop it if you want Constellation to `git pull` updates into a git-backed checkout. For a one-off analysis with no server, run the engine directly over a mounted repo:
+
+```bash
+docker compose run --rm --entrypoint python constellation \
+  -m engine.constellation /repos/my-service --output output/graph.json
+```
+
 ### Requirements
 
 - **Python 3.10+**

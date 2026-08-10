@@ -18,19 +18,24 @@ The **core analysis is deterministic** — every relationship is read from sourc
   modules (no pytest, no deps — run `python tests/run_tests.py`). `tests/repos/` holds sample
   Java repos used as analysis input (`tests/repos/{order-service,fulfillment-service,notification-service}`
   plus `java-ee-*`).
-- Frontend is **React 18 via CDN + Babel standalone** — there is **no build step and no `package.json`**. Do not introduce a bundler without a strong reason.
+- Frontend is **React 18 built with Vite** (esbuild transform, Rollup production build). Run `npm install` then `npm run build` to produce `web/dist/`. **`npm run dev`** starts Vite's dev server (HMR, port 5173) with API proxying to the Python backend on :8765.
 - LLM calls use stdlib `urllib` only (no `requests`/`httpx`). Keep it that way — adding an HTTP dep is a regression against the "no extra deps" convention.
 
 ## Quick Commands
 
 ```bash
-./start.sh                        # create venv, install deps, gen graph, start server on :8765
+./start.sh                        # create venv, install deps, gen graph, build frontend, start server on :8765
 ./start.sh /path/to/repo1 ...     # analyze custom repos instead of test repos
 start.bat                         # Windows equivalent
 
 # Analyze without the server (activate .venv first)
 source .venv/bin/activate
 python -m engine.constellation /path/to/repo1 /path/to/repo2 --output output/graph.json
+
+# Frontend (Vite)
+npm install                       # install React + Vite (first time only)
+npm run dev                       # Vite dev server with HMR on :5173 (API proxied to :8765)
+npm run build                     # production build → web/dist/ (served by server.py)
 
 # MCP stdio server (for Claude Code / Cursor)
 python -m engine.mcp_server        # CONSTELLATION_GRAPH optionally points at a graph.json
@@ -39,7 +44,7 @@ python -m engine.mcp_server        # CONSTELLATION_GRAPH optionally points at a 
 python web/mock_server.py
 ```
 
-The startup scripts only regenerate `output/graph.json` when it is missing or custom repo args are passed. `output/graph.json` is gitignored (as is `tests/repos/sample-spring-kafka-microservices/`).
+The startup scripts only regenerate `output/graph.json` when it is missing or custom repo args are passed. `output/graph.json` is gitignored (as are `tests/repos/sample-spring-kafka-microservices/` and `web/dist/`).
 
 ## Repository Layout
 
@@ -57,10 +62,13 @@ engine/            # Deterministic analysis engine (Python)
   project_store.py   # multi-project index, git-clone ingestion, engine-run w/ log capture
   constellation.py   # CLI orchestrator + ConstellationEngine
 server.py            # FastAPI app: REST + AI proxy + static frontend
-web/                 # React CDN frontend (no build step)
-  index.html         # loads React/Babel/marked from CDN, transforms app.js
-  app.js             # Projects → Galaxy → Solar System → Path → Detail (~3100 lines)
-  styles.css         # SVG + CSS visualization styles
+web/                 # React 18 + Vite frontend
+  index.html         # Vite entry (loads /src/main.jsx as ES module)
+  src/
+    main.jsx         # entry point: createRoot(<App />)
+    app.jsx          # Projects → Galaxy → Solar System → Path → Detail (~3600 lines)
+    styles.css       # SVG + CSS visualization styles
+  dist/              # Vite build output (gitignored, created by npm run build)
   mock_server.py     # static in-memory backend for frontend dev
 tests/repos/         # sample Java microservices (input data, not tests)
   order-service / fulfillment-service / notification-service
@@ -112,14 +120,14 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
 
 - **Python:** module-level docstrings, `from __future__ import annotations`, type hints, and `# ── Section ──` comment separators. Dataclasses for the graph model (`models.py`). Follow these when editing engine/server code.
 - **Style:** section-header comments use the `# ── ... ──` pattern (see any `engine/*.py`). Docstrings are used liberally — keep them.
-- **No build step:** frontend edits are plain JS/CSS/HTML. When changing `web/app.js`, be aware `index.html` fetches and `Babel.transform`s it at runtime with the **classic** JSX runtime — avoid automatic-runtime-only syntax.
+- **Build step:** frontend edits require a Vite rebuild (`npm run build`) to be visible in the production server. For rapid iteration with HMR, use `npm run dev` (Vite dev server on :5173, proxies API to :8765). The source lives in `web/src/` — `app.jsx` (components/logic) + `styles.css` + `main.jsx` (entry point). React, `marked`, and all deps are imported as ES modules (no global CDN scripts).
 - **Security:** source reads are confined to recorded `repo_roots` (`engine/paths.py`, `server.py:_resolve_source_path`). Keep arbitrary-file-read surfaces closed. The graph stores **repo-relative** paths for portability.
 - **Env vars:** `CONSTELLATION_PORT` (8765), `CONSTELLATION_GRAPH` (graph path for MCP), `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL` (default `nemotron-3-ultra-free`), `ANTHROPIC_API_KEY` (takes priority if set). `server.py` also loads a `.env` file at startup.
 
 ## Known Gotchas & Latent Bugs
 
 - Previously `server.py` referenced undefined names (`run_in_threadpool`, `Request`, `all_models`, `_API_TOKEN`, `_USER_AGENT`, `queue`/`threading`/`asyncio`) that made `/api/analyze`, `/api/ai/models`, auth, and streaming fail at call time. These are **fixed**: the imports/consts are defined, `/api/analyze` is replaced by the streaming ingest endpoints, and `ai_models` falls back to `FREE_MODELS` when the provider can't be reached. `CONSTELLATION_API_TOKEN` auth is still optional (open when unset) and is documented in code but **not** in the README's env-var table.
-- All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (graph, source, tools, ai/chat, ai/chat/stream). The flat `/api/graph`, `/api/source`, `/api/tools/*`, `/api/ai/*` routes no longer exist; only `/api/ai/models` and `/api/graph` (legacy alias → first ready project) remain non-scoped. The frontend builds these via `projPath(pid, rest)` in `web/app.js`.
+- All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (graph, source, tools, ai/chat, ai/chat/stream). The flat `/api/graph`, `/api/source`, `/api/tools/*`, `/api/ai/*` routes no longer exist; only `/api/ai/models` and `/api/graph` (legacy alias → first ready project) remain non-scoped. The frontend builds these via `projPath(pid, rest)` in `web/src/app.jsx`.
 - The MCP server loads `graph.json` once at startup; restart to pick up graph changes.
 - Call resolution is import-aware for single types plus interface→impl and local-variable/parameter receivers (see `engine/java_index.py`), and resolves methods up a **multi-level supertype chain** via `find_methods_in_hierarchy` (used as a fallback in `resolve_call`). It still can produce false positives when a simple name maps to multiple unimported classes across repos — see the "Limitations" section of `README.md`. Do not silently change the `EXTRACTED`/`INFERRED`/`AMBIGUOUS` semantics that the tests and UI depend on.
 

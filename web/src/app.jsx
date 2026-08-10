@@ -1,9 +1,11 @@
 /* ============================================================
    CONSTELLATION — Codebase Mapper frontend
-   React 18 + Babel standalone, no build step.
+   React 18 + Vite (ES module build)
    ============================================================ */
 
-const { useState, useEffect, useRef, useMemo, useLayoutEffect, useCallback } = React;
+import React, { useState, useEffect, useRef, useMemo, useLayoutEffect, useCallback } from "react";
+import { marked } from "marked";
+import "./styles.css";
 
 /* ---------------- helpers ---------------- */
 const repoFromId = (id) => (typeof id === "string" ? id.split(":")[0] : "");
@@ -45,10 +47,7 @@ const confMeta = (c) => CONFIDENCE[c] || { color: "#94a3b8" };
 
 function renderMarkdown(src) {
   if (!src) return "";
-  if (window.marked) {
-    return sanitizeHTML(window.marked.parse(src, { breaks: true }));
-  }
-  return escapeHTML(src);
+  return sanitizeHTML(marked.parse(src, { breaks: true }));
 }
 
 function sanitizeHTML(html) {
@@ -3609,5 +3608,5 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
   );
 }
 
-const rootEl = document.getElementById("root");
-ReactDOM.createRoot(rootEl).render(<App />);
+// App is exported for the entry point in main.jsx
+export default App;

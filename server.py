@@ -973,17 +973,29 @@ async def tool_trace(pid: str, from_method: str, to_method: str):
 
 # ── Static frontend ────────────────────────────────────────────────
 
-# Mount static files FIRST so they take priority over the catch-all route
-if FRONTEND_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+# Vite builds to web/dist/. In production, server.py serves the built
+# bundle directly. In dev (npm run dev), Vite runs on :5173 and proxies
+# API calls here — this static serving is simply unused.
+DIST_DIR = FRONTEND_DIR / "dist"
+
+if DIST_DIR.exists():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(DIST_DIR / "assets")),
+        name="assets",
+    )
 
 
 @app.middleware("http")
-async def no_cache_static(request, call_next):
-    """Prevent stale bundle caching: dev iterates on app.js/styles.css constantly,
-    and browsers hold onto old files when there's no Cache-Control header."""
+async def cache_headers(request, call_next):
+    """Vite emits content-hashed filenames (/assets/index-AbC123.js) so
+    built assets are safe to cache permanently. The HTML entry point and
+    API responses should never be cached."""
     response = await call_next(request)
-    if request.url.path.startswith("/static") or request.url.path == "/":
+    if request.url.path.startswith("/assets"):
+        # Immutable — filename changes when content changes
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif request.url.path == "/" or request.url.path.startswith("/api"):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -992,15 +1004,18 @@ async def no_cache_static(request, call_next):
 
 @app.get("/")
 async def index():
-    """Serve the main frontend page."""
-    index_file = FRONTEND_DIR / "index.html"
+    """Serve the built frontend (Vite output in web/dist/)."""
+    index_file = DIST_DIR / "index.html"
     if index_file.exists():
         return FileResponse(str(index_file), media_type="text/html")
-    return JSONResponse({
-        "message": "Constellation API is running. Frontend not found.",
-        "hint": f"Put your frontend in {FRONTEND_DIR}/",
-        "api_docs": "/docs"
-    })
+    return JSONResponse(
+        {
+            "message": "Constellation API is running. Frontend not built yet.",
+            "hint": "Run: npm install && npm run build",
+            "api_docs": "/docs",
+        },
+        status_code=404,
+    )
 
 
 @app.get("/health")

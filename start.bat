@@ -94,6 +94,16 @@ if "%~1"=="" (
 :have_graph
 echo ✓ Graph data ready
 
+REM ── Build frontend ──────────────────────────────────────────────
+if exist "package.json" (
+    echo → Building frontend...
+    if not exist "node_modules" (
+        call npm install --silent
+    )
+    call npm run build
+    echo ✓ Frontend ready
+)
+
 REM ── Start server ────────────────────────────────────────────────
 if "%CONSTELLATION_PORT%"=="" set "CONSTELLATION_PORT=8765"
 

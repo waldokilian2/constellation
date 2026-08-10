@@ -123,6 +123,20 @@ if [ ! -f "output/graph.json" ] || [ ! -f "output/graph-java-ee.json" ] || [ "$1
 fi
 echo -e "${GREEN}✓${NC} Graph data ready"
 
+# ── Build frontend ─────────────────────────────────────────────────
+if [ -f "package.json" ]; then
+    if [ ! -d "web/dist" ] || [ web/index.html -nt web/dist/index.html ] 2>/dev/null || \
+       [ web/src/app.jsx -nt web/dist/index.html ] 2>/dev/null || \
+       [ web/src/styles.css -nt web/dist/index.html ] 2>/dev/null; then
+        echo -e "${YELLOW}→${NC} Building frontend..."
+        if [ ! -d "node_modules" ]; then
+            npm install --silent 2>&1 | tail -3
+        fi
+        npm run build 2>&1 | tail -3
+    fi
+    echo -e "${GREEN}✓${NC} Frontend ready"
+fi
+
 # ── Start server ──────────────────────────────────────────────────
 PORT="${CONSTELLATION_PORT:-8765}"
 echo ""

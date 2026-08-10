@@ -14,6 +14,14 @@ REM ============================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
+REM ── Protect local .env edits from being committed ───────────────
+REM .env ships as a committed template; mark it skip-worktree so each
+REM user's secrets stay local and are never pushed. Harmless if not a
+REM git repo or .env is absent.
+if exist ".env" (
+    git update-index --skip-worktree .env 2>nul
+)
+
 echo.
 echo ╔══════════════════════════════════════════════╗
 echo ║  Constellation — Codebase Entry Point Mapper ║

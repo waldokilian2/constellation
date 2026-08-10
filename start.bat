@@ -14,6 +14,10 @@ REM ============================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
+REM Switch the console to UTF-8 so the box-drawing / checkmark glyphs below
+REM render correctly instead of as mojibake (the file is saved as UTF-8).
+chcp 65001 >nul
+
 echo.
 echo ╔══════════════════════════════════════════════╗
 echo ║  Constellation — Codebase Entry Point Mapper ║
@@ -25,8 +29,11 @@ set "PYTHON="
 for %%c in (python py) do (
     where %%c >nul 2>&1 && (
         for /f "tokens=*" %%v in ('%%c --version 2^>^&1') do (
-            echo %%v | findstr /r "3\.\(1[0-9]\|[2-9][0-9]\)" >nul && (
+            REM findstr /r has no grouping/alternation, so use space-separated
+            REM terms (space == OR): 3.10-3.19 OR 3.20-3.99.
+            echo %%v | findstr /r "3\.1[0-9] 3\.[2-9][0-9]" >nul && (
                 set "PYTHON=%%c"
+                set "PYVER=%%v"
                 goto :found_python
             )
         )
@@ -39,7 +46,7 @@ pause
 exit /b 1
 
 :found_python
-echo ✓ Python: 
+echo ✓ Python: !PYVER!
 
 REM ── Create venv if missing ──────────────────────────────────────
 if not exist ".venv" (

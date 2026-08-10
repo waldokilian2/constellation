@@ -1,0 +1,7 @@
+# Constellation runtime dependencies.
+# LLM calls use stdlib urllib — no requests/httpx (per AGENTS.md).
+# Both host startup scripts and the Docker image install from this file.
+tree-sitter>=0.23
+tree-sitter-java>=0.23
+fastapi>=0.110
+uvicorn>=0.29

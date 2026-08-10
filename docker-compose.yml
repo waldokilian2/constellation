@@ -1,0 +1,36 @@
+# Constellation — all-in-one (AIO) compose. See issue #27.
+#
+#   docker compose up                              # http://localhost:8765
+#   ANTHROPIC_API_KEY=sk-... docker compose up     # with AI chat enabled
+services:
+  constellation:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    # image: ghcr.io/waldokilian2/constellation:latest   # once published (GHCR)
+    container_name: constellation
+    ports:
+      - "${CONSTELLATION_PORT:-8765}:8765"
+    volumes:
+      # graphs + cloned repos persist across restarts
+      - constellation-output:/app/output
+      # Optional — analyze repos you've already cloned on the host:
+      # uncomment, point the LEFT side at your host repos dir, then add repos via
+      # the UI/API as local:/repos/<name> (README → Docker → "Analyze repos you've already cloned").
+      # - ./path/to/your/repos:/repos:ro
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      CONSTELLATION_API_TOKEN: ${CONSTELLATION_API_TOKEN:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  constellation-output:

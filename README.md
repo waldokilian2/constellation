@@ -27,7 +27,8 @@ The startup script will:
 1. Create a Python virtual environment (if missing)
 2. Install dependencies (if missing)
 3. Generate the demo graphs from the bundled test repos (if missing)
-4. Start the server
+4. Build the frontend (`npm install && npm run build`, if `web/dist/` is missing or stale)
+5. Start the server
 
 On first load the server seeds two demo projects:
 - **Spring Boot** — `order-service`, `fulfillment-service`, `notification-service` (Spring Messaging / REST / Kafka / RabbitMQ)
@@ -36,6 +37,7 @@ On first load the server seeds two demo projects:
 ### Requirements
 
 - **Python 3.10+**
+- **Node.js 18+** (for the Vite frontend build)
 - **A modern browser** (for the web UI)
 - **Optional:** `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` env var for AI features (works without — just disables AI chat)
 
@@ -123,10 +125,13 @@ constellation/
 │   └── constellation.py            #   CLI orchestrator
 │
 ├── server.py                       # FastAPI web server + REST API
-├── web/                            # React frontend (CDN, no build step)
-│   ├── index.html
-│   ├── app.js                      # Galaxy → Solar System → Path → Detail views
-│   └── styles.css
+├── web/                            # React 18 + Vite frontend
+│   ├── index.html                  # Vite entry point
+│   ├── src/
+│   │   ├── main.jsx                # createRoot entry
+│   │   ├── app.jsx                 # Galaxy → Solar System → Path → Detail views
+│   │   └── styles.css              # visualization styles
+│   └── dist/                       # Vite build output (gitignored)
 │
 ├── tests/repos/                    # Sample Java microservice repos
 │   ├── order-service/              #   Spring Boot demo: REST + RabbitMQ producer + event listener
@@ -385,7 +390,7 @@ Every relationship in the graph is tagged with confidence:
 | AST Parsing | [tree-sitter](https://tree-sitter.github.io/) + tree-sitter-java | Industry standard, pre-built wheels for Windows/Linux |
 | Engine | Python 3.10+ | Cross-platform, tree-sitter bindings |
 | API Server | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn | Async, fast, auto-docs |
-| Frontend | React 18 (CDN) + Babel standalone | No build step — just open the files |
+| Frontend | React 18 + Vite | `npm run dev` for HMR, `npm run build` for production |
 | Graph Viz | SVG (custom) + CSS animations | Lightweight, no heavy dependencies |
 | AI (optional) | OpenAI-compatible API or Anthropic | Proxied server-side, key never in frontend |
 | MCP | JSON-RPC 2.0 over stdio | Standard protocol for coding agents |

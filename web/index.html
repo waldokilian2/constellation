@@ -4,34 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Constellation — Codebase Mapper</title>
-  <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css" />
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 </head>
 <body>
   <div id="root"></div>
-  <script>
-    // Babel standalone doesn't support preset options via data attributes,
-    // so we fetch + transform manually to force the classic JSX runtime
-    // (React.createElement) instead of the automatic runtime (import-based).
-    fetch('/static/app.js')
-      .then(function (r) { return r.text(); })
-      .then(function (code) {
-        return Babel.transform(code, {
-          presets: [['react', { runtime: 'classic' }]],
-        }).code;
-      })
-      .then(function (transformed) {
-        // eslint-disable-next-line no-eval
-        eval(transformed);
-      })
-      .catch(function (err) { console.error('Babel transform error:', err); });
-  </script>
+  <script type="module" src="/src/main.jsx"></script>
 </body>
 </html>

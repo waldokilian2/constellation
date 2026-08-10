@@ -1,7 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
-.env
 output/
 tests/repos/sample-spring-kafka-microservices/
 

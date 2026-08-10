@@ -47,7 +47,7 @@ _USER_AGENT = os.environ.get("CONSTELLATION_USER_AGENT", "Constellation/0.1")
 # OpenAI-compatible gateway works by overriding the *_BASE_URL vars.
 # OPENCODE_* vars are canonical; OPENAI_* are accepted as aliases.
 ZEN_BASE_URL = "https://opencode.ai/zen/v1"
-ZEN_DEFAULT_MODEL = "nemotron-3-ultra-free"
+ZEN_DEFAULT_MODEL = "deepseek-v4-flash-free"
 
 
 def _ai_api_key() -> str:

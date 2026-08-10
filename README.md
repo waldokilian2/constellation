@@ -378,7 +378,7 @@ Every relationship in the graph is tagged with confidence:
 | `CONSTELLATION_API_TOKEN` | — | Optional bearer token; API is open when unset |
 | `OPENCODE_API_KEY` | — | API key for AI features (alias: `OPENAI_API_KEY`) |
 | `OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | OpenAI-compatible base URL — Zen by default (alias: `OPENAI_BASE_URL`) |
-| `OPENCODE_MODEL` | `nemotron-3-ultra-free` | Default model (alias: `OPENAI_MODEL`) |
+| `OPENCODE_MODEL` | `deepseek-v4-flash-free` | Default model (alias: `OPENAI_MODEL`) |
 
 ---
 

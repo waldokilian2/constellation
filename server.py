@@ -42,6 +42,13 @@ FRONTEND_DIR = BASE_DIR / "web"
 _API_TOKEN = os.environ.get("CONSTELLATION_API_TOKEN", "")
 _USER_AGENT = os.environ.get("CONSTELLATION_USER_AGENT", "Constellation/0.1")
 
+# Windows proactor accept-resilience: a transient network blip (WinError 64
+# etc.) must not close the listening socket — retry instead. Installed here,
+# at import time, before uvicorn creates the event loop.
+import win_accept_resilience
+
+win_accept_resilience.install()
+
 # ── AI provider config (OpenAI-compatible; Zen by default) ─────────
 # Zen (https://opencode.ai/zen) exposes an OpenAI-compatible API. Any
 # OpenAI-compatible gateway works by overriding the *_BASE_URL vars.

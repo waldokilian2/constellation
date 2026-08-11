@@ -13,8 +13,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from engine.parser import JavaParser
-from engine.java_index import JavaIndex
+from engine.ast_parser import ASTParser
+from engine.languages import java_ast
+from engine.symbol_index import SymbolIndex
 from engine.entry_detector import EntryPointDetector
 from engine.cross_repo import CrossRepoLinker
 from engine.models import EntryPointType, ProducerType
@@ -35,7 +36,7 @@ def detect(sources: dict, repo: str = "svc"):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(code)
             files.append((repo, root, p))
-        idx = JavaIndex()
+        idx = SymbolIndex()
         idx.build(files)
         entries, producers = EntryPointDetector(idx).scan()
         return idx, entries, producers
@@ -235,7 +236,7 @@ def test_camel_links_to_kafka_publisher():
         d = Path(td)
         (d / "c").mkdir(); (d / "c" / "R.java").write_text(camel)
         (d / "p").mkdir(); (d / "p" / "P.java").write_text(pub)
-        idx = JavaIndex()
+        idx = SymbolIndex()
         idx.build([("c", d / "c", d / "c" / "R.java"), ("p", d / "p", d / "p" / "P.java")])
         entries, producers = EntryPointDetector(idx).scan()
     links = CrossRepoLinker().link(entries, producers)
@@ -319,10 +320,13 @@ def test_async_http_client_verb_from_method_name():
 # ── Parser fixes + hierarchy resolution ───────────────────────────
 
 def test_chained_call_parse():
-    p = JavaParser()
-    root = p.parse_source(b'class X { void m() { from("kafka:orders").to("kafka:ship"); } }')
-    invs = p.find_method_invocations(p.find_methods(p.find_classes(root)[0])[0])
-    parsed = {p.parse_method_invocation(i)["method"] for i in invs}
+    p = ASTParser()
+    root = p.parse_source(b'class X { void m() { from("kafka:orders").to("kafka:ship"); } }', "java")
+    ext = p.extract("java", root)
+    cls = ext.symbols[0].def_node          # class X
+    m = java_ast.find_methods(cls)[0]       # method m
+    invs = java_ast.find_method_invocations(m)
+    parsed = {java_ast.parse_method_invocation(i)["method"] for i in invs}
     assert parsed == {"from", "to"}, f"chained from().to() mis-parsed: {parsed}"
 
 
@@ -370,7 +374,7 @@ def _detect_multi(repos: dict, repo_files: dict):
                 p = d / repo / name
                 p.write_text(code)
                 files.append((repo, d / repo, p))
-        idx = JavaIndex()
+        idx = SymbolIndex()
         idx.build(files)
         entries, producers = EntryPointDetector(idx).scan()
         return idx, entries, producers
@@ -389,8 +393,7 @@ def test_grpc_requires_stream_observer_param():
     assert not find(entries, EntryPointType.GRPC_SERVICE), "non-gRPC *ImplBase produced gRPC entries"
 
 
-def test_main_requires_string_array_and_void():
-    # Wrong signature: non-void return / non String[] param → not a MAIN entry.
+def test_main_requires_string_array_and_void():    # Wrong signature: non-void return / non String[] param → not a MAIN entry.
     src = "class Util { static String main(String x) { return x; } static void go(int n) {} }"
     _, entries, _ = detect({"U.java": src})
     assert not find(entries, EntryPointType.MAIN), "non-void/non-String[] main() must not be MAIN"

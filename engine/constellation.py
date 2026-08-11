@@ -17,12 +17,11 @@ from datetime import datetime, timezone
 import argparse
 import sys
 
-from .parser import JavaParser
 from .entry_detector import EntryPointDetector
 from .call_graph import CallGraphBuilder
 from .cross_repo import CrossRepoLinker
-from .java_index import JavaIndex
-from .models import ConstellationGraph, CallNode
+from .symbol_index import SymbolIndex
+from .models import ConstellationGraph, CallNode, ConfidenceTag
 
 
 def _is_test_file(path: Path) -> bool:
@@ -38,7 +37,7 @@ class ConstellationEngine:
     """Main engine — orchestrates parsing, detection, and graph building."""
 
     def __init__(self):
-        self.java_parser = JavaParser()
+        pass
 
     def analyze(
         self,
@@ -67,7 +66,7 @@ class ConstellationEngine:
                 all_files.append((repo_name, repo_path, jf))
 
         # ── Phase 2: build the type-aware symbol index ──────────────
-        index = JavaIndex()
+        index = SymbolIndex()
         index.build(all_files)
         print(f"[scan] indexed {len(index.by_fqn)} types, {len(index.methods)} methods, "
               f"{len(index.constants)} constants across {len(repo_dirs)} repo(s)")
@@ -82,11 +81,11 @@ class ConstellationEngine:
         builder = CallGraphBuilder(index)
 
         for ep in all_entry_points:
-            # Find the entry method's AST node via the index.
+            # Find the entry method via the index and build its call tree.
             entry_methods = index.find_methods(ep.class_name, ep.method)
             entry_method = next((m for m in entry_methods if m.repo == ep.repo and m.file == ep.file), None)
-            if entry_method and entry_method.node:
-                ep.call_tree = builder.build_tree(ep, entry_method.node)
+            if entry_method:
+                ep.call_tree = builder.build_tree(ep, entry_method)
                 ep.metrics = builder.compute_metrics(ep.call_tree)
             else:
                 ep.call_tree = CallNode(
@@ -94,7 +93,7 @@ class ConstellationEngine:
                     file=ep.file,
                     line=ep.line,
                     class_name=ep.class_name,
-                    confidence="EXTRACTED",
+                    confidence=ConfidenceTag.EXTRACTED.value,
                 )
                 ep.metrics = {"depth": 0, "total_nodes": 1, "unique_files": 1, "branch_count": 0}
 

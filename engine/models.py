@@ -5,6 +5,7 @@ Pure dataclasses — no logic, no dependencies.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Optional
 import json
 
 
@@ -39,6 +40,22 @@ class ProducerType(Enum):
     UNKNOWN = "unknown"
 
 
+class ConfidenceTag(Enum):
+    """Confidence of a call-tree edge — the single source of truth for the
+    vocabulary. String values are part of the serialised graph.json contract
+    (asserted by the test suite) and must not change.
+
+    * ``EXTRACTED`` — call resolved to a concrete definition.
+    * ``INFERRED``  — call name matched but the target could not be confirmed.
+    * ``AMBIGUOUS`` — multiple possible targets; the first one was chosen.
+    * ``TRUNCATED`` — the per-tree node cap was hit during traversal.
+    """
+    EXTRACTED = "EXTRACTED"
+    INFERRED = "INFERRED"
+    AMBIGUOUS = "AMBIGUOUS"
+    TRUNCATED = "TRUNCATED"
+
+
 @dataclass
 class CallNode:
     """A single node in a call tree — a function/method call and its children."""
@@ -47,7 +64,7 @@ class CallNode:
     line: int = 0
     class_name: str = ""
     children: list[CallNode] = field(default_factory=list)
-    confidence: str = "EXTRACTED"  # EXTRACTED | INFERRED | AMBIGUOUS
+    confidence: str = ConfidenceTag.EXTRACTED.value  # ConfidenceTag value
 
     def to_dict(self) -> dict:
         return {
@@ -135,16 +152,6 @@ class CrossRepoLink:
             "kind": self.kind,
             "verb": self.verb,
         }
-
-
-@dataclass
-class ClassMethod:
-    """An indexed method found in the codebase — used for call resolution."""
-    name: str
-    class_name: str
-    file: str
-    line: int
-    node: object = None  # tree-sitter node (not serialized)
 
 
 @dataclass

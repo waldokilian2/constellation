@@ -3834,6 +3834,20 @@ function App() {
       .catch(() => {});
   }, []);
 
+  // ── diff helpers (must appear before loadProjects which depends on fetchProjectDiff) ──
+  const [diffsByPid, setDiffsByPid] = useState({});    // {pid: light /diff} for project-list chips
+
+  const fetchDiff = useCallback((pid, at, light) => {
+    const params = (at ? ("&at=" + encodeURIComponent(at)) : "") + (light ? "&light=1" : "");
+    return fetchJSON(projPath(pid, "/diff" + (params ? "?" + params.slice(1) : "")));
+  }, []);
+
+  const fetchProjectDiff = useCallback((pid) => {
+    fetchDiff(pid, "", true).then((d) => {
+      setDiffsByPid((prev) => ({ ...prev, [pid]: d }));
+    }).catch(() => {});
+  }, [fetchDiff]);
+
   const loadProjects = useCallback(() => {
     setProjStatus("loading");
     fetchJSON("/api/projects")
@@ -3881,18 +3895,6 @@ function App() {
   const [compareMode, setCompareMode] = useState(false);
   const [compareTs, setCompareTs] = useState("");       // "" = latest; non-empty = specific snapshot
   const [bannerDismissed, setBannerDismissed] = useState(false);
-  const [diffsByPid, setDiffsByPid] = useState({});    // {pid: light /diff} for project-list chips
-
-  const fetchDiff = useCallback((pid, at, light) => {
-    const params = (at ? ("&at=" + encodeURIComponent(at)) : "") + (light ? "&light=1" : "");
-    return fetchJSON(projPath(pid, "/diff" + (params ? "?" + params.slice(1) : "")));
-  }, []);
-
-  const fetchProjectDiff = useCallback((pid) => {
-    fetchDiff(pid, "", true).then((d) => {
-      setDiffsByPid((prev) => ({ ...prev, [pid]: d }));
-    }).catch(() => {});
-  }, [fetchDiff]);
 
   // Load diff info whenever the active project changes or a rescan completes.
   useEffect(() => {

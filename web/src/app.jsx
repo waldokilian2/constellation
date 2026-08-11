@@ -1596,7 +1596,10 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow }
   const [hidden, setHidden] = useState({});
   const pz = usePanZoom(".star, .star-label, .channels-panel");
 
-  const W = dims.w, H = dims.h;
+  // The channels panel is docked to the right edge (340px + 12px gap); the
+  // star field lays out in the remaining width so nothing hides under it.
+  const PANEL_W = 352;
+  const W = dims.w - PANEL_W, H = dims.h;
   const cx = W / 2, cy = H / 2;
   const typesPresent = Array.from(new Set(eps.map((e) => e.type)));
 
@@ -1645,7 +1648,7 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow }
       <div
         className="canvas solar-canvas pan-canvas"
         ref={pz.containerRef}
-        style={{ height: H }}
+        style={{ right: PANEL_W }}
         {...pz.handlers}
       >
         <div
@@ -3266,7 +3269,7 @@ function FlowTraceView({ flow, repo, graph, dims, onSelectNode, selectedNode, ch
 
 
 /* ---------------- Global Chat Widget (unified, context-aware) ---------------- */
-function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, pid, open, onOpenChange }) {
+function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePanel, flows, pid, open, onOpenChange }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -3554,7 +3557,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, 
   }, [ctx, graph, view.entryId, view.flowId, entryPoint, flows]);
 
   return (
-    <div className={"global-chat" + (open ? " open" : "") + (detailOpen ? " detail-open" : "")}>
+    <div className={"global-chat" + (open ? " open" : "") + (detailOpen ? " detail-open" : "") + (sidePanel ? " side-panel" : "")}>
       {/* Collapsed: floating button */}
       {!open && (
         <button className="chat-fab" onClick={() => onOpenChange(true)} aria-label="Open chat">
@@ -4099,6 +4102,7 @@ function App() {
           return null;
         })()}
         detailOpen={!!selectedNode && (view.name === "path" || view.name === "flowTrace")}
+        sidePanel={view.name === "solar"}
       />
 
       {sourceModal && (

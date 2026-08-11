@@ -121,7 +121,7 @@ class CallGraphBuilder:
             display_name = f"{receiver}.{method_name}" if receiver else method_name
 
             # Skip trivial calls (System.out.println, getters/setters, …).
-            if self._is_trivial(display_name):
+            if self._is_trivial(display_name, arity):
                 continue
 
             resolved, ambiguous, _recv_type = self.index.resolve_call(
@@ -171,8 +171,14 @@ class CallGraphBuilder:
         return f"{method}@{file}:{line}"
 
     @staticmethod
-    def _is_trivial(method_name: str) -> bool:
-        """Filter out calls that aren't meaningful for execution path tracing."""
+    def _is_trivial(method_name: str, arity: int = 0) -> bool:
+        """Filter out calls that aren't meaningful for execution path tracing.
+
+        Getter/setter/iss-er style names are only trivial when called with NO
+        arguments — a real POJO accessor. ``getOrderStatus(id)`` is a business
+        call and must be traced (it's why the old name-only check dropped the
+        Feign call from ``OrderService.getOrderStatus``).
+        """
         trivial_exact = {
             "println", "printf", "print",
             "toString", "hashCode", "equals", "getClass",
@@ -195,13 +201,13 @@ class CallGraphBuilder:
         last = parts[-1]
         if last in trivial_exact:
             return True
-        if last.startswith("get") and len(last) > 3:
+        if arity == 0 and last.startswith("get") and len(last) > 3:
             return True
-        if last.startswith("set") and len(last) > 3:
+        if arity == 0 and last.startswith("set") and len(last) > 3:
             return True
-        if last.startswith("is") and len(last) > 2:
+        if arity == 0 and last.startswith("is") and len(last) > 2:
             return True
-        if last.startswith("has") and len(last) > 3:
+        if arity == 0 and last.startswith("has") and len(last) > 3:
             return True
         return False
 
@@ -284,7 +290,7 @@ class CallGraphBuilder:
                 if not method_name:
                     continue
                 display = f"{receiver}.{method_name}" if receiver else method_name
-                if self._is_trivial(display):
+                if self._is_trivial(display, arity):
                     continue
                 resolved, _ambiguous, _recv = self.index.resolve_call(
                     enclosing_ci, receiver, method_name, arity=arity, local_types=local_types
@@ -317,7 +323,8 @@ class CallGraphBuilder:
             name = parsed.get("method", "")
             if not name:
                 continue
+            arity = len(parsed.get("args") or [])
             display = f"{parsed.get('receiver', '')}.{name}" if parsed.get("receiver") else name
-            if not self._is_trivial(display):
+            if not self._is_trivial(display, arity):
                 return False  # found a real call → not a no-op
         return True

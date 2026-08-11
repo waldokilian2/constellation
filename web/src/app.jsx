@@ -448,38 +448,44 @@ function detectFlows(graph) {
   const entryById = {};
   entries.forEach((e) => { entryById[e.id] = e; });
 
-  // Index: which channels does each producer method publish to? (from cross_repo_links)
-  // producer id format: "repo:ClassName.method:publishMethod"
-  const channelByProducerRepo = {}; // repo -> [{ channel, producerMethod }]
+  // Index producers by link kind: message/broker vs sync HTTP. Producer id
+  // format: "repo:ClassName.method:publishMethod".
+  const msgProducersByRepo = {};  // repo -> [{ channel, producerId, verb }]
+  const httpProducersByRepo = {}; // repo -> [{ channel, producerId, verb }]
   links.forEach((link) => {
+    const isHttp = link.kind === "http";
+    const bucket = isHttp ? httpProducersByRepo : msgProducersByRepo;
     (link.producers || []).forEach((prodId) => {
       const repo = repoFromId(prodId);
-      if (!channelByProducerRepo[repo]) channelByProducerRepo[repo] = [];
-      channelByProducerRepo[repo].push({ channel: link.channel, producerId: prodId });
+      (bucket[repo] = bucket[repo] || []).push({
+        channel: link.channel,
+        producerId: prodId,
+        verb: isHttp ? (link.verb || "") : "",
+      });
     });
   });
 
-  // Index: which entry points consume a given channel?
-  const consumersByChannel = {}; // channel -> [entryId]
+  // Index consumers by channel. Broker/event entries consume message channels;
+  // REST endpoints consume HTTP paths — kept in SEPARATE maps so a topic named
+  // like a path can never collide with it.
+  const msgConsumersByChannel = {};  // channel -> [entryId]
+  const restConsumersByChannel = {}; // path -> [entryId]
   entries.forEach((e) => {
-    if (e.type !== "rest-endpoint") {
-      const ch = e.channel || "";
-      if (ch) {
-        if (!consumersByChannel[ch]) consumersByChannel[ch] = [];
-        consumersByChannel[ch].push(e.id);
-      }
-    }
+    const ch = e.channel || "";
+    if (!ch) return;
+    const bucket = e.type === "rest-endpoint" ? restConsumersByChannel : msgConsumersByChannel;
+    (bucket[ch] = bucket[ch] || []).push(e.id);
   });
 
   // Index: which channels are produced internally (so we can identify external origins)
   const internalChannels = new Set(links.map((l) => l.channel));
 
-  // Check if a call tree contains a publish to a channel
-  function publishesChannels(entryPoint) {
+  // Which channels an entry's call tree reaches, from one producer bucket
+  // (message producers or http-call producers).
+  function publishesFrom(entryPoint, bucket) {
     const channels = new Set();
     const repo = entryPoint.repo;
-    // Producer id format: "repo:ClassName.method:publishMethod"
-    const repoProds = channelByProducerRepo[repo] || [];
+    const repoProds = bucket[repo] || [];
 
     // Collect every class.method reachable from the entry (root + call tree),
     // so producers invoked through beans/services chain up too.
@@ -521,18 +527,31 @@ function detectFlows(graph) {
     const nextVisited = new Set(visited);
     nextVisited.add(entryId);
 
-    const channels = publishesChannels(entry);
-    const consumers = []; // [{ channel, entryId }]
+    const consumers = []; // [{ channel, kind, verb, entryId }]
 
-    channels.forEach((ch) => {
-      const consumerIds = consumersByChannel[ch] || [];
+    // Message hops: broker/event consumers of the published channels
+    publishesFrom(entry, msgProducersByRepo).forEach((ch) => {
+      const consumerIds = msgConsumersByChannel[ch] || [];
       consumerIds.forEach((cid) => {
         if (cid === entryId) return;
         const ce = entryById[cid];
         if (!ce) return;
         // Don't recurse into same repo (intra-repo calls)
         if (ce.repo === entry.repo) return;
-        consumers.push({ channel: ch, entryId: cid });
+        consumers.push({ channel: ch, kind: "message", verb: "", entryId: cid });
+      });
+    });
+
+    // Sync HTTP hops: REST endpoints as targets of http-call producers
+    publishesFrom(entry, httpProducersByRepo).forEach((ch) => {
+      const consumerIds = restConsumersByChannel[ch] || [];
+      consumerIds.forEach((cid) => {
+        if (cid === entryId) return;
+        const ce = entryById[cid];
+        if (!ce) return;
+        if (ce.repo === entry.repo) return;
+        const prod = (httpProducersByRepo[entry.repo] || []).find((p) => p.channel === ch);
+        consumers.push({ channel: ch, kind: "http", verb: (prod && prod.verb) || "", entryId: cid });
       });
     });
 
@@ -541,7 +560,7 @@ function detectFlows(graph) {
       const childEntry = entryById[c.entryId];
       const childStep = buildSteps(childEntry, nextVisited);
       if (!childStep) return null;
-      return { channel: c.channel, step: childStep };
+      return { channel: c.channel, kind: c.kind, verb: c.verb, step: childStep };
     }).filter(Boolean);
 
     return {
@@ -550,8 +569,11 @@ function detectFlows(graph) {
       method: entry.method || entry.id.split(":").pop(),
       type: entry.type,
       channel: entry.channel || "",
-      publishesTo: channels,
-      children, // [{ channel, step }]
+      publishesTo: Array.from(new Set([
+        ...publishesFrom(entry, msgProducersByRepo),
+        ...publishesFrom(entry, httpProducersByRepo),
+      ])),
+      children, // [{ channel, kind, verb, step }]
     };
   }
 
@@ -565,6 +587,12 @@ function detectFlows(graph) {
   function stepDepth(step) {
     if (step.children.length === 0) return 1;
     return 1 + Math.max(...step.children.map((c) => stepDepth(c.step)));
+  }
+
+  // Does the flow contain any sync HTTP hop?
+  function hasSyncHop(step) {
+    if (!step) return false;
+    return step.children.some((c) => c.kind === "http" || hasSyncHop(c.step));
   }
 
   // Find origins: REST endpoints + external event channels
@@ -630,6 +658,7 @@ function detectFlows(graph) {
       repoCount: repos.size,
       hopCount: depth - 1,
       hasCrossRepo,
+      hasSync: hasSyncHop(step),
     });
   });
 
@@ -2433,6 +2462,12 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
                     <span className="flow-stat cross-repo-badge">cross-repo</span>
                   </>
                 )}
+                {f.hasSync && (
+                  <>
+                    <span className="flow-stat-sep">·</span>
+                    <span className="flow-stat sync-badge">⚡ sync</span>
+                  </>
+                )}
               </div>
               <div className="flow-card-repos">
                 {f.repos.map((r, ri) => (
@@ -2472,10 +2507,16 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
         seenRepos[step.repo].repos.push(step);
       }
       step.children.forEach((child) => {
-        const ekey = step.repo + ">>" + child.step.repo + "|" + child.channel;
+        const ekey = step.repo + ">>" + child.step.repo + "|" + child.channel + "|" + (child.kind || "message");
         if (!seenEdges.has(ekey)) {
           seenEdges.add(ekey);
-          edges.push({ from: step.repo, to: child.step.repo, channel: child.channel });
+          edges.push({
+            from: step.repo,
+            to: child.step.repo,
+            channel: child.channel,
+            kind: child.kind || "message",
+            verb: child.verb || "",
+          });
         }
         walk(child.step, depth + 1);
       });
@@ -2626,6 +2667,9 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
             <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 z" fill="#00d4ff" opacity="0.9" />
             </marker>
+            <marker id="flow-arrow-sync" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#00e0a8" opacity="0.95" />
+            </marker>
           </defs>
           {/* External input dashed edges */}
           {externalInputs.map((ei, i) => {
@@ -2662,14 +2706,16 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
             const total = edgePairCount[pairKey] || 1;
             const idx = edgePairIndex(pairKey);
             const g = edgeGeom(a, b, idx, total, isSkip);
-            const pillW = e.channel.length * 6.5 + 22;
+            const isSync = e.kind === "http";
+            const label = isSync && e.verb ? e.verb + " " + e.channel : e.channel;
+            const pillW = label.length * 6.5 + 22;
             return (
               <g key={"fe-" + i}>
-                <path d={g.path} fill="none" stroke="#00d4ff" strokeWidth="2" opacity={isSkip ? "0.4" : "0.55"} markerEnd="url(#flow-arrow)" />
-                <g className="edge-label-pill" transform={`translate(${g.mid.x}, ${g.mid.y})`}>
+                <path d={g.path} fill="none" stroke={isSync ? "#00e0a8" : "#00d4ff"} strokeWidth={isSync ? 2.2 : 2} opacity={isSkip ? "0.4" : "0.55"} markerEnd={isSync ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
+                <g className={"edge-label-pill" + (isSync ? " sync" : "")} transform={`translate(${g.mid.x}, ${g.mid.y})`}>
                   <rect className="edge-label-glow" x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
                   <rect className="edge-label-bg" x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />
-                  <text className="edge-label" x={0} y={0} dominantBaseline="central" textAnchor="middle">{e.channel}</text>
+                  <text className={"edge-label" + (isSync ? " sync" : "")} x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
             );
@@ -2720,20 +2766,23 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
   const steps = useMemo(() => {
     const found = [];
 
-    function walk(step, parentChannel, parentRepo) {
+    function walk(step, parentChannel, parentKind, parentVerb, parentRepo) {
       if (step.repo === repo) {
+        const via = parentKind === "http" && parentVerb
+          ? parentVerb + " " + parentChannel
+          : parentChannel;
         found.push({
           step,
-          entersVia: parentChannel || (flow.originType === "external" ? flow.originChannel : flow.originLabel),
+          entersVia: via || (flow.originType === "external" ? flow.originChannel : flow.originLabel),
           entersFrom: parentRepo || (flow.originType === "external" ? (flow.originNoun || "external") : flow.originLabel),
         });
       }
       step.children.forEach((child) => {
-        walk(child.step, child.channel, step.repo);
+        walk(child.step, child.channel, child.kind, child.verb || "", step.repo);
       });
     }
 
-    walk(flow.step, null, null);
+    walk(flow.step, null, null, null, null);
     return found;
   }, [flow, repo]);
 
@@ -2745,6 +2794,8 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
         step.children.forEach((child) => {
           out.push({
             channel: child.channel,
+            kind: child.kind || "message",
+            verb: child.verb || "",
             targetRepo: child.step.repo,
             targetMethod: child.step.method,
           });
@@ -2753,10 +2804,10 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
       step.children.forEach((child) => walk(child.step));
     }
     walk(flow.step);
-    // Deduplicate by channel+repo
+    // Deduplicate by channel+repo+kind
     const seen = new Set();
     return out.filter((d) => {
-      const key = d.channel + ":" + d.targetRepo;
+      const key = d.channel + ":" + d.targetRepo + ":" + d.kind;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -3072,10 +3123,12 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
               className="exit-point flow-exit"
               style={{ top: layout.maxY + 30, left: 0, width: PV_NODE_W + 100 }}
             >
-              <div className="exit-point-label">EMITS TO</div>
+              <div className="exit-point-label">
+                {downstream.some((d) => d.kind === "http") ? "SENDS TO" : "EMITS TO"}
+              </div>
               {downstream.map((d, i) => (
                 <div key={i} className="exit-point-flow">
-                  <span className="exit-point-channel">{d.channel}</span>
+                  <span className="exit-point-channel">{d.kind === "http" && d.verb ? d.verb + " " + d.channel : d.channel}</span>
                   <span className="exit-point-arrow">→</span>
                   <span className="exit-point-target">{d.targetRepo}</span>
                   <span className="exit-point-next">▶ {d.targetMethod}</span>

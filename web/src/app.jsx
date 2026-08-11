@@ -302,7 +302,7 @@ function ErrorScreen({ message }) {
 }
 
 /* ---------------- Header ---------------- */
-function Header({ graph, mode, onModeChange, projectName, onHome, stale }) {
+function Header({ graph, mode, onModeChange, onHome, stale, crumbs }) {
   const gen = graph && graph.generated_at
     ? new Date(graph.generated_at).toLocaleString()
     : "";
@@ -310,24 +310,16 @@ function Header({ graph, mode, onModeChange, projectName, onHome, stale }) {
   const statusCls = stale ? "stale" : "ok";
   return (
     <header className="topbar glass">
-      <div className="brand">
-        <button className="brand-mark-btn" onClick={onHome} title="Back to projects">
-          <span className="brand-mark">✦</span>
-        </button>
-        <div>
-          <div className="brand-name">CONSTELLATION</div>
-          <div className="brand-sub">
-            {onHome && projectName ? (
-              <span className="brand-crumb">
-                <button className="crumb back link" onClick={onHome} title="Back to projects">
-                  <span className="crumb-arrow">←</span> Projects
-                </button>
-                <span className="crumb-sep">›</span>
-                <span className="crumb">{projectName}</span>
-              </span>
-            ) : "Codebase Mapper"}
+      <div className="hdr-left">
+        <div className="brand">
+          <button className="brand-mark-btn" onClick={onHome} title="Back to projects">
+            <span className="brand-mark">✦</span>
+          </button>
+          <div>
+            <div className="brand-name">CONSTELLATION</div>
           </div>
         </div>
+        <HeaderBreadcrumb crumbs={crumbs} />
       </div>
       {onModeChange && (
         <div className="mode-toggle">
@@ -360,20 +352,131 @@ function Header({ graph, mode, onModeChange, projectName, onHome, stale }) {
   );
 }
 
-/* ---------------- Breadcrumb ---------------- */
-function Breadcrumb({ items }) {
+/* ---------------- Header breadcrumb ---------------- */
+// Single navigation for the whole app, rendered at the start of the header.
+// Shows at most the last 2 pages of the current trail; any deeper ancestors
+// collapse into a "⋯" button whose dropdown lets you jump straight up to them.
+// Each visible crumb is clickable (steps up one level) unless it's the current page.
+function HeaderBreadcrumb({ crumbs }) {
+  const [moreOpen, setMoreOpen] = useState(false);
+  if (!crumbs || crumbs.length === 0) return null;
+
+  const showMore = crumbs.length > 2;
+  const hidden = showMore ? crumbs.slice(0, crumbs.length - 2) : [];
+  const visible = showMore ? crumbs.slice(-2) : crumbs;
+
   return (
-    <nav className="breadcrumb">
-      {items.map((it, i) => (
-        <span className="crumb-wrap" key={i}>
-          {i > 0 && <span className="crumb-sep">›</span>}
-          {it.onClick
-            ? <button className="crumb link" onClick={it.onClick}>{it.label}</button>
-            : <span className="crumb">{it.label}</span>}
+    <nav className="hdr-breadcrumb" aria-label="Breadcrumb">
+      {showMore && (
+        <div className="hdr-more">
+          <button
+            className="hdr-more-btn"
+            onClick={() => setMoreOpen((o) => !o)}
+            aria-expanded={moreOpen}
+            aria-label="Show earlier pages"
+            title="Show earlier pages"
+          >⋯</button>
+          {moreOpen && (
+            <>
+              <div className="hdr-menu-backdrop" onClick={() => setMoreOpen(false)} />
+              <div className="hdr-crumb-menu" role="menu">
+                {hidden.map((c, i) => (
+                  <button
+                    key={i}
+                    role="menuitem"
+                    className="hdr-crumb-menu-item"
+                    onClick={() => { setMoreOpen(false); c.onClick && c.onClick(); }}
+                  >
+                    <span className="hdr-crumb-menu-arrow">‹</span>{c.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {showMore && <span className="hdr-crumb-sep">›</span>}
+      {visible.map((c, i) => (
+        <span className="hdr-crumb-wrap" key={"v" + i}>
+          {i > 0 && <span className="hdr-crumb-sep">›</span>}
+          {c.onClick
+            ? <button className="hdr-crumb link" onClick={c.onClick}>{c.label}</button>
+            : c.current
+              ? <span className="hdr-crumb current">{c.label}</span>
+              : <span className="hdr-crumb">{c.label}</span>}
         </span>
       ))}
     </nav>
   );
+}
+
+// Map the current view + mode to the full navigation trail (project root first).
+// The last crumb is the current page; earlier ones are clickable "up" targets.
+function buildCrumbs(view, mode, graph, flows, projectName, nav) {
+  const root = [
+    { label: "Projects", onClick: nav.goProjects },
+    { label: projectName || "Project", onClick: nav.goGalaxy },
+  ];
+  const methodLabel = (ep) => ep.method || ep.id.split(":").pop();
+
+  if (mode === "topology") {
+    if (view.name === "galaxy") {
+      return [...root, { label: "Galaxy", current: true }];
+    }
+    if (view.name === "gaps") {
+      return [...root, { label: "Galaxy", onClick: nav.goGalaxy }, { label: "Gaps", current: true }];
+    }
+    if (view.name === "solar") {
+      return [...root, { label: "Galaxy", onClick: nav.goGalaxy }, { label: view.repo, current: true }];
+    }
+    if (view.name === "path") {
+      const ep = graph && (graph.entry_points || []).find((e) => e.id === view.entryId);
+      if (ep) {
+        return [
+          ...root,
+          { label: "Galaxy", onClick: nav.goGalaxy },
+          { label: ep.repo, onClick: () => nav.goSolar(ep.repo) },
+          { label: methodLabel(ep), current: true },
+        ];
+      }
+    }
+  } else if (mode === "dead") {
+    if (view.name === "dead") {
+      return [...root, { label: "Dead code", current: true }];
+    }
+    if (view.name === "path") {
+      const ep = graph && (graph.entry_points || []).find((e) => e.id === view.entryId);
+      if (ep) {
+        return [
+          ...root,
+          { label: "Dead code", onClick: nav.goDead },
+          { label: ep.repo }, // context — no repo page in dead-code mode
+          { label: methodLabel(ep), current: true },
+        ];
+      }
+    }
+  } else if (mode === "flows") {
+    const flow = (flows || []).find((f) => f.id === view.flowId);
+    if (view.name === "flowIndex") {
+      return [...root, { label: "Flows", current: true }];
+    }
+    if (view.name === "flow") {
+      return [
+        ...root,
+        { label: "Flows", onClick: nav.goFlowIndex },
+        { label: flow ? flow.name : "Flow", current: true },
+      ];
+    }
+    if (view.name === "flowTrace") {
+      return [
+        ...root,
+        { label: "Flows", onClick: nav.goFlowIndex },
+        { label: flow ? flow.name : "Flow", onClick: flow ? () => nav.goFlow(flow.id) : undefined },
+        { label: view.repo, current: true },
+      ];
+    }
+  }
+  return root;
 }
 
 /* ---------------- Legend ---------------- */
@@ -925,7 +1028,6 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps }) {
   return (
     <div className="galaxy">
       <div className="view-top">
-        <Breadcrumb items={[{ label: "Galaxy" }]} />
         <div className="view-hint">
           {repos.length} repos · {entryPoints.length} entry points · {(graph.producers || []).length} producers
         </div>
@@ -1155,7 +1257,7 @@ function CollapsibleSection({ title, count, help, children, defaultOpen = true }
   );
 }
 
-function GapsView({ graph, onBack, onOpenEntry, onOpenSource }) {
+function GapsView({ graph, onOpenEntry, onOpenSource }) {
   const orphans = useMemo(() => detectOrphans(graph), [graph]);
   const cyc = useMemo(() => detectCycles(graph), [graph]);
   const totalGaps = orphans.summary.orphan_producers + orphans.summary.orphan_consumers;
@@ -1168,7 +1270,6 @@ function GapsView({ graph, onBack, onOpenEntry, onOpenSource }) {
   return (
     <div className="gaps">
       <div className="view-top">
-        <Breadcrumb items={[{ label: "Galaxy", onClick: onBack }, { label: "Gaps" }]} />
         <div className="view-hint">
           {totalGaps} unconnected channel{totalGaps === 1 ? "" : "s"} ·{" "}
           {cyc.summary.cycle_count} cycle{cyc.summary.cycle_count === 1 ? "" : "s"}
@@ -1371,7 +1472,6 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
       <div className="dead-bg" aria-hidden="true" />
       <BrokenSatellites />
       <div className="view-top">
-        <Breadcrumb items={[{ label: "Dead code" }]} />
         <div className="view-hint">
           {dc.method_index_available
             ? dc.unreachable_methods.length + " unreachable of " + dc.methods_total +
@@ -1444,7 +1544,7 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
 }
 
 /* ---------------- Solar System View ---------------- */
-function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry, flows, onOpenFlow }) {
+function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow }) {
   const eps = useMemo(
     () => (graph.entry_points || []).filter((e) => e.repo === repo),
     [graph, repo]
@@ -1486,10 +1586,6 @@ function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry, flo
   return (
     <div className="solar">
       <div className="view-top">
-        <Breadcrumb items={[
-          { label: "Galaxy", onClick: onHome },
-          { label: repo },
-        ]} />
         <div className="view-hint">{eps.length} entry points · {channels.length} channels</div>
       </div>
 
@@ -1812,7 +1908,7 @@ const PV_NODE_H = 110;  // estimated height including toggle footer
 const PV_HSPACE = 340;  // horizontal distance between depth levels
 const PV_VGAP = 50;     // vertical gap between sibling nodes
 
-function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNode, chatOpen }) {
+function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen }) {
   const tree = entryPoint.call_tree;
 
   // Outbound channels for this entry point
@@ -2052,11 +2148,6 @@ function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNod
   return (
     <div className="path-view">
       <div className="view-top">
-        <Breadcrumb items={[
-          { label: "Galaxy", onClick: onHome },
-          { label: entryPoint.repo, onClick: onBack },
-          { label: entryPoint.method || entryPoint.id.split(":").pop() },
-        ]} />
         <div className="view-hint">
           <span className="ep-tag" style={{ "--c": m.color }}>{m.label}</span>
           <span className="mono">{entryPoint.channel}</span>
@@ -2369,7 +2460,6 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
   return (
     <div className="galaxy flow-index">
       <div className="view-top">
-        <Breadcrumb items={[{ label: "Flows" }]} />
         <div className="view-hint">
           {flows.length} flows detected · {flows.filter(f => f.hasCrossRepo).length} cross-repo
         </div>
@@ -2454,7 +2544,7 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
 
 /* ---------------- Flows Mode: Flow View ---------------- */
 // Solar equivalent — shows repos in a single flow as a DAG with channel edges
-function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
+function FlowView({ flow, graph, dims, onSelectRepoInFlow }) {
   const W = dims.w, H = dims.h;
   const pz = usePanZoom(".flow-repo-node, .flow-external-node");
 
@@ -2599,10 +2689,6 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
   return (
     <div className="galaxy flow-view">
       <div className="view-top">
-        <Breadcrumb items={[
-          { label: "Flows", onClick: onHome },
-          { label: flow.name },
-        ]} />
         <div className="view-hint">
           {flow.repoCount} repos · {flow.hopCount} hop{flow.hopCount === 1 ? "" : "s"} ·
           {" "}origin: {flow.originNoun || (flow.originType === "rest" ? "REST endpoint" : "external event")}
@@ -2715,7 +2801,7 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
 
 /* ---------------- Flows Mode: Flow Trace View ---------------- */
 // Path equivalent — shows a repo's trace within a specific flow
-function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, selectedNode, chatOpen }) {
+function FlowTraceView({ flow, repo, graph, dims, onSelectNode, selectedNode, chatOpen }) {
   // Find this repo's step(s) in the flow
   const steps = useMemo(() => {
     const found = [];
@@ -2946,13 +3032,6 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
   if (!entryPoint || !tree) {
     return (
       <div className="view">
-        <div className="view-top">
-          <Breadcrumb items={[
-            { label: "Flows", onClick: onHome },
-            { label: flow.name, onClick: onBack },
-            { label: repo },
-          ]} />
-        </div>
         <p className="muted" style={{ padding: 40 }}>No trace data for this repo in this flow.</p>
       </div>
     );
@@ -2961,11 +3040,6 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
   return (
     <div className="path-view flow-trace">
       <div className="view-top">
-        <Breadcrumb items={[
-          { label: "Flows", onClick: onHome },
-          { label: flow.name, onClick: onBack },
-          { label: repo },
-        ]} />
         <div className="view-hint">
           <span className="ep-tag" style={{ "--c": "#00d4ff" }}>FLOW TRACE</span>
           <span className="mono">{repo}</span>
@@ -3656,7 +3730,20 @@ function App() {
 
   const goGalaxy = () => { setSelectedNode(null); setView({ name: "galaxy" }); };
   const goFlowIndex = () => { setSelectedNode(null); setView({ name: "flowIndex" }); };
+  const goGaps = () => { setSelectedNode(null); setView({ name: "gaps" }); };
+  const goDead = () => { setSelectedNode(null); setView({ name: "dead" }); };
+  const goSolar = (repo) => { setSelectedNode(null); setView({ name: "solar", repo }); };
+  const goFlow = (flowId) => { setSelectedNode(null); setView({ name: "flow", flowId }); };
   const stageH = dims.h;
+
+  // Single navigation trail rendered in the header (see buildCrumbs above).
+  const crumbs = useMemo(
+    () => buildCrumbs(view, mode, graph, flows, (activeMeta && activeMeta.name) || "", {
+      goProjects: backToProjects,
+      goGalaxy, goGaps, goDead, goSolar, goFlowIndex, goFlow,
+    }),
+    [view, mode, graph, flows, activeMeta] // eslint-disable-line
+  );
 
   const switchMode = (m) => {
     setMode(m);
@@ -3729,9 +3816,9 @@ function App() {
         graph={graph}
         mode={mode}
         onModeChange={switchMode}
-        projectName={(activeMeta && activeMeta.name) || "Project"}
         onHome={backToProjects}
         stale={!!(updatesByPid[activeId] && updatesByPid[activeId].stale_count > 0)}
+        crumbs={crumbs}
       />
       <main className="stage">
         {/* ── Topology mode (existing) ── */}
@@ -3753,7 +3840,6 @@ function App() {
             <GapsView
               graph={graph}
               pid={activeId}
-              onBack={goGalaxy}
               onOpenEntry={(id) => { setSelectedNode(null); setView({ name: "path", entryId: id }); }}
               onOpenSource={(file, line) => setSourceModal({ file, line })}
             />
@@ -3766,8 +3852,6 @@ function App() {
               repo={view.repo}
               dims={{ w: dims.w, h: stageH }}
               flows={flows}
-              onHome={goGalaxy}
-              onBack={goGalaxy}
               onOpenFlow={(flowId) => {
                 setSelectedNode(null);
                 setMode("flows");
@@ -3788,8 +3872,6 @@ function App() {
               <PathView
                 entryPoint={ep}
                 graph={graph}
-                onHome={goGalaxy}
-                onBack={() => setView({ name: "solar", repo: ep.repo })}
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
                 chatOpen={chatOpen}
@@ -3807,8 +3889,6 @@ function App() {
               <PathView
                 entryPoint={ep}
                 graph={graph}
-                onHome={() => { setSelectedNode(null); setView({ name: "dead" }); }}
-                onBack={() => { setSelectedNode(null); setView({ name: "dead" }); }}
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
                 chatOpen={chatOpen}
@@ -3850,8 +3930,6 @@ function App() {
                 flow={flow}
                 graph={graph}
                 dims={{ w: dims.w, h: stageH }}
-                onHome={goFlowIndex}
-                onBack={goFlowIndex}
                 onSelectRepoInFlow={(repo, entryId, e) => {
                   const [x, y] = centerOf(e && e.currentTarget);
                   drill(x, y, () => { setSelectedNode(null); setView({ name: "flowTrace", flowId: flow.id, repo }); });
@@ -3870,8 +3948,6 @@ function App() {
                 repo={view.repo}
                 graph={graph}
                 dims={{ w: dims.w, h: stageH }}
-                onHome={goFlowIndex}
-                onBack={() => setView({ name: "flow", flowId: flow.id })}
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
                 chatOpen={chatOpen}

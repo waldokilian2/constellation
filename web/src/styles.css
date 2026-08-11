@@ -1570,6 +1570,18 @@ code { font-family: var(--mono); color: var(--cyan); }
   padding: 2px 6px;
   border-radius: 4px;
 }
+.sync-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #00e0a8;
+  background: rgba(0, 224, 168, .1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+/* Sync (HTTP) edge label pills inside the flow view */
+.edge-label-pill.sync .edge-label { fill: #00e0a8; }
+.edge-label-pill.sync .edge-label-bg { stroke: rgba(0,224,168,.45); }
+.edge-label-pill.sync .edge-label-glow { fill: rgba(0,224,168,.12); }
 .flow-card-repos {
   display: flex;
   flex-wrap: wrap;

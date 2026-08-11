@@ -129,7 +129,8 @@ constellation/
 │   ├── index.html                  # Vite entry point
 │   ├── src/
 │   │   ├── main.jsx                # createRoot entry
-│   │   ├── app.jsx                 # Galaxy → Solar System → Path → Detail views
+│   │   ├── app.jsx                 # Projects → Galaxy → Service → Path → Detail views
+│   │   ├── derived.js             # pure view analytics (flows, roles, stats)
 │   │   └── styles.css              # visualization styles
 │   └── dist/                       # Vite build output (gitignored)
 │
@@ -182,8 +183,8 @@ Projects list, then per-project zoom levels:
 | View | What You See |
 |------|-------------|
 | **Projects** | All ingested projects (each is its own graph — e.g. "Spring Boot", "Java EE") |
-| **Galaxy** | All repos in the project as clusters, message channels as curved connections with channel names |
-| **Solar System** | Entry points in a repo as stars (sized by complexity, colored by type) |
+| **Galaxy** | All services as orbs — size = call complexity, halo ring = entry-type mix, role pill, hub/isolated/sink badges; headline stats + insight line; channels as curved connections |
+| **Service** | One service: entry-point star map, sortable entry-point table, inbound/outbound channel cards with partners + payload types, flows it participates in |
 | **Path** | Call tree for one entry point — the full execution chain from request to response |
 | **Detail Panel** | Source code with line highlighting, relationships, and AI chat |
 
@@ -354,7 +355,7 @@ Source Code (.java files)
         ▼
     graph.json (per project)
         │
-        ├──→ Web UI             ← projects → galaxy → solar system → path → detail
+        ├──→ Web UI             ← projects → galaxy → service → path → detail
         ├──→ REST API           ← /api/projects/{pid}/tools/* endpoints
         ├──→ MCP Server         ← stdio JSON-RPC for coding agents
         └──→ AI Context         ← structured system prompt + tool-use loop

@@ -6,6 +6,15 @@
 import React, { useState, useEffect, useRef, useMemo, useLayoutEffect, useCallback } from "react";
 import { marked } from "marked";
 import "./styles.css";
+import {
+  detectFlows,
+  buildServiceStats,
+  landscapeSummary,
+  entryEmits,
+  flowsByChannel,
+  channelMessageTypes,
+  ROLE_META,
+} from "./derived.js";
 
 /* ---------------- helpers ---------------- */
 const repoFromId = (id) => (typeof id === "string" ? id.split(":")[0] : "");
@@ -36,6 +45,15 @@ const EDGE_KINDS = {
   both:  { color: "#a78bfa", label: "Both" },
 };
 const typeMeta = (t) => TYPE_META[t] || { color: "#94a3b8", label: (t || "Unknown"), glow: "rgba(148,163,184,.5)" };
+
+// Display name for a call node: Class.method when the engine resolved the
+// class, plain method/receiver form otherwise.
+const nodeDisplayName = (d) => {
+  const method = d.method || "";
+  const cls = d.class_name || "";
+  if (cls && method && !method.includes(".")) return cls + "." + method;
+  return method || cls || "unknown";
+};
 
 const CONFIDENCE = {
   EXTRACTED: { color: "#34d399" },
@@ -334,7 +352,7 @@ function Header({ graph, mode, onModeChange, projectName, onHome, stale }) {
           <button
             className={"mode-btn" + (mode === "topology" ? " active" : "")}
             onClick={() => onModeChange("topology")}
-          >Topology</button>
+          >System</button>
           <button
             className={"mode-btn" + (mode === "flows" ? " active" : "")}
             onClick={() => onModeChange("flows")}
@@ -373,8 +391,9 @@ function Breadcrumb({ items }) {
 }
 
 /* ---------------- Legend ---------------- */
-function Legend({ types = [] }) {
+function Legend({ types = [], roles = [] }) {
   const shown = Object.keys(TYPE_META).filter((k) => types.includes(k));
+  const shownRoles = Object.keys(ROLE_META).filter((k) => roles.includes(k));
   return (
     <div className="legend glass">
       <div className="legend-title">Entry point types</div>
@@ -388,6 +407,17 @@ function Legend({ types = [] }) {
           </div>
         ))
       )}
+      {shownRoles.length > 0 && (
+        <>
+          <div className="legend-sep">Service role</div>
+          {shownRoles.map((k) => (
+            <div className="legend-item" key={k}>
+              <span className="legend-dot" style={{ background: ROLE_META[k].color, color: ROLE_META[k].color }}></span>
+              {ROLE_META[k].label}
+            </div>
+          ))}
+        </>
+      )}
       <div className="legend-sep">Links</div>
       {["async", "sync", "both"].map((k) => (
         <div className="legend-item" key={k}>
@@ -395,241 +425,13 @@ function Legend({ types = [] }) {
           {EDGE_KINDS[k].label}
         </div>
       ))}
-      <div className="legend-hint">Click a repo to zoom in</div>
+      <div className="legend-sep">Badges</div>
+      <div className="legend-item"><span className="legend-badge hub">★ hub</span> most connected</div>
+      <div className="legend-item"><span className="legend-badge orphan">⚠ isolated</span> no links</div>
+      <div className="legend-item"><span className="legend-badge sink">✖ sink</span> consumes, emits nothing</div>
+      <div className="legend-hint">Click a service to explore it</div>
     </div>
   );
-}
-
-/* ---------------- Flow Detection Engine ---------------- */
-// Computes end-to-end flows from graph.json — no engine changes needed.
-// A flow is a chain: origin (REST or external event) → [publishes → channel → consumer → publishes → ...]
-// Each step is { repo, entryId, method, type, channel, isExternal, publishesTo: [channelNames], next: [stepRefs] }
-
-const PUBLISH_KEYWORDS = ["convertandsend", "send", "publish", "emit"];
-
-// Human-readable origin descriptors for non-REST flow origins.
-// Keyed by the entry-point type string the engine serializes (EntryPointType).
-// The tag/label colors reuse TYPE_META so flow cards match the rest of the UI.
-const ORIGIN_KINDS = {
-  "scheduled-task":   { tag: "SCHEDULED", cls: "scheduled", noun: "scheduled job" },
-  "event-listener":   { tag: "EVENT",     cls: "event",     noun: "event listener" },
-  websocket:          { tag: "WEBSOCKET", cls: "websocket", noun: "websocket" },
-  "kafka-consumer":   { tag: "KAFKA",     cls: "kafka",     noun: "Kafka topic" },
-  "rabbitmq-consumer":{ tag: "RABBITMQ",  cls: "rabbitmq",  noun: "RabbitMQ queue" },
-  "jms-consumer":     { tag: "JMS",       cls: "jms",       noun: "JMS queue" },
-  "sqs-consumer":     { tag: "SQS",       cls: "sqs",       noun: "SQS queue" },
-  // Extra framework origins.
-  main:               { tag: "MAIN",      cls: "main",      noun: "application bootstrap" },
-  lifecycle:          { tag: "LIFECYCLE", cls: "lifecycle", noun: "lifecycle hook" },
-  servlet:            { tag: "SERVLET",   cls: "servlet",   noun: "servlet endpoint" },
-  "soap-service":     { tag: "SOAP",      cls: "soap",      noun: "SOAP operation" },
-  graphql:            { tag: "GRAPHQL",   cls: "graphql",   noun: "GraphQL resolver" },
-  "grpc-service":     { tag: "GRPC",      cls: "grpc",      noun: "gRPC service method" },
-  "cloud-function":   { tag: "FUNCTION",  cls: "function",  noun: "cloud function" },
-};
-
-// Describe a flow's origin: rest vs. a specific external trigger type.
-// Falls back to a generic "EXTERNAL" for unknown/uncategorized types.
-function originDescriptor(entry, isRest) {
-  if (isRest) return { kind: "rest", tag: "REST", cls: "rest", noun: "REST endpoint" };
-  const meta = ORIGIN_KINDS[entry.type] || { tag: "EXTERNAL", cls: "external", noun: "external event" };
-  return { kind: entry.type || "external", tag: meta.tag, cls: meta.cls, noun: meta.noun };
-}
-
-function detectFlows(graph) {
-  const entries = graph.entry_points || [];
-  const links = graph.cross_repo_links || [];
-
-  // Index entry points by id
-  const entryById = {};
-  entries.forEach((e) => { entryById[e.id] = e; });
-
-  // Index: which channels does each producer method publish to? (from cross_repo_links)
-  // producer id format: "repo:ClassName.method:publishMethod"
-  const channelByProducerRepo = {}; // repo -> [{ channel, producerMethod }]
-  links.forEach((link) => {
-    (link.producers || []).forEach((prodId) => {
-      const repo = repoFromId(prodId);
-      if (!channelByProducerRepo[repo]) channelByProducerRepo[repo] = [];
-      channelByProducerRepo[repo].push({ channel: link.channel, producerId: prodId });
-    });
-  });
-
-  // Index: which entry points consume a given channel?
-  const consumersByChannel = {}; // channel -> [entryId]
-  entries.forEach((e) => {
-    if (e.type !== "rest-endpoint") {
-      const ch = e.channel || "";
-      if (ch) {
-        if (!consumersByChannel[ch]) consumersByChannel[ch] = [];
-        consumersByChannel[ch].push(e.id);
-      }
-    }
-  });
-
-  // Index: which channels are produced internally (so we can identify external origins)
-  const internalChannels = new Set(links.map((l) => l.channel));
-
-  // Check if a call tree contains a publish to a channel
-  function publishesChannels(entryPoint) {
-    const channels = new Set();
-    const repo = entryPoint.repo;
-    // Producer id format: "repo:ClassName.method:publishMethod"
-    const repoProds = channelByProducerRepo[repo] || [];
-
-    // Collect every class.method reachable from the entry (root + call tree),
-    // so producers invoked through beans/services chain up too.
-    const reachableMethods = new Set();
-    const rootMethod = [entryPoint.class_name, entryPoint.method].filter(Boolean).join(".");
-    if (rootMethod) reachableMethods.add(rootMethod);
-    const tree = entryPoint.call_tree;
-    if (tree && typeof tree === "object") {
-      const stack = [tree];
-      while (stack.length) {
-        const node = stack.pop();
-        if (!node) continue;
-        if (typeof node.method === "string" && node.method) {
-          // Resolved nodes name the class; unresolved use receiver.method — keep both forms.
-          reachableMethods.add(node.method);
-          const mName = node.method.split(".").pop();
-          if (node.class_name && mName) reachableMethods.add(node.class_name + "." + mName);
-        }
-        if (Array.isArray(node.children)) stack.push(...node.children);
-      }
-    }
-
-    repoProds.forEach((rp) => {
-      // "ClassName.method" part of the producer id
-      const matchTarget = rp.producerId.split(":")[1] || "";
-      // Match the producer method exactly, or any call-tree node that
-      // resolves to that class.method (walked transitively by the engine).
-      if (reachableMethods.has(matchTarget)) {
-        channels.add(rp.channel);
-      }
-    });
-    return Array.from(channels);
-  }
-
-  // Build flow steps recursively
-  function buildSteps(entry, visited) {
-    const entryId = entry.id;
-    if (visited.has(entryId)) return null; // cycle guard
-    const nextVisited = new Set(visited);
-    nextVisited.add(entryId);
-
-    const channels = publishesChannels(entry);
-    const consumers = []; // [{ channel, entryId }]
-
-    channels.forEach((ch) => {
-      const consumerIds = consumersByChannel[ch] || [];
-      consumerIds.forEach((cid) => {
-        if (cid === entryId) return;
-        const ce = entryById[cid];
-        if (!ce) return;
-        // Don't recurse into same repo (intra-repo calls)
-        if (ce.repo === entry.repo) return;
-        consumers.push({ channel: ch, entryId: cid });
-      });
-    });
-
-    // Recursively build child steps
-    const children = consumers.map((c) => {
-      const childEntry = entryById[c.entryId];
-      const childStep = buildSteps(childEntry, nextVisited);
-      if (!childStep) return null;
-      return { channel: c.channel, step: childStep };
-    }).filter(Boolean);
-
-    return {
-      repo: entry.repo,
-      entryId: entry.id,
-      method: entry.method || entry.id.split(":").pop(),
-      type: entry.type,
-      channel: entry.channel || "",
-      publishesTo: channels,
-      children, // [{ channel, step }]
-    };
-  }
-
-  // Collect all repos in a step tree
-  function reposInStep(step, set) {
-    set.add(step.repo);
-    step.children.forEach((c) => reposInStep(c.step, set));
-  }
-
-  // Count max depth of a step tree
-  function stepDepth(step) {
-    if (step.children.length === 0) return 1;
-    return 1 + Math.max(...step.children.map((c) => stepDepth(c.step)));
-  }
-
-  // Find origins: REST endpoints + external event channels
-  const seenOrigins = new Set();
-  const flows = [];
-
-  entries.forEach((entry) => {
-    const isRest = entry.type === "rest-endpoint";
-    const isExternal = !isRest && !internalChannels.has(entry.channel || "");
-
-    // Skip internal consumers that have a producer in another repo — they're mid-flow, not origins
-    if (!isRest && !isExternal) return;
-
-    // Deduplicate by entry id (each entry point is one origin)
-    if (seenOrigins.has(entry.id)) return;
-    seenOrigins.add(entry.id);
-
-    const step = buildSteps(entry, new Set());
-    const repos = new Set();
-    reposInStep(step, repos);
-    const depth = stepDepth(step);
-    const hasCrossRepo = repos.size > 1;
-
-    // Generate flow name + a human-readable origin descriptor.
-    // originKind = the engine entry type ("scheduled-task", "kafka-consumer", ...)
-    // so external origins aren't all lumped under a vague "EXTERNAL".
-    const desc = originDescriptor(entry, isRest);
-    let name, originLabel;
-    if (isRest) {
-      name = entry.method || entry.id.split(":").pop();
-      // Convert camelCase to Title Case
-      name = name.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase()).trim();
-      originLabel = ((entry.method_type || "POST") + " ") + (entry.channel || "");
-    } else if (desc.kind === "scheduled-task") {
-      // Cron / fixed-rate / EJB-timer jobs: name by the method, label the trigger
-      // explicitly. Only prefix "cron " when the channel is a real cron expression
-      // (5+ whitespace-separated fields) — EJB @Schedule channels aren't cron.
-      name = entry.method || entry.id.split(":").pop();
-      name = name.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase()).trim();
-      const schedCh = entry.channel || "";
-      const cronLike = /\s/.test(schedCh) && schedCh.split(/\s+/).length >= 5;
-      originLabel = cronLike ? "cron " + schedCh
-        : (/^\d+$/.test(schedCh) ? "every " + schedCh + " ms"
-          : (schedCh.indexOf("@Schedule") === 0 ? "EJB timer" : (schedCh || "scheduled")));
-    } else {
-      name = entry.channel || entry.method || "External Event";
-      originLabel = entry.channel || "";
-    }
-
-    flows.push({
-      id: "flow:" + entry.id,
-      name,
-      originLabel,
-      originType: isRest ? "rest" : "external",
-      originKind: desc.kind,
-      originTag: desc.tag,
-      originClass: desc.cls,
-      originNoun: desc.noun,
-      originChannel: entry.channel || "",
-      originMethodType: entry.method_type || "",
-      step,
-      repos: Array.from(repos),
-      repoCount: repos.size,
-      hopCount: depth - 1,
-      hasCrossRepo,
-    });
-  });
-
-  return flows;
 }
 
 /* ---------------- Galaxy View ---------------- */
@@ -637,26 +439,15 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
   const repos = graph.repos || [];
   const entryPoints = graph.entry_points || [];
   const links = graph.cross_repo_links || [];
-  const pz = usePanZoom(".repo-wrap, .legend, .filter-chip");
+  const pz = usePanZoom(".repo-wrap, .legend, .filter-chip, .stat-chip");
 
   // Hovered direction edge → bundled message details shown in a popup
   const [hoverEdge, setHoverEdge] = useState(null); // { items, from, to, mid:{x,y} }
 
-  const epCount = useMemo(() => {
-    const m = {};
-    entryPoints.forEach((ep) => { m[ep.repo] = (m[ep.repo] || 0) + 1; });
-    return m;
-  }, [graph]);
-
-  // Which entry point types does each repo use?
-  const repoTypes = useMemo(() => {
-    const m = {};
-    entryPoints.forEach((ep) => {
-      if (!m[ep.repo]) m[ep.repo] = [];
-      if (!m[ep.repo].includes(ep.type)) m[ep.repo].push(ep.type);
-    });
-    return m;
-  }, [graph]);
+  // ── Derived analytics (single source of truth: derived.js) ──
+  const flows = useMemo(() => detectFlows(graph), [graph]);
+  const stats = useMemo(() => buildServiceStats(graph), [graph]);
+  const summary = useMemo(() => landscapeSummary(graph, stats, flows), [graph, stats, flows]);
 
   // Which entry point types does the whole project use (drives the legend)?
   const usedTypes = useMemo(() => {
@@ -665,25 +456,47 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
     return Array.from(s);
   }, [graph]);
 
+  // Which service roles appear (drives the legend)?
+  const usedRoles = useMemo(() => {
+    const s = new Set();
+    repos.forEach((r) => { if (stats[r]) s.add(stats[r].role); });
+    return Array.from(s);
+  }, [repos, stats]);
+
   const W = dims.w;
   const H = dims.h;
-  const cx = W / 2, cy = H / 2;
-  const radius = Math.max(120, Math.min(W, H) * 0.34);
+  // Canvas is reduced by the headline row's height so orbs never hide under it.
+  const Hc = Math.max(320, H - 64);
+  const cx = W / 2, cy = Hc / 2;
+  const radius = Math.max(120, Math.min(W, Hc) * 0.34);
+
+  // Orb radius ∝ call-tree complexity (total nodes); count = entry points.
+  const maxNodes = useMemo(
+    () => Math.max(1, ...repos.map((r) => (stats[r] ? stats[r].totalNodes : 1))),
+    [repos, stats]
+  );
 
   const positions = useMemo(() => {
     const n = repos.length;
     return repos.map((name, i) => {
       const angle = (2 * Math.PI * i) / Math.max(n, 1) - Math.PI / 2;
-      const count = epCount[name] || 0;
-      const r = Math.max(40, Math.min(82, 36 + count * 7));
+      const s = stats[name] || { epCount: 0, totalNodes: 1 };
+      const r = Math.max(42, Math.min(88, 40 + 24 * Math.sqrt(s.totalNodes / maxNodes)));
       return {
-        name, count, r,
+        name, count: s.epCount, totalNodes: s.totalNodes, r,
         x: cx + radius * Math.cos(angle),
         y: cy + radius * Math.sin(angle),
       };
     });
     // eslint-disable-next-line
-  }, [graph, W, H]);
+  }, [graph, stats, maxNodes, W, H]);
+
+  // Spinning type orbs around each orb — one colored dot per entry type.
+  const typesOf = (name) => {
+    const s = stats[name];
+    if (!s) return [];
+    return Object.entries(s.types).sort((a, b) => b[1] - a[1]).map(([t]) => t);
+  };
 
   const posMap = useMemo(() => {
     const m = {};
@@ -736,17 +549,25 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
   };
 
   return (
-    <div className="galaxy">
+    <div className="galaxy galaxy-system">
       <div className="view-top">
         <Breadcrumb items={[{ label: "Galaxy" }]} />
-        <div className="view-hint">
-          {repos.length} repos · {entryPoints.length} entry points · {(graph.producers || []).length} producers
+      </div>
+
+      {/* Headline strip — the story at a glance */}
+      <div className="galaxy-headline glass">
+        <div className="headline-stats">
+          <div className="stat-chip"><span className="stat-num">{summary.repoCount}</span><span className="stat-label">services</span></div>
+          <div className="stat-chip"><span className="stat-num">{summary.flowCount}</span><span className="stat-label">flows</span></div>
+          <div className="stat-chip"><span className="stat-num">{summary.channelCount}</span><span className="stat-label">channels</span></div>
+          <div className="stat-chip"><span className="stat-num">{summary.entryPointCount}</span><span className="stat-label">entry points</span></div>
         </div>
+        {summary.insight && <div className="headline-insight">{summary.insight}</div>}
       </div>
       <div
         className="canvas pan-canvas"
         ref={pz.containerRef}
-        style={{ height: H }}
+        style={{ height: Hc }}
         {...pz.handlers}
       >
         <div
@@ -811,7 +632,14 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
           })}
         </svg>
         {positions.map((p) => {
-          const types = repoTypes[p.name] || [];
+          const s = stats[p.name];
+          const role = s ? ROLE_META[s.role] : ROLE_META.utility;
+          // One priority badge per orb: hub > sink > isolated
+          let badge = null;
+          if (s && s.partnerCount >= summary.hubThreshold) badge = { cls: "hub", label: "★ hub" };
+          else if (s && s.inbound.length > 0 && s.outbound.length === 0) badge = { cls: "sink", label: "✖ sink" };
+          else if (s && s.partnerCount === 0) badge = { cls: "orphan", label: "⚠ isolated" };
+          const types = typesOf(p.name);
           const orbitR = p.r + 18;
           return (
             <div className="repo-wrap" key={p.name} style={{ left: p.x, top: p.y }} onClick={(e) => onSelectRepo(p.name, e)}>
@@ -849,7 +677,11 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
                   </div>
                 );
               })}
-              <div className="repo-label" style={{ top: p.r + 26 }}>{p.name}</div>
+              {badge && <span className={"repo-badge " + badge.cls} style={{ top: -(p.r + 10) }}>{badge.label}</span>}
+              <div className="repo-label" style={{ top: p.r + 26 }}>
+                <span className="repo-label-name">{p.name}</span>
+                {role && <span className="repo-role" style={{ "--c": role.color }}>{role.label}</span>}
+              </div>
             </div>
           );
         })}
@@ -879,34 +711,165 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
           );
         })()}
       </div>
-      <Legend types={usedTypes} />
+      <Legend types={usedTypes} roles={usedRoles} />
       {pz.zoomControls}
     </div>
   );
 }
 
-/* ---------------- Solar System View ---------------- */
-function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry }) {
-  const eps = useMemo(
-    () => (graph.entry_points || []).filter((e) => e.repo === repo),
-    [graph, repo]
-  );
-  const producers = useMemo(
-    () => (graph.producers || []).filter((p) => p.repo === repo),
-    [graph, repo]
-  );
-  const [hidden, setHidden] = useState({});
-  const pz = usePanZoom(".star, .star-label, .producers-panel");
+/* ---------------- Service View ---------------- */
+// Replaces the solar-system scatter + "Outbound" panel. One place to see
+// a service: its entry-point star map, a sortable entry-point table, its
+// inbound/outbound channels (with partners + methods), and the flows it
+// participates in. Shared ChannelCard = the one canonical channel renderer.
 
-  const W = dims.w, H = dims.h;
-  const cx = W / 2, cy = H / 2;
+function StatChip({ n, label }) {
+  return (
+    <div className="stat-chip">
+      <span className="stat-num">{n}</span>
+      <span className="stat-label">{label}</span>
+    </div>
+  );
+}
+
+// Canonical channel presentation — used by the service view's channel
+// panels AND the call-path view's "emits to" strip (no duplication).
+// `ownRepo` hides the repo label on the near side (it's always the
+// current service). Far-side methods/repos and the channel's flows
+// are click-through: methods → call path, repos → service view,
+// flows → flows mode.
+function ChannelCard({ ch, wide, ownRepo, flowsFor, onOpenRepo, onOpenEntry, onOpenFlow }) {
+  const mts = channelMessageTypes(ch);
+  const sideList = (items, arrow) => {
+    if (!items || items.length === 0) return null;
+    const uniq = [];
+    const seen = new Set();
+    items.forEach((x) => {
+      const k = x.repo + "::" + x.method;
+      if (seen.has(k)) return;
+      seen.add(k);
+      uniq.push(x);
+    });
+    const shown = uniq.slice(0, 4);
+    return (
+      <div className="ch-side">
+        <span className="ch-arrow">{arrow}</span>
+        <div className="ch-side-body">
+          {shown.map((x, i) => {
+            const isOwn = !!(ownRepo && x.repo === ownRepo);
+            const openMethod = (e) => {
+              if (isOwn) return;
+              if (x.id && onOpenEntry) onOpenEntry(x.id, e);
+              else if (onOpenRepo) onOpenRepo(x.repo, e);
+            };
+            return (
+              <div
+                key={i}
+                className={"ch-method-row" + (isOwn ? "" : " clickable")}
+                onClick={isOwn ? undefined : openMethod}
+                title={isOwn ? x.method : "Open call path: " + x.method}
+              >
+                <div className="ch-method-line">
+                  <span className="ch-method mono">{x.method}</span>
+                  {!isOwn && <span className="ch-open">→</span>}
+                </div>
+                {!isOwn && (
+                  <button
+                    className="ch-repo"
+                    title={"Open service: " + x.repo}
+                    onClick={(e) => { e.stopPropagation(); if (onOpenRepo) onOpenRepo(x.repo, e); }}
+                  >
+                    {x.repo}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {uniq.length > 4 && <div className="ch-more muted small">+{uniq.length - 4} more</div>}
+        </div>
+      </div>
+    );
+  };
+  const flows = flowsFor ? flowsFor(ch.channel) || [] : [];
+  return (
+    <div className={"channel-card glass" + (wide ? " wide" : "")}>
+      <div className="ch-head">
+        <span className="ch-name mono" title={ch.channel}>{ch.channel}</span>
+        <span className={"ch-kind " + (ch.kind === "http" ? "http" : "msg")}>
+          {ch.kind === "http" ? "HTTP" + (ch.verb ? " " + ch.verb : "") : "MSG"}
+        </span>
+      </div>
+      {sideList(ch.producers, "→")}
+      {sideList(ch.consumers, "←")}
+      {mts.length > 0 && (
+        <div className="ch-mts">
+          {mts.map((t) => <span className="ch-mt-chip mono" key={t}>{t}</span>)}
+        </div>
+      )}
+      {flows.length > 0 && onOpenFlow && (
+        <div className="ch-flows">
+          <span className="ch-flows-label">flows</span>
+          {flows.slice(0, 3).map((f) => (
+            <button
+              className="ch-flow-chip"
+              key={f.id}
+              title={"Open flow: " + f.name}
+              onClick={() => onOpenFlow(f.id)}
+            >
+              <span className={"ch-flow-origin " + (f.originClass || "external")}>{f.originTag || "EXT"}</span>
+              <span className="ch-flow-name">{f.name}</span>
+            </button>
+          ))}
+          {flows.length > 3 && <span className="muted small">+{flows.length - 3}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ServiceView({ graph, repo, flows, onHome, onSelectEntry, onSelectFlow, onOpenRepo }) {
+  const stats = useMemo(() => buildServiceStats(graph), [graph]);
+  const svc = stats[repo] || {
+    name: repo, epCount: 0, prodCount: 0, totalNodes: 0, maxDepth: 0, filesCount: 0,
+    types: {}, inbound: [], outbound: [], partnerCount: 0, channelCount: 0, role: "utility",
+  };
+  const eps = useMemo(() => (
+    (graph.entry_points || [])
+      .filter((e) => e.repo === repo)
+      .sort((a, b) => ((b.metrics || {}).total_nodes || 0) - ((a.metrics || {}).total_nodes || 0))
+  ), [graph, repo]);
+  const flowsIndex = useMemo(() => flowsByChannel(flows || []), [flows]);
+  const [hidden, setHidden] = useState({});
   const typesPresent = Array.from(new Set(eps.map((e) => e.type)));
+  const role = ROLE_META[svc.role] || ROLE_META.utility;
+
+  // ── Left canvas: classic infinite pan/zoom star map ──
+  const pz = usePanZoom(".star, .star-label");
+  const canvasRef = useRef(null);
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+
+  // Measure the flex-sized canvas so stars center in the real box.
+  useLayoutEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setCanvasSize((prev) => (prev.w === r.width && prev.h === r.height ? prev : { w: r.width, h: r.height }));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const stars = useMemo(() => {
+    const { w, h } = canvasSize;
+    if (!w || !h) return [];
     const maxNodes = Math.max(1, ...eps.map((e) => (e.metrics && e.metrics.total_nodes) || 1));
+    const cx = w / 2, cy = h / 2;
     return eps.map((ep, i) => {
       const angle = i * 2.39996323;
-      const rr = Math.sqrt(i + 0.6) * Math.min(W, H) * 0.085;
+      const rr = Math.sqrt(i + 0.6) * Math.min(w, h) * 0.085;
       const meta = typeMeta(ep.type);
       const nodes = (ep.metrics && ep.metrics.total_nodes) || 1;
       const size = 14 + (nodes / maxNodes) * 34;
@@ -917,123 +880,153 @@ function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry }) {
         color: meta.color, glow: meta.glow,
       };
     });
-  }, [eps, W, H]);
+  }, [eps, canvasSize]);
 
   const visible = stars.filter((s) => !hidden[s.ep.type]);
+  const visibleEps = eps.filter((e) => !hidden[e.type]);
+
+  const triggerOf = (ep) => {
+    if (ep.type === "rest-endpoint") return (ep.method_type || "POST") + " " + (ep.channel || "");
+    return ep.channel || "—";
+  };
 
   return (
-    <div className="solar">
+    <div className="service-view">
       <div className="view-top">
-        <Breadcrumb items={[
-          { label: "Galaxy", onClick: onHome },
-          { label: repo },
-        ]} />
-        <div className="view-hint">{eps.length} entry points · {producers.length} producers</div>
+        <Breadcrumb items={[{ label: "Galaxy", onClick: onHome }, { label: repo }]} />
       </div>
 
-      <div className="filters">
-        {typesPresent.map((t) => {
-          const m = typeMeta(t);
-          return (
-            <button
-              key={t}
-              className={"filter-chip" + (hidden[t] ? " off" : "")}
-              style={{ "--c": m.color }}
-              onClick={() => setHidden((h) => ({ ...h, [t]: !h[t] }))}
-            >
-              <span className="chip-dot" style={{ background: m.color, color: m.color }}></span>
-              {m.label}
-            </button>
-          );
-        })}
-      </div>
-
-      <div
-        className="canvas solar-canvas pan-canvas"
-        ref={pz.containerRef}
-        style={{ height: H }}
-        {...pz.handlers}
-      >
-        <div
-          className={"canvas-world" + (pz.animating ? " animating" : "")}
-          style={{
-            transform: `translate(${pz.viewport.x}px, ${pz.viewport.y}px) scale(${pz.viewport.zoom})`,
-            transformOrigin: "0 0",
-          }}
-        >
-        {visible.map((s) => (
-          <button
-            key={s.ep.id}
-            className="star"
-            style={{ left: s.x, top: s.y, width: s.size, height: s.size, "--c": s.color, "--glow": s.glow }}
-            title={s.ep.id}
-            onClick={(e) => onSelectEntry(s.ep.id, e)}
-          >
-            <span className="star-core" style={{ width: s.size, height: s.size }}></span>
-          </button>
-        ))}
-        {visible.map((s) => (
-          <div key={"l" + s.ep.id} className="star-label" style={{ left: s.x, top: s.y + s.size / 2 + 8 }}>
-            <span className="star-label-name">{s.ep.method || s.ep.id.split(":").pop()}</span>
+      <div className="sv-split">
+        {/* ── Left: star map canvas (pan/zoom, classic style) ── */}
+        <div className={"sv-canvas-wrap" + (visible.length <= 8 ? " labels-static" : "")}>
+          <div className="filters">
+            {typesPresent.map((t) => {
+              const m = typeMeta(t);
+              return (
+                <button
+                  key={t}
+                  className={"filter-chip" + (hidden[t] ? " off" : "")}
+                  style={{ "--c": m.color }}
+                  onClick={() => setHidden((h) => ({ ...h, [t]: !h[t] }))}
+                >
+                  <span className="chip-dot" style={{ background: m.color, color: m.color }}></span>
+                  {m.label}
+                </button>
+              );
+            })}
           </div>
-        ))}
-        </div>
-      </div>
-
-      <ProducersPanel producers={producers} graph={graph} />
-      {pz.zoomControls}
-    </div>
-  );
-}
-
-function ProducersPanel({ producers, graph }) {
-  // Group producers by channel and find consumers from cross_repo_links
-  const channels = useMemo(() => {
-    const links = (graph || {}).cross_repo_links || [];
-    const ep_repos = (graph || {}).entry_points || [];
-    const map = {};
-    producers.forEach((p) => {
-      if (!map[p.channel]) map[p.channel] = [];
-      map[p.channel].push(p);
-    });
-    return Object.entries(map).map(([channel, prods]) => {
-      const link = links.find((l) => l.channel === channel);
-      const consumerRepos = link ? Array.from(new Set(
-        (link.consumers || [])
-          .map((c) => c.split(":")[0])
-          .filter((r) => r)
-      )) : [];
-      return { channel, producers: prods, consumerRepos };
-    });
-  }, [producers, graph]);
-
-  return (
-    <aside className="producers-panel glass">
-      <h3>Outbound <span className="muted">({producers.length})</span></h3>
-      {producers.length === 0 && <p className="muted small">No outbound producers detected.</p>}
-      <ul className="producer-list">
-        {channels.map(({ channel, producers: prods, consumerRepos }) => (
-          <li className="producer-item" key={channel}>
-            <div className="producer-channel">
-              <span className="producer-channel-name">{channel}</span>
-              <span className="producer-arrow">→</span>
-            </div>
-            <div className="producer-flow-targets">
-              {consumerRepos.length > 0
-                ? consumerRepos.join(", ")
-                : "no consumer found"}
-            </div>
-            <div className="producer-flow">
-              {prods.map((p) => (
-                <div key={p.id} className="producer-flow-method">
-                  {p.method}
+          <div
+            className="canvas solar-canvas pan-canvas"
+            ref={canvasRef}
+            {...pz.handlers}
+          >
+            <div
+              className={"canvas-world" + (pz.animating ? " animating" : "")}
+              style={{
+                transform: `translate(${pz.viewport.x}px, ${pz.viewport.y}px) scale(${pz.viewport.zoom})`,
+                transformOrigin: "0 0",
+              }}
+            >
+              {visible.map((s) => (
+                <div key={s.ep.id} className="sv-star-wrap" style={{ left: s.x, top: s.y }}>
+                  <button
+                    className="star"
+                    style={{ width: s.size, height: s.size, "--c": s.color, "--glow": s.glow }}
+                    title={s.ep.id}
+                    onClick={(e) => onSelectEntry(s.ep.id, e)}
+                  >
+                    <span className="star-core" style={{ width: s.size, height: s.size }}></span>
+                  </button>
+                  <div className="star-label" style={{ top: s.size / 2 + 8 }}>
+                    <span className="star-label-name">{s.ep.method || s.ep.id.split(":").pop()}</span>
+                  </div>
                 </div>
               ))}
+              {visible.length === 0 && <div className="sv-empty muted small">No entry points in view.</div>}
             </div>
-          </li>
-        ))}
-      </ul>
-    </aside>
+          </div>
+          {pz.zoomControls}
+        </div>
+
+        {/* ── Right: data panels ── */}
+        <aside className="sv-panel glass">
+          <div className="sv-panel-head">
+            <span className="sv-title">{repo}</span>
+            <span className="sv-role-tag" style={{ "--c": role.color }}>{role.label}</span>
+          </div>
+          <div className="sv-panel-stats">
+            <StatChip n={svc.prodCount} label="producers" />
+            <StatChip n={svc.partnerCount} label="partners" />
+            <StatChip n={svc.totalNodes} label="call nodes" />
+          </div>
+
+          <section className="sv-section">
+            <div className="sv-section-head">
+              <h3>Entry points <span className="muted">({visibleEps.length})</span></h3>
+              <span className="sv-hint muted small">by complexity</span>
+            </div>
+            <div className="entry-table">
+              {visibleEps.length === 0 && <div className="et-empty muted">No entry points.</div>}
+              {visibleEps.map((ep) => {
+                const m = typeMeta(ep.type);
+                const cx = ep.metrics || {};
+                return (
+                  <div className="et-row" key={ep.id} onClick={() => onSelectEntry(ep.id)}>
+                    <div className="et-line1">
+                      <span className="et-type" style={{ "--c": m.color }}>{m.label}</span>
+                      <span className="et-method" title={ep.method}>{ep.method}</span>
+                      <span className="et-cx mono" title="call nodes · depth">{cx.total_nodes || 1} · d{cx.depth || 0}</span>
+                    </div>
+                    <div className="et-line2">
+                      <span className="et-trigger mono" title={triggerOf(ep)}>{triggerOf(ep)}</span>
+                      <span className="et-mt mono">{ep.message_type || "—"}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="sv-section">
+            <div className="sv-section-head">
+              <h3>Channels</h3>
+            </div>
+            <div className="channels-grid">
+              <div className="channels-col">
+                <h4 className="ch-col-title">Inbound <span className="muted">({svc.inbound.length})</span></h4>
+                {svc.inbound.length === 0 && <p className="muted small">No inbound channels.</p>}
+                {svc.inbound.map((ch) => (
+                  <ChannelCard
+                    key={ch.channel}
+                    ch={ch}
+                    ownRepo={repo}
+                    flowsFor={(c) => flowsIndex[c] || []}
+                    onOpenRepo={onOpenRepo}
+                    onOpenEntry={onSelectEntry}
+                    onOpenFlow={onSelectFlow}
+                  />
+                ))}
+              </div>
+              <div className="channels-col">
+                <h4 className="ch-col-title">Outbound <span className="muted">({svc.outbound.length})</span></h4>
+                {svc.outbound.length === 0 && <p className="muted small">No outbound channels.</p>}
+                {svc.outbound.map((ch) => (
+                  <ChannelCard
+                    key={ch.channel}
+                    ch={ch}
+                    ownRepo={repo}
+                    flowsFor={(c) => flowsIndex[c] || []}
+                    onOpenRepo={onOpenRepo}
+                    onOpenEntry={onSelectEntry}
+                    onOpenFlow={onSelectFlow}
+                  />
+                ))}
+              </div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </div>
   );
 }
 
@@ -1045,30 +1038,13 @@ const PV_NODE_H = 110;  // estimated height including toggle footer
 const PV_HSPACE = 340;  // horizontal distance between depth levels
 const PV_VGAP = 50;     // vertical gap between sibling nodes
 
-function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNode, chatOpen }) {
+function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNode, chatOpen, flows, onOpenRepo, onOpenEntry, onOpenFlow }) {
   const tree = entryPoint.call_tree;
 
-  // Outbound channels for this entry point
-  const outboundChannels = useMemo(() => {
-    if (!graph) return [];
-    const producers = graph.producers || [];
-    const links = graph.cross_repo_links || [];
-    const myMethod = entryPoint.method || entryPoint.id.split(":").pop();
-    const myClass = entryPoint.class_name || "";
-    const matches = producers.filter((p) => {
-      if (p.repo !== entryPoint.repo) return false;
-      return p.method === myMethod
-        || p.method === (myClass + "." + myMethod)
-        || p.method.endsWith("." + myMethod);
-    });
-    return matches.map((p) => {
-      const link = links.find((l) => l.channel === p.channel);
-      const consumerRepos = link ? Array.from(new Set(
-        (link.consumers || []).map((c) => c.split(":")[0]).filter(Boolean)
-      )) : [];
-      return { channel: p.channel, consumerRepos };
-    });
-  }, [graph, entryPoint]);
+  // Outbound channels for this entry point (enriched via derived.js —
+  // kind/verb/partners/methods, same facts as the service view).
+  const outboundChannels = useMemo(() => entryEmits(graph, entryPoint), [graph, entryPoint]);
+  const flowsIndex = useMemo(() => flowsByChannel(flows || []), [flows]);
 
   // ── Collapse state ──────────────────────────────────────────
   // Default: root + depth-1 children expanded
@@ -1358,9 +1334,9 @@ function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNod
                     if (!dragRef.current.moved) onSelectNode(d);
                   }}
                 >
-                  <div className="pv-method">{d.method || d.class_name || "unknown"}</div>
+                  <div className="pv-method">{nodeDisplayName(d)}</div>
                   <div className="pv-loc mono">{fmtFile(d.file)}{d.line ? ":" + d.line : ""}</div>
-                  {d.confidence && (
+                  {d.confidence && d.confidence !== "EXTRACTED" && (
                     <span className="conf-badge" style={{ "--c": conf.color }}>{d.confidence}</span>
                   )}
                 </button>
@@ -1385,28 +1361,24 @@ function PathView({ entryPoint, graph, onHome, onBack, selectedNode, onSelectNod
             );
           })}
 
-          {/* Exit point */}
+          {/* Exit strip — channels this entry point emits to (shared ChannelCard) */}
           {outboundChannels.length > 0 && (
-            <div
-              className="exit-point"
-              style={{
-                top: layout.maxY + 30,
-                left: 0,
-                width: PV_NODE_W + 100,
-              }}
-            >
+            <div className="exit-strip" style={{ top: layout.maxY + 30, left: 0 }}>
               <div className="exit-point-label">EMITS TO</div>
-              {outboundChannels.map((oc, i) => (
-                <div className="exit-point-flow" key={i}>
-                  <span className="exit-point-channel">{oc.channel}</span>
-                  <span className="exit-point-arrow">→</span>
-                  <span className="exit-point-target">
-                    {oc.consumerRepos.length > 0
-                      ? oc.consumerRepos.join(", ")
-                      : "no consumer"}
-                  </span>
-                </div>
-              ))}
+              <div className="exit-strip-cards">
+                {outboundChannels.map((oc) => (
+                  <ChannelCard
+                    key={oc.channel}
+                    ch={oc}
+                    wide
+                    ownRepo={entryPoint.repo}
+                    flowsFor={(c) => flowsIndex[c] || []}
+                    onOpenRepo={onOpenRepo}
+                    onOpenEntry={onOpenEntry}
+                    onOpenFlow={onOpenFlow}
+                  />
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -1486,7 +1458,7 @@ function DetailPanel({ node, entryPoint, onClose, pid }) {
       </header>
 
       <div className="dp-body">
-        {node.confidence && (
+        {node.confidence && node.confidence !== "EXTRACTED" && (
           <span className="conf-badge" style={{ "--c": conf.color }}>{node.confidence}</span>
         )}
 
@@ -1534,8 +1506,8 @@ function DetailPanel({ node, entryPoint, onClose, pid }) {
 
 /* ---------------- Flows Mode: Flow Index View ---------------- */
 // Galaxy equivalent — shows all detected flows as cards in the starfield
-function FlowIndexView({ graph, dims, onSelectFlow }) {
-  const flows = useMemo(() => detectFlows(graph), [graph]);
+function FlowIndexView({ graph, dims, onSelectFlow, flows: flowsProp }) {
+  const flows = flowsProp || useMemo(() => detectFlows(graph), [graph]);
   const W = dims.w, H = dims.h;
   const TOPBAR_H = 72; // matches --topbar-h in styles.css
   // Center within the VISIBLE stage area (below the fixed topbar), not the full window
@@ -1837,8 +1809,7 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
           { label: flow.name },
         ]} />
         <div className="view-hint">
-          {flow.repoCount} repos · {flow.hopCount} hop{flow.hopCount === 1 ? "" : "s"} ·
-          {" "}origin: {flow.originNoun || (flow.originType === "rest" ? "REST endpoint" : "external event")}
+          origin: {flow.originNoun || (flow.originType === "rest" ? "REST endpoint" : "external event")}
         </div>
       </div>
       <div
@@ -2277,9 +2248,9 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
                   className="pv-node-body"
                   onClick={() => { if (!dragRef.current.moved) onSelectNode(d); }}
                 >
-                  <div className="pv-method">{d.method || d.class_name || "unknown"}</div>
+                  <div className="pv-method">{nodeDisplayName(d)}</div>
                   <div className="pv-loc mono">{fmtFile(d.file)}{d.line ? ":" + d.line : ""}</div>
-                  {d.confidence && (
+                  {d.confidence && d.confidence !== "EXTRACTED" && (
                     <span className="conf-badge" style={{ "--c": conf.color }}>{d.confidence}</span>
                   )}
                 </button>
@@ -2369,7 +2340,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, flows, 
     if (level === "galaxy") {
       return { payload: { entry_point_id: "", node: {} }, label: "Architecture overview", scope: "system" };
     }
-    if (level === "solar") {
+    if (level === "service") {
       const repo = view.repo || "";
       return {
         payload: { entry_point_id: "", node: {}, repo },
@@ -2973,22 +2944,30 @@ function App() {
               dims={{ w: dims.w, h: stageH }}
               onSelectRepo={(repo, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);
-                drill(x, y, () => { setSelectedNode(null); setView({ name: "solar", repo }); });
+                drill(x, y, () => { setSelectedNode(null); setView({ name: "service", repo }); });
               }}
             />
           </div>
         )}
-        {mode === "topology" && view.name === "solar" && (
-          <div className="view" key={"solar-" + view.repo}>
-            <SolarSystemView
+        {mode === "topology" && view.name === "service" && (
+          <div className="view" key={"service-" + view.repo}>
+            <ServiceView
               graph={graph}
               repo={view.repo}
-              dims={{ w: dims.w, h: stageH }}
+              flows={flows}
               onHome={goGalaxy}
-              onBack={goGalaxy}
               onSelectEntry={(id, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);
                 drill(x, y, () => { setSelectedNode(null); setView({ name: "path", entryId: id }); });
+              }}
+              onSelectFlow={(flowId) => {
+                setSelectedNode(null);
+                setMode("flows");
+                setView({ name: "flow", flowId });
+              }}
+              onOpenRepo={(repo, e) => {
+                const [x, y] = centerOf(e && e.currentTarget);
+                drill(x, y, () => { setSelectedNode(null); setView({ name: "service", repo }); });
               }}
             />
           </div>
@@ -3001,11 +2980,25 @@ function App() {
               <PathView
                 entryPoint={ep}
                 graph={graph}
+                flows={flows}
                 onHome={goGalaxy}
-                onBack={() => setView({ name: "solar", repo: ep.repo })}
+                onBack={() => setView({ name: "service", repo: ep.repo })}
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
                 chatOpen={chatOpen}
+                onOpenRepo={(repo, e) => {
+                  const [x, y] = centerOf(e && e.currentTarget);
+                  drill(x, y, () => { setSelectedNode(null); setView({ name: "service", repo }); });
+                }}
+                onOpenEntry={(id, e) => {
+                  const [x, y] = centerOf(e && e.currentTarget);
+                  drill(x, y, () => { setSelectedNode(null); setView({ name: "path", entryId: id }); });
+                }}
+                onOpenFlow={(flowId) => {
+                  setSelectedNode(null);
+                  setMode("flows");
+                  setView({ name: "flow", flowId });
+                }}
               />
             </div>
           );
@@ -3016,6 +3009,7 @@ function App() {
           <div className="view" key="flowIndex">
             <FlowIndexView
               graph={graph}
+              flows={flows}
               dims={{ w: dims.w, h: stageH }}
               onSelectFlow={(f, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);

@@ -31,11 +31,11 @@ def test_http_link_kind_field():
     assert d["kind"] == "http" and "verb" in d
 
 def test_http_client_types_registered():
-    from engine.java_index import HTTP_CLIENT_TYPES
+    from engine.producers.jvm import HTTP_CLIENT_TYPES
     assert "RestTemplate" in HTTP_CLIENT_TYPES and "WebClient" in HTTP_CLIENT_TYPES
 
 def test_java_only_client_set():
-    from engine.java_index import HTTP_CLIENT_TYPES
+    from engine.producers.jvm import HTTP_CLIENT_TYPES
     for t in ("RestClient", "HttpClient", "OkHttpClient", "Client", "WebTarget"):
         assert t in HTTP_CLIENT_TYPES, f"{t} missing from HTTP_CLIENT_TYPES"
     assert "FeignClient" not in HTTP_CLIENT_TYPES  # Feign handled via annotation, not field type

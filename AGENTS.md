@@ -66,7 +66,8 @@ web/                 # React 18 + Vite frontend
   index.html         # Vite entry (loads /src/main.jsx as ES module)
   src/
     main.jsx         # entry point: createRoot(<App />)
-    app.jsx          # Projects → Galaxy → Solar System → Path → Detail (~3600 lines)
+    app.jsx          # Projects → Galaxy → Service → Path → Detail (components/logic)
+    derived.js       # pure view analytics: detectFlows, service stats/roles, landscape summary, entryEmits (single source for all views)
     styles.css       # SVG + CSS visualization styles
   dist/              # Vite build output (gitignored, created by npm run build)
   mock_server.py     # static in-memory backend for frontend dev
@@ -120,7 +121,7 @@ The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chann
 
 - **Python:** module-level docstrings, `from __future__ import annotations`, type hints, and `# ── Section ──` comment separators. Dataclasses for the graph model (`models.py`). Follow these when editing engine/server code.
 - **Style:** section-header comments use the `# ── ... ──` pattern (see any `engine/*.py`). Docstrings are used liberally — keep them.
-- **Build step:** frontend edits require a Vite rebuild (`npm run build`) to be visible in the production server. For rapid iteration with HMR, use `npm run dev` (Vite dev server on :5173, proxies API to :8765). The source lives in `web/src/` — `app.jsx` (components/logic) + `styles.css` + `main.jsx` (entry point). React, `marked`, and all deps are imported as ES modules (no global CDN scripts).
+- **Build step:** frontend edits require a Vite rebuild (`npm run build`) to be visible in the production server. For rapid iteration with HMR, use `npm run dev` (Vite dev server on :5173, proxies API to :8765). The source lives in `web/src/` — `app.jsx` (components/logic) + `styles.css` + `main.jsx` (entry point) + `derived.js` (pure view analytics: `detectFlows`, `buildServiceStats`, `landscapeSummary`, `entryEmits`, `channelMessageTypes`, `ROLE_META` — the single source of truth for view-level summaries; do not re-derive these in individual views). React, `marked`, and all deps are imported as ES modules (no global CDN scripts).
 - **Security:** source reads are confined to recorded `repo_roots` (`engine/paths.py`, `server.py:_resolve_source_path`). Keep arbitrary-file-read surfaces closed. The graph stores **repo-relative** paths for portability.
 - **Env vars:** `CONSTELLATION_PORT` (8765), `CONSTELLATION_GRAPH` (graph path for MCP), `OPENCODE_API_KEY`/`OPENCODE_BASE_URL`/`OPENCODE_MODEL` (AI chat; **Zen by default** — `OPENCODE_BASE_URL=https://opencode.ai/zen/v1`, model `deepseek-v4-flash-free`; `OPENAI_*` accepted as aliases). `server.py` loads a committed `.env` template at startup; the start scripts mark it `skip-worktree` so local secrets are never committed. Only free models (ids ending in `-free`) are exposed via `/api/ai/models`.
 

@@ -34,11 +34,12 @@ from pathlib import Path
 from typing import Optional
 from tree_sitter import Node
 
-from .parser import JavaParser
+from .ast_parser import ASTParser
+from .languages import java_ast
 
 
 @dataclass
-class ClassInfo:
+class TypeInfo:
     repo: str
     simple_name: str
     fqn: str
@@ -65,74 +66,21 @@ class MethodInfo:
     node: Optional[Node] = None
 
 
-# Framework types whose field/method calls mark a producer.
-# Matched by the *declared field type*, not the variable name.
-PRODUCER_TYPES: dict[str, set[str]] = {
-    # KafkaTemplate.send(...) — every overload takes the topic as args[0].
-    "KafkaTemplate": {"send"},
-    "RabbitTemplate": {"convertAndSend", "convertSendAndReceive", "send"},
-    "AmqpTemplate": {"convertAndSend", "convertSendAndReceive", "send"},
-    "JmsTemplate": {"convertAndSend", "convertSendAndReceive", "send"},
-    "ApplicationEventPublisher": {"publishEvent"},
-    "StreamBridge": {"send"},  # Spring Cloud Stream
-    "PulsarTemplate": {"send", "sendAsync"},  # Apache Pulsar (topic = first arg)
-    "Connection": {"publish"},  # NATS / nats.java (subject = first arg)
-}
 
-EVENT_PUBLISHER_TYPES = {"ApplicationEventPublisher"}
-
-
-# Field-type → HTTP client method set. RestTemplate is method-based; WebClient
-# is fluent (get().uri(...).retrieve()) so we match the fluent entry calls and
-# dig the URI out of the nested .uri(...) invocation.
-#
-# ⭐ Java-only scope: beyond the Spring big three we also cover the JDK's
-# java.net.http.HttpClient (send/sendAsync with HttpRequest builder), OkHttp,
-# JAX-RS Client/WebTarget (target().path()...request()), and Spring 6.1+
-# RestClient (get()/post()/... fluent, same shape as WebClient). Feign is NOT
-# here — Feign client interfaces are handled via @FeignClient in the detector.
-HTTP_CLIENT_TYPES: dict[str, set[str]] = {
-    "RestTemplate": {
-        "getForObject", "getForEntity", "postForObject", "postForEntity",
-        "put", "patchForObject", "delete", "exchange", "execute",
-    },
-    "WebClient": {"get", "post", "put", "patch", "delete", "exchange"},
-    "RestClient": {"get", "post", "put", "patch", "delete"},  # Spring 6.1 fluent
-    "HttpClient": {"send", "sendAsync", "execute"},   # java.net.http (send*) OR apache (execute)
-    "OkHttpClient": {"newCall"},           # Request.Builder().url(...) — URI from nested builder
-    "Client": {"target", "invoke"},        # JAX-RS — URI from .target("...")
-    "WebTarget": {"request", "path"},
-    # Apache HttpComponents (sync): execute(new HttpGet("http://...")); URI dug out of the
-    # request's constructor, verb from the request class (HttpGet→GET).
-    "CloseableHttpClient": {"execute"},
-    "DefaultCloseableHttpClient": {"execute"},
-    # Async HTTP client (async-http-client): prepareGet("http://...").execute();
-    # URI is a direct string arg, verb encoded in the prepare* method name.
-    "AsyncHttpClient": {
-        "prepareGet", "preparePost", "preparePut", "preparePatch",
-        "prepareDelete", "prepareHead", "prepareOptions", "execute",
-    },
-    "DefaultAsyncHttpClient": {
-        "prepareGet", "preparePost", "preparePut", "preparePatch",
-        "prepareDelete", "prepareHead", "prepareOptions", "execute",
-    },
-}
-
-
-class JavaIndex:
+class SymbolIndex:
     """Repo-wide symbol table + type-aware resolution."""
 
     def __init__(self):
-        self.parser = JavaParser()
-        self.by_simple: dict[str, list[ClassInfo]] = {}
-        self.by_fqn: dict[str, ClassInfo] = {}
+        self.parser = ASTParser()
+        self.by_simple: dict[str, list[TypeInfo]] = {}
+        self.by_fqn: dict[str, TypeInfo] = {}
         self.methods: list[MethodInfo] = []
         # (class_simple, const_name) -> value; plus a flat fallback by name.
         self.constants: dict[tuple[str, str], str] = {}
         self.const_by_name: dict[str, str] = {}
         self.config: dict[str, str] = {}
-        # interface simple name -> impl ClassInfos
-        self._impls_cache: dict[str, list[ClassInfo]] = {}
+        # interface simple name -> impl TypeInfos
+        self._impls_cache: dict[str, list[TypeInfo]] = {}
         # (class_simple, method_name) -> resolved methods (incl. negatives), so the
         # supertype chain is walked at most once per (class, method) per index.
         self._hierarchy_cache: dict[tuple[str, str], list] = {}
@@ -150,7 +98,7 @@ class JavaIndex:
         """
         parsed: list[tuple[str, Path, Path, Node]] = []
         for repo_name, repo_root, file_path in files:
-            root = self.parser.parse_file(file_path)
+            root = self.parser.parse_file(file_path, "java")
             if root is None:
                 continue
             parsed.append((repo_name, repo_root, file_path, root))
@@ -172,27 +120,36 @@ class JavaIndex:
         except ValueError:
             rel = str(file_path)
 
-        package = self.parser.get_package(root)
-        expl, wild = self.parser.get_imports(root)
+        package = java_ast.get_package(root)
+        expl, wild = java_ast.get_imports(root)
 
-        for type_node, kind in self.parser.find_types(root):
-            simple = self.parser.get_class_name(type_node)
+        # Type discovery is query-driven (ASTParser.extract); per-type Java
+        # semantics (supertypes, fields, methods, signatures) are interpreted
+        # by the Java backend.
+        extraction = self.parser.extract("java", root)
+        type_kinds = {"class", "interface", "enum", "record"}
+        for sym in extraction.symbols:
+            if sym.kind not in type_kinds:
+                continue
+            type_node = sym.def_node
+            simple = sym.name
             if not simple:
                 continue
+            kind = sym.kind
             fqn = f"{package}.{simple}" if package else simple
-            supertypes = self.parser.get_supertypes(type_node)
+            supertypes = java_ast.get_supertypes(type_node)
             fields = {
                 f["name"]: f["type"]
-                for f in self.parser.get_fields(type_node)
+                for f in java_ast.get_fields(type_node)
                 if f.get("name") and f.get("type")
             }
             # static final String constants
-            for f in self.parser.get_fields(type_node):
+            for f in java_ast.get_fields(type_node):
                 if f.get("is_static_final") and f.get("type") == "String" and f.get("const_value"):
                     self.constants[(simple, f["name"])] = f["const_value"]
                     self.const_by_name.setdefault(f["name"], f["const_value"])
 
-            ci = ClassInfo(
+            ci = TypeInfo(
                 repo=repo, simple_name=simple, fqn=fqn, kind=kind, file=rel,
                 line=type_node.start_point[0] + 1, package=package,
                 imports_explicit=expl, imports_wildcard=wild,
@@ -201,8 +158,8 @@ class JavaIndex:
             self.by_simple.setdefault(simple, []).append(ci)
             self.by_fqn[fqn] = ci
 
-            for m_node in self.parser.find_methods(type_node):
-                sig = self.parser.get_method_signature(m_node)
+            for m_node in java_ast.find_methods(type_node):
+                sig = java_ast.get_method_signature(m_node)
                 if not sig["name"]:
                     continue
                 self.methods.append(MethodInfo(
@@ -277,7 +234,7 @@ class JavaIndex:
 
     # ── type resolution ────────────────────────────────────────────
 
-    def find_class(self, ci: Optional[ClassInfo], simple: str) -> Optional[ClassInfo]:
+    def find_class(self, ci: Optional[TypeInfo], simple: str) -> Optional[TypeInfo]:
         """Resolve a simple type name to a single indexed class (import-aware).
 
         Prefers a matching explicit import, then the same-package FQN, then a
@@ -308,7 +265,7 @@ class JavaIndex:
             return matches[0]
         return None
 
-    def impls_of(self, interface_simple: str) -> list[ClassInfo]:
+    def impls_of(self, interface_simple: str) -> list[TypeInfo]:
         if interface_simple in self._impls_cache:
             return self._impls_cache[interface_simple]
         out = [
@@ -318,7 +275,7 @@ class JavaIndex:
         self._impls_cache[interface_simple] = out
         return out
 
-    def field_type(self, ci: ClassInfo, field_name: str) -> str:
+    def field_type(self, ci: TypeInfo, field_name: str) -> str:
         """Declared type of a field, walking supertypes if not local."""
         if field_name in ci.fields:
             return ci.fields[field_name]
@@ -329,8 +286,8 @@ class JavaIndex:
         return ""
 
     def resolve_receiver_type(
-        self, ci: ClassInfo, receiver: str, local_types: dict[str, str],
-    ) -> Optional[ClassInfo]:
+        self, ci: TypeInfo, receiver: str, local_types: dict[str, str],
+    ) -> Optional[TypeInfo]:
         """Resolve a call receiver (field / local / static type) to a class."""
         if not receiver or receiver in ("this", "super"):
             return ci
@@ -360,7 +317,7 @@ class JavaIndex:
         ]
 
     def find_methods_in_hierarchy(
-        self, ci: ClassInfo, method_name: str, _seen: Optional[set[str]] = None,
+        self, ci: TypeInfo, method_name: str, _seen: Optional[set[str]] = None,
     ) -> list[MethodInfo]:
         """Resolve a method up the supertype chain (transitive).
 
@@ -382,7 +339,7 @@ class JavaIndex:
         return result
 
     def _walk_hierarchy(
-        self, ci: ClassInfo, method_name: str, seen: set[str],
+        self, ci: TypeInfo, method_name: str, seen: set[str],
     ) -> list[MethodInfo]:
         if ci.simple_name in seen:
             return []
@@ -398,20 +355,61 @@ class JavaIndex:
                     return found
         return []
 
-    def class_by_loc(self, repo: str, file: str, simple: str) -> Optional[ClassInfo]:
-        """ClassInfo for a class located at (repo, file, simple name)."""
+    def class_by_loc(self, repo: str, file: str, simple: str) -> Optional[TypeInfo]:
+        """TypeInfo for a class located at (repo, file, simple name)."""
         matches = self.by_simple.get(simple, [])
         for ci in matches:
             if ci.repo == repo and ci.file == file:
                 return ci
         return matches[0] if matches else None
 
-    def class_for_method(self, method: MethodInfo) -> Optional[ClassInfo]:
+    def class_for_method(self, method: MethodInfo) -> Optional[TypeInfo]:
         return self.class_by_loc(method.repo, method.file, method.class_simple)
+
+    # ── method-body access (the MethodBody boundary) ────────────────
+    # The call-graph builder consumes methods purely through these accessors
+    # — it never handles a raw tree-sitter Node. Node interpretation stays
+    # inside the index (+ the language backend), so a different language's
+    # backend can swap in without the builder changing.
+
+    def method_calls(self, method: MethodInfo) -> list[dict]:
+        """Parsed invocations within a method's body.
+
+        Each entry is ``{receiver, method, args}`` (see
+        :func:`engine.languages.java_ast.parse_method_invocation`). Returns
+        ``[]`` for abstract/interface methods or methods without a body.
+        """
+        node = method.node
+        if node is None:
+            return []
+        body = java_ast.get_method_body(node)
+        if body is None:
+            return []
+        return [java_ast.parse_method_invocation(inv) for inv in java_ast.find_method_invocations(body)]
+
+    def method_local_types(self, method: MethodInfo) -> dict[str, str]:
+        """Name → declared type for a method's parameters + local variables.
+
+        Lets the builder resolve chained calls on locals/params to a concrete
+        type instead of marking them ``INFERRED``.
+        """
+        node = method.node
+        if node is None:
+            return {}
+        out = {
+            p["name"]: p["type"]
+            for p in java_ast.get_method_parameters(node)
+            if p.get("name") and p.get("type")
+        }
+        body = java_ast.get_method_body(node)
+        if body is not None:
+            out.update(java_ast.get_local_variables(body))
+        return out
+
 
     def resolve_call(
         self,
-        ci: ClassInfo,
+        ci: TypeInfo,
         receiver: str,
         method_name: str,
         arity: Optional[int] = None,
@@ -440,7 +438,7 @@ class JavaIndex:
                 recv_type = receiver  # static call on a class name
 
         # Candidate classes to search.
-        candidate_classes: list[ClassInfo] = []
+        candidate_classes: list[TypeInfo] = []
         if recv_type:
             concrete = self.find_class(ci, recv_type)
             if concrete:
@@ -487,7 +485,7 @@ class JavaIndex:
 
     # ── channel resolution ─────────────────────────────────────────
 
-    def resolve_channel(self, token: Optional[str], ci: Optional[ClassInfo] = None) -> str:
+    def resolve_channel(self, token: Optional[str], ci: Optional[TypeInfo] = None) -> str:
         """Turn a channel token into a concrete channel string.
 
         Handles literals, ``Class.CONST`` / ``CONST`` references, ``${...}``

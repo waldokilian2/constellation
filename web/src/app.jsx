@@ -413,28 +413,35 @@ function HeaderBreadcrumb({ crumbs }) {
 // Map the current view + mode to the full navigation trail (project root first).
 // The last crumb is the current page; earlier ones are clickable "up" targets.
 function buildCrumbs(view, mode, graph, flows, projectName, nav) {
+  // The project root IS the galaxy view, so the project-name crumb doubles as
+  // the galaxy entry point: current when the galaxy is shown, a link back to it
+  // otherwise. No separate "Galaxy" crumb is appended (avoids the root/galaxy
+  // duplication, e.g. "Projects › Java EE › Galaxy").
+  const projectCrumb = (current) => ({
+    label: projectName || "Project",
+    ...(current ? { current: true } : { onClick: nav.goGalaxy }),
+  });
   const root = [
     { label: "Projects", onClick: nav.goProjects },
-    { label: projectName || "Project", onClick: nav.goGalaxy },
+    projectCrumb(false),
   ];
   const methodLabel = (ep) => ep.method || ep.id.split(":").pop();
 
   if (mode === "topology") {
     if (view.name === "galaxy") {
-      return [...root, { label: "Galaxy", current: true }];
+      return [{ label: "Projects", onClick: nav.goProjects }, projectCrumb(true)];
     }
     if (view.name === "gaps") {
-      return [...root, { label: "Galaxy", onClick: nav.goGalaxy }, { label: "Gaps", current: true }];
+      return [...root, { label: "Gaps", current: true }];
     }
     if (view.name === "solar") {
-      return [...root, { label: "Galaxy", onClick: nav.goGalaxy }, { label: view.repo, current: true }];
+      return [...root, { label: view.repo, current: true }];
     }
     if (view.name === "path") {
       const ep = graph && (graph.entry_points || []).find((e) => e.id === view.entryId);
       if (ep) {
         return [
           ...root,
-          { label: "Galaxy", onClick: nav.goGalaxy },
           { label: ep.repo, onClick: () => nav.goSolar(ep.repo) },
           { label: methodLabel(ep), current: true },
         ];
@@ -1677,7 +1684,7 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow }
         </div>
       </div>
 
-      <ChannelsPanel channels={channels} onOpenFlow={onOpenFlow} />
+      <ChannelsPanel channels={channels} repo={repo} onOpenFlow={onOpenFlow} />
       {pz.zoomControls}
     </div>
   );
@@ -1904,7 +1911,7 @@ function ChannelCard({ c, onOpenFlow }) {
   );
 }
 
-function ChannelsPanel({ channels, onOpenFlow }) {
+function ChannelsPanel({ channels, repo, onOpenFlow }) {
   // Split by direction into clear sections. A channel this repo both consumes
   // and emits is a bridge — it gets its own section, never a duplicate card.
   const consumes = channels.filter((c) => c.direction === "in");
@@ -1923,7 +1930,10 @@ function ChannelsPanel({ channels, onOpenFlow }) {
 
   return (
     <aside className="channels-panel glass">
-      <h3>Channels <span className="muted">({channels.length})</span></h3>
+      <h3 className="cp-head">
+        <span className="cp-head-dot" aria-hidden="true" />
+        <span className="cp-repo" title={repo}>{repo}</span>
+      </h3>
       {channels.length === 0 ? (
         <p className="muted small cp-empty">
           No channels detected — this service has no inbound or outbound integration points.

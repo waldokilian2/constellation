@@ -971,6 +971,27 @@ async def tool_trace(pid: str, from_method: str, to_method: str):
     return execute_tool(graph, "trace_path", {"from_method": from_method, "to_method": to_method})
 
 
+@app.get("/api/projects/{pid}/tools/orphans")
+async def tool_orphans(pid: str):
+    """Producers with no consumer + consumers with no producer (message channels)."""
+    graph = _load_graph(pid)
+    return execute_tool(graph, "find_orphans", {})
+
+
+@app.get("/api/projects/{pid}/tools/cycles")
+async def tool_cycles(pid: str):
+    """Repo-level dependency cycles (A->B->A via channel edges)."""
+    graph = _load_graph(pid)
+    return execute_tool(graph, "find_cycles", {})
+
+
+@app.get("/api/projects/{pid}/tools/dead_code")
+async def tool_dead_code(pid: str):
+    """Possible dead code: unreachable methods, thin handlers, isolated repos."""
+    graph = _load_graph(pid)
+    return execute_tool(graph, "find_dead_code", {})
+
+
 # ── Static frontend ────────────────────────────────────────────────
 
 # Vite builds to web/dist/. In production, server.py serves the built

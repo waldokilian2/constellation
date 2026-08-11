@@ -18,7 +18,7 @@ import argparse
 import sys
 
 from .entry_detector import EntryPointDetector
-from .call_graph import CallGraphBuilder
+from .call_graph import CallGraphBuilder, _is_trivial_definition
 from .cross_repo import CrossRepoLinker
 from .symbol_index import SymbolIndex
 from .models import ConstellationGraph, CallNode, ConfidenceTag
@@ -87,6 +87,10 @@ class ConstellationEngine:
             if entry_method:
                 ep.call_tree = builder.build_tree(ep, entry_method)
                 ep.metrics = builder.compute_metrics(ep.call_tree)
+                # Genuine no-op? (body has no non-trivial calls). More accurate
+                # than total_nodes, which undercounts when the enclosing class
+                # can't be resolved. Consumed by find_dead_code.
+                ep.metrics["thin"] = builder.is_noop_entry(entry_method.node)
             else:
                 ep.call_tree = CallNode(
                     method=f"{ep.class_name}.{ep.method}",
@@ -95,7 +99,7 @@ class ConstellationEngine:
                     class_name=ep.class_name,
                     confidence=ConfidenceTag.EXTRACTED.value,
                 )
-                ep.metrics = {"depth": 0, "total_nodes": 1, "unique_files": 1, "branch_count": 0}
+                ep.metrics = {"depth": 0, "total_nodes": 1, "unique_files": 1, "branch_count": 0, "thin": False}
 
         # ── Phase 5: cross-repo linking ─────────────────────────────
         print(f"\n[link] Finding cross-repo connections...")
@@ -103,13 +107,47 @@ class ConstellationEngine:
         links = linker.link(all_entry_points, all_producers)
         print(f"[link] Found {len(links)} cross-repo links")
 
-        # ── Phase 6: assemble graph ─────────────────────────────────
+        # ── Phase 6: dead-code analysis (full method reachability) ──
+        # Walk the ENTIRE call graph from every entry point (no depth/node cap,
+        # unlike the display trees) so deep-but-reachable methods aren't flagged.
+        reached = builder.compute_reachable(all_entry_points)
+        # Candidate pool = indexed methods minus pure-contract declarations.
+        # Interface methods have no body — they're contracts, not dead code, so
+        # they can never be "unreachable" in a meaningful sense.
+        candidate_methods = []
+        for m in index.methods:
+            ci = index.class_for_method(m)
+            if ci and ci.kind == "interface":
+                continue
+            candidate_methods.append(m)
+        methods_total = len(candidate_methods)
+        unreachable: list[dict] = []
+        for m in candidate_methods:
+            key = f"{m.class_simple}.{m.name}@{m.file}:{m.line}"
+            if key in reached:
+                continue
+            if _is_trivial_definition(m.name):
+                continue
+            unreachable.append({
+                "id": f"{m.repo}:{m.class_simple}.{m.name}",
+                "repo": m.repo,
+                "class_name": m.class_simple,
+                "method": m.name,
+                "file": m.file,
+                "line": m.line,
+            })
+        print(f"[scan] {len(unreachable)} of {methods_total} methods unreachable "
+              f"(dead-code candidates)")
+
+        # ── Phase 7: assemble graph ─────────────────────────────────
         graph = ConstellationGraph(
             repos=repo_names,
             repo_roots=repo_roots,
             entry_points=all_entry_points,
             producers=all_producers,
             cross_repo_links=links,
+            methods_total=methods_total,
+            unreachable_methods=unreachable,
             generated_at=datetime.now(timezone.utc).isoformat(),
             engine_version="0.2.0",
         )

@@ -2617,12 +2617,15 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
     return m;
   }, [layout]);
 
-  // Edge geometry: curved bezier from right edge of source to left edge of target
-  // Skip edges (spanning >1 depth) get a strong vertical arc to avoid intermediate nodes
+  // Edge geometry: curved bezier between the inner-facing edges of the pair
+  // (an edge always attaches at the side of each node that faces the other,
+  // so a request + response pair share the same attachment points). Skip edges
+  // (spanning >1 depth) get a strong vertical arc to avoid intermediate nodes.
   const edgeGeom = (a, b, edgeIndex, totalEdges, isSkip) => {
     const NODE_HALF_W = 85;
-    const start = { x: a.x + NODE_HALF_W, y: a.y };
-    const end = { x: b.x - NODE_HALF_W, y: b.y };
+    const forward = b.x >= a.x;
+    const start = { x: a.x + (forward ? NODE_HALF_W : -NODE_HALF_W), y: a.y };
+    const end = { x: b.x - (forward ? NODE_HALF_W : -NODE_HALF_W), y: b.y };
     const dx = end.x - start.x;
 
     if (isSkip) {
@@ -2636,14 +2639,14 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
       return { mid, path };
     }
 
-    // Normal adjacent edge: gentle S-curve. Parallel/opposite edges (request +
-    // response round-trips) separate vertically around the axis.
-    const sep = totalEdges > 1 ? (edgeIndex - (totalEdges - 1) / 2) * 26 : 0;
-    const midY = (start.y + end.y) / 2 + sep;
-    const cp1 = { x: start.x + dx * 0.4, y: start.y + sep };
-    const cp2 = { x: end.x - dx * 0.4, y: end.y + sep };
+    // Parallel/opposite edges (request + response round-trips) bow apart
+    // vertically around the axis; single edges stay on it.
+    const sep = totalEdges > 1 ? (edgeIndex - (totalEdges - 1) / 2) * 2 : 0;
+    const bend = sep * Math.min(72, Math.max(30, Math.abs(dx) * 0.22));
+    const cp1 = { x: start.x + dx * 0.35, y: start.y + bend };
+    const cp2 = { x: end.x - dx * 0.35, y: end.y + bend };
     const path = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y} ${cp2.x} ${cp2.y} ${end.x} ${end.y}`;
-    const mid = { x: start.x + dx / 2, y: midY };
+    const mid = { x: start.x + dx / 2, y: (start.y + end.y) / 2 + bend * 0.75 };
     return { mid, path };
   };
 

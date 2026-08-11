@@ -551,7 +551,14 @@ function detectFlows(graph) {
         if (!ce) return;
         if (ce.repo === entry.repo) return;
         const prod = (httpProducersByRepo[entry.repo] || []).find((p) => p.channel === ch);
-        consumers.push({ channel: ch, kind: "http", verb: (prod && prod.verb) || "", entryId: cid });
+        // The producer's response_type names what comes back — sync calls are
+        // round-trips, and the label should say so.
+        let responseType = "";
+        if (prod) {
+          const pobj = (graph.producers || []).find((p) => p.id === prod.producerId);
+          responseType = (pobj && pobj.response_type) || "";
+        }
+        consumers.push({ channel: ch, kind: "http", verb: (prod && prod.verb) || "", responseType, entryId: cid });
       });
     });
 
@@ -560,7 +567,7 @@ function detectFlows(graph) {
       const childEntry = entryById[c.entryId];
       const childStep = buildSteps(childEntry, nextVisited);
       if (!childStep) return null;
-      return { channel: c.channel, kind: c.kind, verb: c.verb, step: childStep };
+      return { channel: c.channel, kind: c.kind, verb: c.verb, responseType: c.responseType || "", step: childStep };
     }).filter(Boolean);
 
     return {
@@ -2516,6 +2523,7 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
             channel: child.channel,
             kind: child.kind || "message",
             verb: child.verb || "",
+            responseType: child.responseType || "",
           });
         }
         walk(child.step, depth + 1);
@@ -2707,11 +2715,15 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
             const idx = edgePairIndex(pairKey);
             const g = edgeGeom(a, b, idx, total, isSkip);
             const isSync = e.kind === "http";
-            const label = isSync && e.verb ? e.verb + " " + e.channel : e.channel;
+            // Sync calls are round-trips: the request goes out and the response
+            // comes back. Double-headed arrow + response type in the label.
+            const label = isSync
+              ? (e.verb ? e.verb + " " : "") + e.channel + (e.responseType ? " → " + e.responseType : "")
+              : e.channel;
             const pillW = label.length * 6.5 + 22;
             return (
               <g key={"fe-" + i}>
-                <path d={g.path} fill="none" stroke={isSync ? "#00e0a8" : "#00d4ff"} strokeWidth={isSync ? 2.2 : 2} opacity={isSkip ? "0.4" : "0.55"} markerEnd={isSync ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
+                <path d={g.path} fill="none" stroke={isSync ? "#00e0a8" : "#00d4ff"} strokeWidth={isSync ? 2.2 : 2} opacity={isSkip ? "0.4" : "0.55"} markerStart={isSync ? "url(#flow-arrow-sync)" : undefined} markerEnd={isSync ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
                 <g className={"edge-label-pill" + (isSync ? " sync" : "")} transform={`translate(${g.mid.x}, ${g.mid.y})`}>
                   <rect className="edge-label-glow" x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
                   <rect className="edge-label-bg" x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />
@@ -2796,6 +2808,7 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
             channel: child.channel,
             kind: child.kind || "message",
             verb: child.verb || "",
+            responseType: child.responseType || "",
             targetRepo: child.step.repo,
             targetMethod: child.step.method,
           });
@@ -3128,7 +3141,9 @@ function FlowTraceView({ flow, repo, graph, dims, onHome, onBack, onSelectNode, 
               </div>
               {downstream.map((d, i) => (
                 <div key={i} className="exit-point-flow">
-                  <span className="exit-point-channel">{d.kind === "http" && d.verb ? d.verb + " " + d.channel : d.channel}</span>
+                  <span className="exit-point-channel">{d.kind === "http"
+                    ? (d.verb ? d.verb + " " : "") + d.channel + (d.responseType ? " → " + d.responseType : "")
+                    : d.channel}</span>
                   <span className="exit-point-arrow">→</span>
                   <span className="exit-point-target">{d.targetRepo}</span>
                   <span className="exit-point-next">▶ {d.targetMethod}</span>

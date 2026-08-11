@@ -63,6 +63,25 @@ def test_thin_handler_detected_healthy_not():
     assert thin == ["thin"], thin  # 'full' (5 nodes) must NOT be flagged
 
 
+def test_thin_flag_overrides_node_count():
+    """The engine 'thin' flag (genuine no-op) takes precedence over the
+    total_nodes heuristic — so a body with calls isn't a false thin hit, and a
+    flagged stub stays flagged regardless of node count."""
+    from engine.graph_tools import find_dead_code
+    g = {
+        "repos": ["a"],
+        "entry_points": [
+            {"id": "a:Stub.s", "repo": "a", "type": "scheduled-task", "channel": "cron",
+             "method": "s", "metrics": {"total_nodes": 5, "depth": 2, "thin": True}},
+            {"id": "a:Real.r", "repo": "a", "type": "kafka-consumer", "channel": "t",
+             "method": "r", "metrics": {"total_nodes": 1, "depth": 0, "thin": False}},
+        ],
+        "producers": [], "cross_repo_links": [],
+    }
+    d = find_dead_code(g)
+    assert [h["method"] for h in d["thin_handlers"]] == ["s"]
+
+
 def test_isolated_repos():
     d = __import__("engine.graph_tools", fromlist=["find_dead_code"]).find_dead_code(_graph())
     assert d["isolated_repos"] == ["lonely"], d["isolated_repos"]

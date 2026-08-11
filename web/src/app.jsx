@@ -775,7 +775,12 @@ function detectDeadCode(graph) {
   const methodsTotal = graph.methods_total || 0;
 
   const thin_handlers = (graph.entry_points || [])
-    .filter((ep) => (((ep.metrics || {}).total_nodes) || 0) <= 1)
+    .filter((ep) => {
+      const m = ep.metrics || {};
+      const t = m.thin;
+      // "thin" is engine-computed (genuine no-op); fall back to node count for old graphs.
+      return t === undefined ? (m.total_nodes || 0) <= 1 : !!t;
+    })
     .map((ep) => ({
       id: ep.id || "", repo: ep.repo || "", type: ep.type || "",
       channel: ep.channel || "", method: ep.method || "",

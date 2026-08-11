@@ -708,8 +708,13 @@ def find_dead_code(graph: dict) -> dict:
     thin_handlers: list[dict] = []
     for ep in graph.get("entry_points", []):
         metrics = ep.get("metrics") or {}
-        # total_nodes counts the root too, so <=1 means no resolved calls.
-        if metrics.get("total_nodes", 1) <= 1:
+        # "thin" is engine-computed: a genuine no-op (method body has no
+        # non-trivial calls). Fall back to the node-count heuristic for graphs
+        # generated before that flag existed.
+        is_thin = metrics.get("thin")
+        if is_thin is None:
+            is_thin = metrics.get("total_nodes", 1) <= 1
+        if is_thin:
             thin_handlers.append({
                 "id": ep.get("id", ""),
                 "repo": ep.get("repo", ""),

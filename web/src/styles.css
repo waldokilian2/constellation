@@ -2119,18 +2119,18 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 .gaps-card {
   display: flex; flex-direction: column; gap: 4px; text-align: left;
-  width: 100%;
+  width: 100%; min-width: 0; overflow-wrap: anywhere;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 12px; padding: 12px 14px; cursor: pointer;
   transition: border-color .2s, background .2s, transform .15s;
 }
 .gaps-card:hover { border-color: var(--border-strong); background: rgba(255, 255, 255, .04); transform: translateY(-1px); }
-.gaps-card-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.gaps-channel { font-size: 13px; color: var(--amber); }
-.gaps-repo { font-size: 11px; color: var(--text-dim); }
+.gaps-card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.gaps-channel { font-size: 13px; color: var(--amber); min-width: 0; overflow-wrap: anywhere; }
+.gaps-repo { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
 .gaps-card-sub {
   font-size: 11px; color: var(--text-faint);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  overflow-wrap: anywhere; word-break: break-all; white-space: normal;
 }
 .gaps-card-tag {
   align-self: flex-start; font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
@@ -2193,8 +2193,9 @@ code { font-family: var(--mono); color: var(--cyan); }
 .gaps.dead .dead-bg {
   position: absolute; inset: 0; z-index: 0; pointer-events: none;
   background:
-    radial-gradient(45% 35% at 18% 22%, rgba(248,113,113,.10), transparent 60%),
-    radial-gradient(40% 40% at 82% 78%, rgba(148,163,184,.07), transparent 60%);
+    radial-gradient(50% 40% at 20% 18%, rgba(248,113,113,.18), transparent 62%),
+    radial-gradient(45% 45% at 82% 82%, rgba(239,68,68,.14), transparent 60%),
+    radial-gradient(70% 60% at 50% 50%, rgba(127,29,29,.08), transparent 72%);
 }
 .gaps.dead .gaps-scroll { position: relative; z-index: 1; }
 .broken-sats { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }

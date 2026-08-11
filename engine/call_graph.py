@@ -258,16 +258,20 @@ class CallGraphBuilder:
         # Work items: (method AST node, enclosing ClassInfo)
         queue: list[tuple[Node, Optional[ClassInfo]]] = []
 
-        # Roots: every entry point's method. Always record the root key (even
-        # when the AST node is missing) so a fallback entry point is never a
-        # false dead-code hit.
+        # Roots: every entry point's method. Key by the INDEXED method identity
+        # (declaration line) when we resolve it — ep.line is often the annotation
+        # line (@Schedule/@MessageListener/...), not the method line, so keying
+        # on ep.line would make the entry point itself look unreachable.
         for ep in entry_points:
-            reached.add(self._key(f"{ep.class_name}.{ep.method}", ep.file, ep.line))
             entry_methods = self.index.find_methods(ep.class_name, ep.method)
             em = next((m for m in entry_methods if m.repo == ep.repo and m.file == ep.file), None)
             if em and em.node:
+                reached.add(self._key(f"{em.class_simple}.{em.name}", em.file, em.line))
                 ci = self.index.class_by_loc(ep.repo, ep.file, ep.class_name)
                 queue.append((em.node, ci))
+            else:
+                # No AST node resolved — still record the entry so it isn't flagged.
+                reached.add(self._key(f"{ep.class_name}.{ep.method}", ep.file, ep.line))
 
         # Unbounded BFS — the global reached set terminates cycles; no depth or
         # node cap. Resolution mirrors _expand_node so reachability and the
@@ -309,3 +313,24 @@ class CallGraphBuilder:
                 if resolved.node:
                     queue.append((resolved.node, self.index.class_for_method(resolved)))
         return reached
+
+    def is_noop_entry(self, method_node: Node) -> bool:
+        """True if the method body has no non-trivial invocations — a genuine stub.
+
+        Distinct from build_tree's node count: build_tree stops expanding when
+        the enclosing class can't be resolved, leaving a bare root even for
+        methods that DO contain calls. This inspects the body directly so such
+        methods aren't mistaken for no-ops (thin-handler false positives).
+        """
+        body = self.parser.get_method_body(method_node)
+        if not body:
+            return True
+        for inv in self.parser.find_method_invocations(body):
+            parsed = self.parser.parse_method_invocation(inv)
+            name = parsed.get("method", "")
+            if not name:
+                continue
+            display = f"{parsed.get('receiver', '')}.{name}" if parsed.get("receiver") else name
+            if not self._is_trivial(display):
+                return False  # found a real call → not a no-op
+        return True

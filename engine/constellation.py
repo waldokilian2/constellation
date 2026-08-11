@@ -88,6 +88,10 @@ class ConstellationEngine:
             if entry_method and entry_method.node:
                 ep.call_tree = builder.build_tree(ep, entry_method.node)
                 ep.metrics = builder.compute_metrics(ep.call_tree)
+                # Genuine no-op? (body has no non-trivial calls). More accurate
+                # than total_nodes, which undercounts when the enclosing class
+                # can't be resolved. Consumed by find_dead_code.
+                ep.metrics["thin"] = builder.is_noop_entry(entry_method.node)
             else:
                 ep.call_tree = CallNode(
                     method=f"{ep.class_name}.{ep.method}",
@@ -96,7 +100,7 @@ class ConstellationEngine:
                     class_name=ep.class_name,
                     confidence="EXTRACTED",
                 )
-                ep.metrics = {"depth": 0, "total_nodes": 1, "unique_files": 1, "branch_count": 0}
+                ep.metrics = {"depth": 0, "total_nodes": 1, "unique_files": 1, "branch_count": 0, "thin": False}
 
         # ── Phase 5: cross-repo linking ─────────────────────────────
         print(f"\n[link] Finding cross-repo connections...")
@@ -108,9 +112,18 @@ class ConstellationEngine:
         # Walk the ENTIRE call graph from every entry point (no depth/node cap,
         # unlike the display trees) so deep-but-reachable methods aren't flagged.
         reached = builder.compute_reachable(all_entry_points)
-        methods_total = len(index.methods)
-        unreachable: list[dict] = []
+        # Candidate pool = indexed methods minus pure-contract declarations.
+        # Interface methods have no body — they're contracts, not dead code, so
+        # they can never be "unreachable" in a meaningful sense.
+        candidate_methods = []
         for m in index.methods:
+            ci = index.class_for_method(m)
+            if ci and ci.kind == "interface":
+                continue
+            candidate_methods.append(m)
+        methods_total = len(candidate_methods)
+        unreachable: list[dict] = []
+        for m in candidate_methods:
             key = f"{m.class_simple}.{m.name}@{m.file}:{m.line}"
             if key in reached:
                 continue

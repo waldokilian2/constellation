@@ -234,7 +234,8 @@ class ContextBuilder:
         sections.append(
             "You have tools available to explore the codebase in detail: "
             "search_code, find_callers, trace_path, get_channel_flow, "
-            "list_channels, get_node, get_source, get_architecture_overview. "
+            "list_channels, get_node, get_source, get_architecture_overview, "
+            "find_orphans, find_cycles, find_dead_code. "
             "Use them to answer specific questions accurately."
         )
 

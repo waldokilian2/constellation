@@ -19,6 +19,28 @@ MAX_DEPTH = 4
 MAX_NODES = 50  # Safety valve — don't build infinite trees
 
 
+def _is_trivial_definition(method_name: str) -> bool:
+    """Is a method *definition* structural boilerplate never worth flagging dead?
+
+    Narrower than :meth:`CallGraphBuilder._is_trivial` (which filters call
+    *edges* broadly — build/create/stream/…): here we only exclude Object
+    overrides and accessor-style names, so a genuinely dead ``build()`` or
+    ``handle()`` is not buried in noise.
+    """
+    trivial_exact = {"toString", "hashCode", "equals", "getClass"}
+    if not method_name:
+        return False
+    if method_name in trivial_exact:
+        return True
+    if method_name.startswith("get") and len(method_name) > 3:
+        return True
+    if method_name.startswith("set") and len(method_name) > 3:
+        return True
+    if method_name.startswith("is") and len(method_name) > 2:
+        return True
+    return False
+
+
 class CallGraphBuilder:
     """Builds execution path trees from entry points."""
 
@@ -222,3 +244,68 @@ class CallGraphBuilder:
             "unique_files": len(unique_files),
             "branch_count": branch_count,
         }
+
+    def compute_reachable(self, entry_points: list[EntryPoint]) -> set[str]:
+        """Full (unbounded) set of methods reachable from any entry point.
+
+        Unlike :meth:`build_tree` (depth/node-limited for display), this walks
+        the *entire* call graph so methods beyond the display depth limit
+        aren't falsely flagged as dead. Returns keys of the form
+        ``'{class}.{method}@{file}:{line}'`` (same scheme as :meth:`_key`).
+        Used for dead-code detection.
+        """
+        reached: set[str] = set()
+        # Work items: (method AST node, enclosing ClassInfo)
+        queue: list[tuple[Node, Optional[ClassInfo]]] = []
+
+        # Roots: every entry point's method. Always record the root key (even
+        # when the AST node is missing) so a fallback entry point is never a
+        # false dead-code hit.
+        for ep in entry_points:
+            reached.add(self._key(f"{ep.class_name}.{ep.method}", ep.file, ep.line))
+            entry_methods = self.index.find_methods(ep.class_name, ep.method)
+            em = next((m for m in entry_methods if m.repo == ep.repo and m.file == ep.file), None)
+            if em and em.node:
+                ci = self.index.class_by_loc(ep.repo, ep.file, ep.class_name)
+                queue.append((em.node, ci))
+
+        # Unbounded BFS — the global reached set terminates cycles; no depth or
+        # node cap. Resolution mirrors _expand_node so reachability and the
+        # displayed trees agree on what counts as an edge.
+        while queue:
+            node, enclosing_ci = queue.pop()
+            if enclosing_ci is None:
+                continue
+            body = self.parser.get_method_body(node)
+            if not body:
+                continue
+            local_types = {
+                p["name"]: p["type"]
+                for p in self.parser.get_method_parameters(node)
+                if p.get("name") and p.get("type")
+            }
+            local_types.update(self.parser.get_local_variables(body))
+            for inv in self.parser.find_method_invocations(body):
+                parsed = self.parser.parse_method_invocation(inv)
+                method_name = parsed["method"]
+                receiver = parsed["receiver"]
+                arity = len(parsed["args"])
+                if not method_name:
+                    continue
+                display = f"{receiver}.{method_name}" if receiver else method_name
+                if self._is_trivial(display):
+                    continue
+                resolved, _ambiguous, _recv = self.index.resolve_call(
+                    enclosing_ci, receiver, method_name, arity=arity, local_types=local_types
+                )
+                if not resolved:
+                    continue  # unresolved call → no edge to follow
+                rkey = self._key(
+                    f"{resolved.class_simple}.{resolved.name}", resolved.file, resolved.line
+                )
+                if rkey in reached:
+                    continue
+                reached.add(rkey)
+                if resolved.node:
+                    queue.append((resolved.node, self.index.class_for_method(resolved)))
+        return reached

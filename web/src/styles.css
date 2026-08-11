@@ -12,6 +12,7 @@
   --border-strong: rgba(255, 255, 255, 0.16);
   --cyan: #00d4ff;
   --purple: #a855f7;
+  --amber: #f5a524;
   --text: #e8eefc;
   --text-dim: #8b97b5;
   --text-faint: #566079;
@@ -2025,4 +2026,204 @@ code { font-family: var(--mono); color: var(--cyan); }
   background: rgba(248,113,113,.08); border: 1px solid rgba(248,113,113,.3);
   padding: 10px 12px; border-radius: 10px;
 }
+
+/* ============================================================
+   Issue #14 — Gaps / orphans: galaxy ring, Gaps view, source modal
+   Amber = an unconnected channel (surface, don't assert a bug).
+   ============================================================ */
+
+/* ── Galaxy: orphan repo ring (at-a-glance) ── */
+.repo-node.orphan {
+  border-color: rgba(245, 165, 36, .75);
+  box-shadow: 0 0 34px rgba(245, 165, 36, .35), inset 0 0 24px rgba(245, 165, 36, .14);
+}
+.repo-node.orphan::after {
+  border-color: rgba(245, 165, 36, .5);
+  animation: orphan-pulse 2.6s ease-in-out infinite, orbit 26s linear infinite;
+}
+.repo-wrap:hover .repo-node.orphan {
+  border-color: var(--amber);
+  box-shadow: 0 0 52px rgba(245, 165, 36, .55), inset 0 0 30px rgba(245, 165, 36, .22);
+}
+@keyframes orphan-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 165, 36, 0); }
+  50%      { box-shadow: 0 0 0 6px rgba(245, 165, 36, .12); }
+}
+
+/* ── Galaxy view-top: Gaps pill ── */
+.gaps-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--amber);
+  background: rgba(245, 165, 36, .1);
+  border: 1px solid rgba(245, 165, 36, .35);
+  padding: 5px 12px; border-radius: 999px;
+  cursor: pointer; transition: background .2s, border-color .2s;
+}
+.gaps-pill:hover { background: rgba(245, 165, 36, .18); border-color: var(--amber); }
+.gaps-pill-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--amber); box-shadow: 0 0 8px rgba(245, 165, 36, .8);
+}
+
+/* ── Galaxy: repo orphan hover popup (reuses .edge-popup shell) ── */
+.repo-orphan-popup { min-width: 230px; }
+.repo-orphan-tag {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--amber); margin-left: auto;
+}
+.repo-orphan-line { display: flex; flex-direction: column; gap: 2px; font-size: 11px; }
+.repo-orphan-kind { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.repo-orphan-kind.prod { color: var(--amber); }
+.repo-orphan-kind.cons { color: #fcd34d; }
+.repo-orphan-chans { color: var(--text); }
+
+/* ── Gaps view ── */
+.gaps { height: 100%; display: flex; flex-direction: column; }
+/* view-top is absolutely positioned over the scroll area, so push the content
+   down below it and mask anything that scrolls up underneath. */
+.gaps .view-top { background: linear-gradient(180deg, var(--bg) 75%, rgba(10,14,26,0)); }
+.gaps-scroll {
+  flex: 1; overflow-y: auto;
+  padding: 64px max(28px, calc((100vw - 980px) / 2)) 60px;
+  display: flex; flex-direction: column; gap: 26px;
+}
+.gaps-section { display: flex; flex-direction: column; gap: 10px; }
+.gaps-section-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer; user-select: none; border-radius: 8px;
+  transition: background .15s, color .15s;
+}
+.gaps-section-head:hover { background: rgba(255,255,255,.04); }
+.gaps-section-head:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
+.gaps-section-title { font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: .01em; }
+.gaps-section-count {
+  font-size: 11px; color: var(--text-dim);
+  background: rgba(255, 255, 255, .05); padding: 1px 8px; border-radius: 999px;
+}
+.gaps-empty {
+  grid-column: 1 / -1;
+  font-size: 12.5px; color: var(--text-dim); font-style: italic;
+  padding: 10px 14px; border: 1px dashed var(--border-strong); border-radius: 10px;
+}
+.gaps-chevron {
+  display: inline-block; font-size: 11px; color: var(--text-dim);
+  transition: transform .18s ease; transform: rotate(0deg);
+}
+.gaps-chevron.open { transform: rotate(90deg); }
+/* Cards lay out side-by-side, wrapping on narrow widths. */
+.gaps-section-body {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px; padding-top: 4px;
+}
+.gaps-card {
+  display: flex; flex-direction: column; gap: 4px; text-align: left;
+  width: 100%;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 14px; cursor: pointer;
+  transition: border-color .2s, background .2s, transform .15s;
+}
+.gaps-card:hover { border-color: var(--border-strong); background: rgba(255, 255, 255, .04); transform: translateY(-1px); }
+.gaps-card-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gaps-channel { font-size: 13px; color: var(--amber); }
+.gaps-repo { font-size: 11px; color: var(--text-dim); }
+.gaps-card-sub {
+  font-size: 11px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gaps-card-tag {
+  align-self: flex-start; font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
+  padding: 2px 8px; border-radius: 999px; margin-top: 4px;
+}
+.gaps-card-tag.prod { color: var(--amber); background: rgba(245, 165, 36, .12); border: 1px solid rgba(245, 165, 36, .3); }
+.gaps-card-tag.cons { color: #fcd34d; background: rgba(252, 211, 77, .1); border: 1px solid rgba(252, 211, 77, .28); }
+.gaps-card.cycle { cursor: default; }
+.gaps-card.cycle:hover { transform: none; }
+.gaps-cycle-chain { font-size: 13px; color: var(--text); }
+.gaps-cycle-chans { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+
+/* ── Source modal (producer source viewer — reuses .dp-* / .code classes) ── */
+.source-modal-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(5, 8, 16, .7);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center; padding: 40px;
+}
+.source-modal {
+  width: min(900px, 100%); max-height: 82vh;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border-strong); border-radius: 16px; overflow: hidden;
+}
+.source-modal .code { max-height: none; }
+
+/* ── Dead-code view (reuses .gaps-*; rose accent distinguishes it from amber Gaps) ── */
+.gaps-channel.dead-channel { color: #fb7185; }
+.dead-note {
+  color: var(--text-dim);
+  font-style: normal;
+  border-color: rgba(251, 191, 36, .35);
+  background: rgba(251, 191, 36, .06);
+}
+
+/* ── Info tips (hover/focus explanation next to section headings) ── */
+.gaps-section-title { display: inline-flex; align-items: center; }
+.info-tip { position: relative; display: inline-flex; margin-left: 6px; vertical-align: middle; }
+.info-tip-icon {
+  font-size: 13px; font-style: italic; font-family: Georgia, "Times New Roman", serif;
+  color: var(--text-dim); cursor: help;
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  display: inline-flex; align-items: center; justify-content: center;
+  line-height: 1; transition: color .15s, border-color .15s, transform .15s;
+}
+.info-tip-icon:hover, .info-tip-icon:focus { color: var(--cyan); border-color: var(--cyan); outline: none; transform: scale(1.12); }
+.info-tip-bubble {
+  position: absolute; top: 26px; left: 50%; transform: translateX(-50%);
+  width: 250px; max-width: 80vw; padding: 10px 12px;
+  background: rgba(10,14,26,.97); border: 1px solid var(--border-strong);
+  border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.6);
+  color: var(--text); font-size: 11.5px; line-height: 1.45; text-align: left;
+  opacity: 0; visibility: hidden; transition: opacity .15s; z-index: 80; pointer-events: none;
+}
+.info-tip:hover .info-tip-bubble, .info-tip:focus-within .info-tip-bubble { opacity: 1; visibility: visible; }
+
+/* ── Dead-code view: distinct background + broken-satellite motif ── */
+.gaps.dead { position: relative; }
+.gaps.dead .dead-bg {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background:
+    radial-gradient(45% 35% at 18% 22%, rgba(248,113,113,.10), transparent 60%),
+    radial-gradient(40% 40% at 82% 78%, rgba(148,163,184,.07), transparent 60%);
+}
+.gaps.dead .gaps-scroll { position: relative; z-index: 1; }
+.broken-sats { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+.broken-sat {
+  position: absolute; opacity: 0; user-select: none;
+  color: var(--c, #f87171);
+  text-shadow: 0 0 7px var(--c, #f87171), 0 0 2px var(--c, #f87171);
+  animation-name: sat-flicker, sat-drift;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out, linear;
+  will-change: opacity, transform;
+}
+@keyframes sat-flicker {
+  0%, 100% { opacity: 0; }
+  4% { opacity: var(--peak, .5); }
+  10% { opacity: calc(var(--peak, .5) * .5); }
+  15% { opacity: var(--peak, .5); }
+  22% { opacity: 0; }
+  44% { opacity: 0; }
+  48% { opacity: calc(var(--peak, .5) * .7); }
+  55% { opacity: 0; }
+  72% { opacity: 0; }
+  76% { opacity: var(--peak, .5); }
+  83% { opacity: calc(var(--peak, .5) * .4); }
+  90% { opacity: 0; }
+}
+@keyframes sat-drift {
+  0%, 100% { transform: translate(0,0) rotate(var(--rot, -6deg)); }
+  50% { transform: translate(var(--dx, 22px), var(--dy, -14px)) rotate(calc(var(--rot, -6deg) * -1.2)); }
+}
+
 

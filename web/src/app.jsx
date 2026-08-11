@@ -339,6 +339,10 @@ function Header({ graph, mode, onModeChange, projectName, onHome, stale }) {
             className={"mode-btn" + (mode === "flows" ? " active" : "")}
             onClick={() => onModeChange("flows")}
           >Flows</button>
+          <button
+            className={"mode-btn" + (mode === "dead" ? " active" : "")}
+            onClick={() => onModeChange("dead")}
+          >Dead code</button>
         </div>
       )}
       <div className="meta">
@@ -632,8 +636,170 @@ function detectFlows(graph) {
   return flows;
 }
 
+/* ---------------- Orphan / cycle detection ---------------- */
+// Mirror of engine/graph_tools.py find_orphans & find_cycles — keep in sync.
+// Both derive the same facts from the same in-memory graph, so the galaxy ring
+// + Gaps view (client-side) and the REST/AI tool-loop (engine) read the same
+// data. Message channels only; http-call producers are excluded on both sides.
+const MSG_CONSUMER_TYPES = new Set([
+  "kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer", "event-listener",
+]);
+const CHANNEL_SENTINELS = new Set(["", "unknown", "unknown-event"]);
+const cleanChannel = (ch) => (typeof ch === "string" ? ch.trim() : "");
+const isValidChannel = (ch) => !!ch && !CHANNEL_SENTINELS.has(ch);
+
+function detectOrphans(graph) {
+  const eps = graph.entry_points || [];
+  const producers = graph.producers || [];
+
+  const consumed = new Set();
+  for (const ep of eps) {
+    if (!MSG_CONSUMER_TYPES.has(ep.type)) continue;
+    const ch = cleanChannel(ep.channel);
+    if (isValidChannel(ch)) consumed.add(ch);
+  }
+
+  const produced = new Set();
+  const orphan_producers = [];
+  for (const p of producers) {
+    if (p.type === "http-call") continue;
+    const ch = cleanChannel(p.channel);
+    if (!isValidChannel(ch)) continue;
+    produced.add(ch);
+    if (!consumed.has(ch)) {
+      orphan_producers.push({
+        id: p.id || "", repo: p.repo || repoFromId(p.id), channel: ch,
+        method: p.method || "", type: p.type || "", file: p.file || "", line: p.line || 0,
+      });
+    }
+  }
+
+  const orphan_consumers = [];
+  for (const ep of eps) {
+    if (!MSG_CONSUMER_TYPES.has(ep.type)) continue;
+    const ch = cleanChannel(ep.channel);
+    if (!isValidChannel(ch)) continue;
+    if (!produced.has(ch)) {
+      orphan_consumers.push({
+        id: ep.id || "", repo: ep.repo || "", channel: ch,
+        method: ep.method || "", type: ep.type || "", file: ep.file || "", line: ep.line || 0,
+      });
+    }
+  }
+
+  const orphan_channels = Array.from(new Set([
+    ...orphan_producers.map((p) => p.channel),
+    ...orphan_consumers.map((c) => c.channel),
+  ])).sort();
+
+  return {
+    orphan_producers, orphan_consumers,
+    summary: {
+      orphan_producers: orphan_producers.length,
+      orphan_consumers: orphan_consumers.length,
+      orphan_channels,
+    },
+  };
+}
+
+function detectCycles(graph) {
+  const links = graph.cross_repo_links || [];
+  // adj: Map<repo, Map<repo, Set<channel>>>
+  const adj = new Map();
+  const nbrsOf = (a) => { if (!adj.has(a)) adj.set(a, new Map()); return adj.get(a); };
+  for (const link of links) {
+    const chans = [link.channel || ""];
+    const prodRepos = Array.from(new Set((link.producers || []).map(repoFromId)));
+    const consRepos = Array.from(new Set((link.consumers || []).map(repoFromId)));
+    for (const pr of prodRepos) {
+      for (const cr of consRepos) {
+        if (pr === cr) continue; // self-loop is not a cross-repo cycle
+        const nbrs = nbrsOf(pr);
+        if (!nbrs.has(cr)) nbrs.set(cr, new Set());
+        for (const ch of chans) nbrs.get(cr).add(ch);
+      }
+    }
+  }
+
+  const nodeSet = new Set(adj.keys());
+  for (const nbrs of adj.values()) for (const n of nbrs.keys()) nodeSet.add(n);
+  const nodes = Array.from(nodeSet).sort();
+  const index = new Map(nodes.map((r, i) => [r, i]));
+
+  const cycles = [];
+  const seen = new Set();
+
+  const channelsAlong = (path) => {
+    const s = new Set();
+    for (let i = 0; i < path.length - 1; i++) {
+      const nbrs = adj.get(path[i]);
+      if (nbrs && nbrs.has(path[i + 1])) for (const ch of nbrs.get(path[i + 1])) s.add(ch);
+    }
+    return Array.from(s).sort();
+  };
+
+  // DFS anchored at each node's lowest sorted index — each elementary cycle
+  // surfaces exactly once (from its lowest-indexed member).
+  const dfs = (start, cur, path, onPath) => {
+    const nbrs = adj.get(cur);
+    if (!nbrs) return;
+    for (const nxt of nbrs.keys()) {
+      if (index.get(nxt) < index.get(start)) continue;
+      if (nxt === start) {
+        const closed = [...path, start];
+        const sig = closed.join(">");
+        if (!seen.has(sig)) {
+          seen.add(sig);
+          cycles.push({ repos: closed, length: closed.length - 1, channels: channelsAlong(closed) });
+        }
+      } else if (!onPath.has(nxt)) {
+        onPath.add(nxt);
+        dfs(start, nxt, [...path, nxt], onPath);
+        onPath.delete(nxt);
+      }
+    }
+  };
+
+  for (const start of nodes) dfs(start, start, [start], new Set([start]));
+
+  const repos_in_cycles = Array.from(new Set(cycles.flatMap((c) => c.repos))).sort();
+  return { cycles, summary: { cycle_count: cycles.length, repos_in_cycles } };
+}
+
+/* ---------------- Dead-code detection ---------------- */
+// Mirror of engine/graph_tools.py find_dead_code — keep in sync. Unreachable
+// methods come from engine-precomputed graph fields (full call-graph
+// reachability); thin handlers + isolated repos are derived here.
+function detectDeadCode(graph) {
+  const unreachable = graph.unreachable_methods || [];
+  const methodsTotal = graph.methods_total || 0;
+
+  const thin_handlers = (graph.entry_points || [])
+    .filter((ep) => (((ep.metrics || {}).total_nodes) || 0) <= 1)
+    .map((ep) => ({
+      id: ep.id || "", repo: ep.repo || "", type: ep.type || "",
+      channel: ep.channel || "", method: ep.method || "",
+      file: ep.file || "", line: ep.line || 0,
+    }));
+
+  const linked = new Set();
+  (graph.cross_repo_links || []).forEach((l) => {
+    (l.producers || []).forEach((id) => linked.add(repoFromId(id)));
+    (l.consumers || []).forEach((id) => linked.add(repoFromId(id)));
+  });
+  const isolated_repos = (graph.repos || []).filter((r) => !linked.has(r));
+
+  return {
+    unreachable_methods: unreachable,
+    thin_handlers,
+    isolated_repos,
+    methods_total: methodsTotal,
+    method_index_available: "unreachable_methods" in graph,
+  };
+}
+
 /* ---------------- Galaxy View ---------------- */
-function GalaxyView({ graph, dims, onSelectRepo }) {
+function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps }) {
   const repos = graph.repos || [];
   const entryPoints = graph.entry_points || [];
   const links = graph.cross_repo_links || [];
@@ -641,6 +807,22 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
 
   // Hovered direction edge → bundled message details shown in a popup
   const [hoverEdge, setHoverEdge] = useState(null); // { items, from, to, mid:{x,y} }
+  // Hovered repo with orphans → "why" popup
+  const [hoverRepo, setHoverRepo] = useState(null); // { repo, x, y, prod:[], cons:[] }
+
+  // Repos that own ≥1 orphan producer/consumer — drives the amber at-a-glance ring.
+  const orphanByRepo = useMemo(() => {
+    const o = detectOrphans(graph);
+    const m = {};
+    const add = (repo, kind, channel) => {
+      if (!m[repo]) m[repo] = { prod: [], cons: [] };
+      if (!m[repo][kind].includes(channel)) m[repo][kind].push(channel);
+    };
+    o.orphan_producers.forEach((p) => add(p.repo, "prod", p.channel));
+    o.orphan_consumers.forEach((c) => add(c.repo, "cons", c.channel));
+    return m;
+  }, [graph]);
+  const gapCount = Object.keys(orphanByRepo).length;
 
   const epCount = useMemo(() => {
     const m = {};
@@ -742,6 +924,12 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
         <div className="view-hint">
           {repos.length} repos · {entryPoints.length} entry points · {(graph.producers || []).length} producers
         </div>
+        {gapCount > 0 && (
+          <button className="gaps-pill" onClick={onOpenGaps} title="Unconnected channels & dependency cycles">
+            <span className="gaps-pill-dot" />
+            {gapCount} repo{gapCount === 1 ? "" : "s"} with gaps
+          </button>
+        )}
       </div>
       <div
         className="canvas pan-canvas"
@@ -813,9 +1001,17 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
         {positions.map((p) => {
           const types = repoTypes[p.name] || [];
           const orbitR = p.r + 18;
+          const gaps = orphanByRepo[p.name]; // {prod:[], cons:[]} | undefined
           return (
-            <div className="repo-wrap" key={p.name} style={{ left: p.x, top: p.y }} onClick={(e) => onSelectRepo(p.name, e)}>
-              <button className="repo-node" style={{ width: p.r * 2, height: p.r * 2 }}>
+            <div
+              className="repo-wrap"
+              key={p.name}
+              style={{ left: p.x, top: p.y }}
+              onClick={(e) => onSelectRepo(p.name, e)}
+              onMouseEnter={() => gaps && setHoverRepo({ repo: p.name, x: p.x, y: p.y, prod: gaps.prod, cons: gaps.cons })}
+              onMouseLeave={() => setHoverRepo(null)}
+            >
+              <button className={"repo-node" + (gaps ? " orphan" : "")} style={{ width: p.r * 2, height: p.r * 2 }}>
                 <div className="repo-count-wrap">
                   <span className="repo-count">{p.count}</span>
                   <span className="repo-count-label">entry point{p.count === 1 ? "" : "s"}</span>
@@ -878,9 +1074,366 @@ function GalaxyView({ graph, dims, onSelectRepo }) {
             </div>
           );
         })()}
+        {hoverRepo && (() => {
+          const px = pz.viewport.x + hoverRepo.x * pz.viewport.zoom;
+          const py = Math.max(150, pz.viewport.y + hoverRepo.y * pz.viewport.zoom);
+          return (
+            <div className="edge-popup repo-orphan-popup" style={{ left: px, top: py }}>
+              <div className="edge-popup-title">
+                <span className="mono">{hoverRepo.repo}</span>
+                <span className="repo-orphan-tag">gaps</span>
+              </div>
+              {hoverRepo.prod.length > 0 && (
+                <div className="repo-orphan-line">
+                  <span className="repo-orphan-kind prod">produces, no consumer</span>
+                  <span className="mono repo-orphan-chans">{hoverRepo.prod.join(", ")}</span>
+                </div>
+              )}
+              {hoverRepo.cons.length > 0 && (
+                <div className="repo-orphan-line">
+                  <span className="repo-orphan-kind cons">consumes, no producer</span>
+                  <span className="mono repo-orphan-chans">{hoverRepo.cons.join(", ")}</span>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
       <Legend types={usedTypes} />
       {pz.zoomControls}
+    </div>
+  );
+}
+
+/* ---------------- Gaps / Orphans View ---------------- */
+// Lists orphan producers, orphan consumers, and repo dependency cycles.
+// Data comes from detectOrphans/detectCycles (client-side mirrors of the
+// engine tools); entries link into the existing Path view (consumers) or a
+// source viewer (producers).
+/* ---------------- Info tip (hover/focus explanation) ---------------- */
+// Small ⓘ next to a heading; reveals a styled bubble on hover or keyboard focus.
+function InfoTip({ text }) {
+  // Stop propagation so clicking the tip inside a collapsible header doesn't
+  // also toggle the section.
+  return (
+    <span className="info-tip" onClick={(e) => e.stopPropagation()}>
+      <span className="info-tip-icon" tabIndex={0} role="button" aria-label="What this means">i</span>
+      <span className="info-tip-bubble">{text}</span>
+    </span>
+  );
+}
+
+/* ---------------- Collapsible section (Gaps + Dead-code) ---------------- */
+function CollapsibleSection({ title, count, help, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const toggle = () => setOpen((o) => !o);
+  return (
+    <section className="gaps-section">
+      <header
+        className="gaps-section-head"
+        onClick={toggle}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+        }}
+      >
+        <span className="gaps-section-title">
+          <span className={"gaps-chevron" + (open ? " open" : "")} aria-hidden="true">▸</span>
+          {title}{help && <InfoTip text={help} />}
+        </span>
+        <span className="gaps-section-count">{count}</span>
+      </header>
+      {open && <div className="gaps-section-body">{children}</div>}
+    </section>
+  );
+}
+
+function GapsView({ graph, onBack, onOpenEntry, onOpenSource }) {
+  const orphans = useMemo(() => detectOrphans(graph), [graph]);
+  const cyc = useMemo(() => detectCycles(graph), [graph]);
+  const totalGaps = orphans.summary.orphan_producers + orphans.summary.orphan_consumers;
+
+  const section = (title, count, help, body) => (
+    <CollapsibleSection key={title} title={title} count={count} help={help}>{body}</CollapsibleSection>
+  );
+  const empty = (msg) => <div className="gaps-empty">{msg}</div>;
+
+  return (
+    <div className="gaps">
+      <div className="view-top">
+        <Breadcrumb items={[{ label: "Galaxy", onClick: onBack }, { label: "Gaps" }]} />
+        <div className="view-hint">
+          {totalGaps} unconnected channel{totalGaps === 1 ? "" : "s"} ·{" "}
+          {cyc.summary.cycle_count} cycle{cyc.summary.cycle_count === 1 ? "" : "s"}
+        </div>
+      </div>
+      <div className="gaps-scroll">
+        {section("Orphan producers", orphans.summary.orphan_producers,
+          "Emits to a message channel no consumer in this project listens on — possibly a dead contract, a misnamed queue/topic, or a service not yet added.",
+          orphans.orphan_producers.length === 0
+            ? empty("Every message producer has a consumer.")
+            : orphans.orphan_producers.map((p) => (
+              <button className="gaps-card" key={p.id} onClick={() => onOpenSource(p.file, p.line)}>
+                <div className="gaps-card-top">
+                  <span className="gaps-channel mono">{p.channel}</span>
+                  <span className="gaps-repo">{p.repo}</span>
+                </div>
+                <div className="gaps-card-sub mono">
+                  {p.method}{p.file ? " · " + fmtFile(p.file) + (p.line ? ":" + p.line : "") : ""}
+                </div>
+                <span className="gaps-card-tag prod">no consumer</span>
+              </button>
+            ))
+        )}
+
+        {section("Orphan consumers", orphans.summary.orphan_consumers,
+          "Listens on a message channel no producer in this project emits to — possibly a dead listener or a typo in the queue/topic name.",
+          orphans.orphan_consumers.length === 0
+            ? empty("Every message consumer has a producer.")
+            : orphans.orphan_consumers.map((c) => (
+              <button className="gaps-card" key={c.id} onClick={() => onOpenEntry(c.id)}>
+                <div className="gaps-card-top">
+                  <span className="gaps-channel mono">{c.channel}</span>
+                  <span className="gaps-repo">{c.repo}</span>
+                </div>
+                <div className="gaps-card-sub mono">
+                  {c.method}{c.file ? " · " + fmtFile(c.file) + (c.line ? ":" + c.line : "") : ""}
+                </div>
+                <span className="gaps-card-tag cons">no producer</span>
+              </button>
+            ))
+        )}
+
+        {section("Dependency cycles", cyc.summary.cycle_count,
+          "Circular repo dependencies through channel edges (e.g. A → B → A) — an architectural smell where services can't be deployed or changed independently.",
+          cyc.cycles.length === 0
+            ? empty("No circular repo dependencies.")
+            : cyc.cycles.map((cy, i) => (
+              <div className="gaps-card cycle" key={i}>
+                <div className="gaps-cycle-chain mono">{cy.repos.join(" → ")}</div>
+                <div className="gaps-cycle-chans mono">{cy.channels.join(", ")}</div>
+              </div>
+            ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Source modal (reuses the /source endpoint) ---------------- */
+function SourceModal({ pid, file, line, onClose }) {
+  const [source, setSource] = useState(null);
+  const [status, setStatus] = useState("loading");
+  const [err, setErr] = useState("");
+  const hiRef = useRef(null);
+
+  useEffect(() => {
+    let alive = true;
+    setStatus("loading");
+    setSource(null);
+    if (!file) { if (alive) setStatus("none"); return () => { alive = false; }; }
+    fetchJSON(projPath(pid, "/source?file_path=" + encodeURIComponent(file)))
+      .then((s) => { if (alive) { setSource(s); setStatus("ready"); } })
+      .catch((e) => { if (alive) { setErr(e.message); setStatus("error"); } });
+    return () => { alive = false; };
+  }, [pid, file]);
+
+  useEffect(() => {
+    if (status === "ready" && hiRef.current) {
+      hiRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }, [status]);
+
+  // Same context-window rendering DetailPanel uses for source.
+  const lines = source && source.content ? source.content.split("\n") : [];
+  const target = line || 0;
+  const WINDOW = 80;
+  let showLines = lines;
+  let offsetL = 1;
+  let truncated = false;
+  if (lines.length > 240) {
+    truncated = true;
+    const start = Math.max(0, target - 1 - Math.floor(WINDOW / 2));
+    showLines = lines.slice(start, start + WINDOW);
+    offsetL = start + 1;
+  }
+
+  return (
+    <div className="source-modal-overlay" onClick={onClose}>
+      <div className="source-modal glass" onClick={(e) => e.stopPropagation()}>
+        <header className="dp-head">
+          <div>
+            <div className="dp-title mono">{fmtFile(file)}</div>
+            <div className="dp-loc mono">{file}{line ? ":" + line : ""}</div>
+          </div>
+          <button className="dp-close" onClick={onClose}>✕</button>
+        </header>
+        <div className="dp-body">
+          <div className="src-wrap">
+            <div className="src-head mono">
+              {source && source.line_count ? source.line_count + " lines" : ""}
+              {truncated ? " · showing context window" : ""}
+            </div>
+            {status === "loading" && <div className="src-loading">Loading source…</div>}
+            {status === "error" && <div className="src-error">Could not load source: {err}</div>}
+            {status === "none" && <div className="src-error">No source file recorded for this producer.</div>}
+            {status === "ready" && (
+              <pre className="code mono">
+                {showLines.map((ln, i) => {
+                  const n = offsetL + i;
+                  const hi = n === target;
+                  return (
+                    <div key={n} className={"code-line" + (hi ? " hl" : "")}>
+                      <span className="ln">{n}</span>
+                      <span className="lc" ref={hi ? hiRef : undefined}>{ln}</span>
+                    </div>
+                  );
+                })}
+              </pre>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Dead Code View ---------------- */
+// A top-level mode (next to Topology / Flows). Lists unreachable methods,
+// thin handlers, and isolated repos. Reuses the Gaps-view aesthetic.
+/* ---------------- Broken satellites (dead-code background motif) ---------------- */
+// Dead stars + debris drifting through the dead-code view — the metaphor for
+// abandoned code in a constellation. Monochrome star glyphs (not emoji) so CSS
+// color + glow apply fully and they read as broken/dying. Purely decorative.
+const SAT_GLYPHS = ["✦", "✧", "🛰️", "✷", "✸", "✹", "✺", "⛓️‍💥", "◆", "◇", "🛑", "✱"];
+// Distress reds/oranges (dying stars) dominate, with a couple cold tones (dead dwarfs) for variety.
+const SAT_COLORS = ["#f87171", "#ef4444", "#fb923c", "#f5a524", "#d80202", "#682201"];
+function BrokenSatellites({ count = 18 }) {
+  const sats = useMemo(
+    () => Array.from({ length: count }, () => ({
+      left: Math.random() * 100,
+      top: Math.random() * 96,
+      delay: Math.random() * 20,
+      flick: 9 + Math.random() * 12,           // slower twinkle — each flash lingers
+      drift: 12 + Math.random() * 30,
+      size: 8 + Math.random() * 22,
+      rot: -40 + Math.random() * 80,           // base rotation (deg)
+      dx: -30 + Math.random() * 60,            // drift delta x (px)
+      dy: -22 + Math.random() * 40,            // drift delta y (px)
+      peak: 0.35 + Math.random() * 0.45,       // per-debris brightness peak
+      glyph: SAT_GLYPHS[Math.floor(Math.random() * SAT_GLYPHS.length)],
+      color: SAT_COLORS[Math.floor(Math.random() * SAT_COLORS.length)],
+    })),
+    [count]
+  );
+  return (
+    <div className="broken-sats" aria-hidden="true">
+      {sats.map((s, i) => (
+        <span
+          className="broken-sat"
+          key={i}
+          style={{
+            left: s.left + "%", top: s.top + "%", fontSize: s.size + "px",
+            animationDelay: s.delay + "s",
+            animationDuration: s.flick + "s, " + s.drift + "s",
+            "--rot": s.rot + "deg",
+            "--dx": s.dx + "px",
+            "--dy": s.dy + "px",
+            "--peak": s.peak,
+            "--c": s.color,
+          }}
+        >
+          {s.glyph}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
+  const dc = useMemo(() => detectDeadCode(graph), [graph]);
+  const reachable = Math.max(0, dc.methods_total - dc.unreachable_methods.length);
+
+  const section = (title, count, help, body) => (
+    <CollapsibleSection key={title} title={title} count={count} help={help}>{body}</CollapsibleSection>
+  );
+  const empty = (msg) => <div className="gaps-empty">{msg}</div>;
+
+  return (
+    <div className="gaps dead">
+      <div className="dead-bg" aria-hidden="true" />
+      <BrokenSatellites />
+      <div className="view-top">
+        <Breadcrumb items={[{ label: "Dead code" }]} />
+        <div className="view-hint">
+          {dc.method_index_available
+            ? dc.unreachable_methods.length + " unreachable of " + dc.methods_total +
+              " methods · " + reachable + " reachable"
+            : "thin handlers & isolated repos"}
+          {" · " + dc.thin_handlers.length + " thin handler" + (dc.thin_handlers.length === 1 ? "" : "s")}
+        </div>
+      </div>
+      <div className="gaps-scroll">
+        {!dc.method_index_available && (
+          <div className="gaps-empty dead-note">
+            Unreachable-method detection needs a graph from a recent engine run
+            (with method indexing). Regenerate this project's graph to enable it —
+            thin handlers and isolated repos are still shown below.
+          </div>
+        )}
+
+        {section("Unreachable methods", dc.unreachable_methods.length,
+          "Methods defined in the codebase that no entry point can reach through resolved calls. They may be genuinely dead — or only invoked via reflection, DI, or framework wiring the static analyzer can't see. Treat as candidates, not certainties.",
+          dc.unreachable_methods.length === 0
+            ? empty(dc.method_index_available ? "Every method is reachable from an entry point." : "—")
+            : dc.unreachable_methods.map((m) => (
+              <button className="gaps-card" key={m.id}
+                onClick={() => onOpenSource(m.file, m.line)}>
+                <div className="gaps-card-top">
+                  <span className="gaps-channel mono dead-channel">{m.class_name}.{m.method}</span>
+                  <span className="gaps-repo">{m.repo}</span>
+                </div>
+                <div className="gaps-card-sub mono">
+                  {m.file ? fmtFile(m.file) + (m.line ? ":" + m.line : "") : "no location"}
+                </div>
+                <span className="gaps-card-tag prod">unreachable</span>
+              </button>
+            ))
+        )}
+
+        {section("Thin handlers", dc.thin_handlers.length,
+          "Entry points whose call tree resolved no calls at all — e.g. a REST endpoint or listener that returns without invoking anything, or whose targets couldn't be resolved. Often a stub, a trivial passthrough, or wiring the analyzer missed.",
+          dc.thin_handlers.length === 0
+            ? empty("No entry point has an empty call tree.")
+            : dc.thin_handlers.map((h) => (
+              <button className="gaps-card" key={h.id}
+                onClick={() => onOpenEntry(h.id)}>
+                <div className="gaps-card-top">
+                  <span className="gaps-channel mono dead-channel">{h.method}</span>
+                  <span className="gaps-repo">{h.repo}</span>
+                </div>
+                <div className="gaps-card-sub mono">
+                  {h.type}{h.channel ? " · " + h.channel : ""}{h.file ? " · " + fmtFile(h.file) : ""}
+                </div>
+                <span className="gaps-card-tag cons">no resolved calls</span>
+              </button>
+            ))
+        )}
+
+        {section("Isolated repos", dc.isolated_repos.length,
+          "Repositories with no cross-repo message or HTTP links to any other repo in this project — fully disconnected from the constellation.",
+          dc.isolated_repos.length === 0
+            ? empty("Every repo has at least one cross-repo link.")
+            : dc.isolated_repos.map((r) => (
+              <div className="gaps-card cycle" key={r}>
+                <div className="gaps-cycle-chain mono">{r}</div>
+                <div className="gaps-cycle-chans">no cross-repo links</div>
+              </div>
+            ))
+        )}
+      </div>
     </div>
   );
 }
@@ -2805,6 +3358,7 @@ function App() {
   const [flows, setFlows] = useState([]);
   const [selectedNode, setSelectedNode] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
+  const [sourceModal, setSourceModal] = useState(null); // {file, line} | null — producer source viewer
   const [dims, setDims] = useState({ w: window.innerWidth, h: window.innerHeight });
   // Zoom-drill transition: {x,y} = node center in viewport px, phase in|out
   const [zoomFx, setZoomFx] = useState(null);
@@ -2894,6 +3448,7 @@ function App() {
     setMode(m);
     setSelectedNode(null);
     if (m === "topology") setView({ name: "galaxy" });
+    else if (m === "dead") setView({ name: "dead" });
     else setView({ name: "flowIndex" });
   };
 
@@ -2971,10 +3526,22 @@ function App() {
             <GalaxyView
               graph={graph}
               dims={{ w: dims.w, h: stageH }}
+              onOpenGaps={() => { setSelectedNode(null); setView({ name: "gaps" }); }}
               onSelectRepo={(repo, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);
                 drill(x, y, () => { setSelectedNode(null); setView({ name: "solar", repo }); });
               }}
+            />
+          </div>
+        )}
+        {mode === "topology" && view.name === "gaps" && (
+          <div className="view" key="gaps">
+            <GapsView
+              graph={graph}
+              pid={activeId}
+              onBack={goGalaxy}
+              onOpenEntry={(id) => { setSelectedNode(null); setView({ name: "path", entryId: id }); }}
+              onOpenSource={(file, line) => setSourceModal({ file, line })}
             />
           </div>
         )}
@@ -3010,6 +3577,36 @@ function App() {
             </div>
           );
         })()}
+        {mode === "dead" && view.name === "path" && (() => {
+          // Drill-in from the Dead-code view: same PathView, but back returns
+          // to the Dead-code list instead of the topology solar system.
+          const ep = graph.entry_points.find((e) => e.id === view.entryId);
+          if (!ep) return <div className="view"><p className="muted" style={{ padding: 40 }}>Entry point not found.</p></div>;
+          return (
+            <div className="view" key={"dead-path-" + view.entryId}>
+              <PathView
+                entryPoint={ep}
+                graph={graph}
+                onHome={() => { setSelectedNode(null); setView({ name: "dead" }); }}
+                onBack={() => { setSelectedNode(null); setView({ name: "dead" }); }}
+                selectedNode={selectedNode}
+                onSelectNode={(n) => setSelectedNode(n)}
+                chatOpen={chatOpen}
+              />
+            </div>
+          );
+        })()}
+
+        {/* ── Dead code mode ── */}
+        {mode === "dead" && view.name === "dead" && (
+          <div className="view" key="dead">
+            <DeadCodeView
+              graph={graph}
+              onOpenEntry={(id) => { setSelectedNode(null); setView({ name: "path", entryId: id }); }}
+              onOpenSource={(file, line) => setSourceModal({ file, line })}
+            />
+          </div>
+        )}
 
         {/* ── Flows mode (new) ── */}
         {mode === "flows" && view.name === "flowIndex" && (
@@ -3113,6 +3710,15 @@ function App() {
         })()}
         detailOpen={!!selectedNode && (view.name === "path" || view.name === "flowTrace")}
       />
+
+      {sourceModal && (
+        <SourceModal
+          pid={activeId}
+          file={sourceModal.file}
+          line={sourceModal.line}
+          onClose={() => setSourceModal(null)}
+        />
+      )}
 
       {ingest && (
         <IngestionModal

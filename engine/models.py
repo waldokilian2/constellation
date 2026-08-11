@@ -155,6 +155,10 @@ class ConstellationGraph:
     entry_points: list[EntryPoint] = field(default_factory=list)
     producers: list[Producer] = field(default_factory=list)
     cross_repo_links: list[CrossRepoLink] = field(default_factory=list)
+    # Dead-code analysis (engine phase 4b). `unreachable_methods` is a list of
+    # plain dicts (not a model dataclass) — like `metrics`, it's a derived view.
+    methods_total: int = 0
+    unreachable_methods: list = field(default_factory=list)
     generated_at: str = ""
     engine_version: str = "0.1.0"
 
@@ -165,6 +169,8 @@ class ConstellationGraph:
             "entry_points": [ep.to_dict() for ep in self.entry_points],
             "producers": [p.to_dict() for p in self.producers],
             "cross_repo_links": [l.to_dict() for l in self.cross_repo_links],
+            "methods_total": self.methods_total,
+            "unreachable_methods": self.unreachable_methods,
             "generated_at": self.generated_at,
             "engine_version": self.engine_version,
         }

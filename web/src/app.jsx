@@ -4351,11 +4351,11 @@ function computeIngestProgress(logs, repoTotal) {
   let label = logs.length ? "Working…" : "Starting…";
   if (phase === "clone") {
     done = cap(logs.filter((l) => l.phase === "clone" && CLONE_DONE_RE.test(l.message)).length);
-    determinate = repoTotal != null;
+    determinate = repoTotal != null && repoTotal > 0;
     label = determinate ? "Cloning " + done + "/" + repoTotal + " repos" : "Syncing repositories…";
   } else if (phase === "scan") {
     done = cap(logs.filter((l) => l.phase === "scan" && SCANNING_RE.test(l.message)).length);
-    determinate = repoTotal != null;
+    determinate = repoTotal != null && repoTotal > 0;
     label = determinate ? "Scanning " + done + "/" + repoTotal + " repos" : "Scanning repositories…";
   } else if (phase === "graph") {
     label = "Building call trees…";
@@ -4363,16 +4363,18 @@ function computeIngestProgress(logs, repoTotal) {
     label = "Finding cross-repo links…";
   } else if (phase === "done") {
     determinate = true;
-    done = repoTotal != null ? repoTotal : 1;
+    done = repoTotal != null && repoTotal > 0 ? repoTotal : 1;
     label = "Complete";
   }
-  const total = determinate ? Math.max(done, repoTotal != null ? repoTotal : 1) : 0;
-  const pct = determinate ? Math.min(100, Math.round((done / total) * 100)) : null;
+  const total = determinate ? Math.max(done, repoTotal != null && repoTotal > 0 ? repoTotal : 1) : 0;
+  const pct = determinate && total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
   return { determinate, pct, label };
 }
 
 // Reads the SSE ingestion stream from /api/projects (create) or
 // /api/projects/<pid>/repos (add). Mirrors the GlobalChat SSE reader.
+const GIT_HOST_LABELS = { github: "GitHub", gitlab: "GitLab", bitbucket: "Bitbucket", "azure-devops": "Azure DevOps" };
+
 function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onScanDone }) {
   const isCreate = mode === "create";
   const isRescan = mode === "rescan";
@@ -4383,6 +4385,16 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
   const [error, setError] = useState("");
   const logEndRef = useRef(null);
   const didAutoRun = useRef(false);
+
+  // Universal git-host import (create mode only): paste an org/workspace
+  // link, pick repos with checkboxes + search, then create with those URLs.
+  const [importMode, setImportMode] = useState("urls"); // "urls" | "remote"
+  const [remoteLink, setRemoteLink] = useState("");
+  const [remoteBusy, setRemoteBusy] = useState(false);
+  const [remoteError, setRemoteError] = useState("");
+  const [remoteData, setRemoteData] = useState(null); // {provider, owner, repos}
+  const [selected, setSelected] = useState({}); // full_name -> true
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -4401,6 +4413,64 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
   const addRow = () => setUrls((prev) => [...prev, ""]);
   const removeRow = (i) => setUrls((prev) => prev.filter((_, idx) => idx !== i));
 
+  // ── Remote git-host import state helpers ──
+  const totalCount = remoteData ? remoteData.repos.length : 0;
+  const selectedCount = Object.keys(selected).length;
+  const allSelected = totalCount > 0 && selectedCount === totalCount;
+  const visibleRepos = remoteData
+    ? remoteData.repos.filter((r) => {
+        const q = search.trim().toLowerCase();
+        if (!q) return true;
+        return ((r.name || "") + " " + (r.full_name || "") + " " + (r.description || "")).toLowerCase().includes(q);
+      })
+    : [];
+  const repoUrls = importMode === "remote"
+    ? remoteData ? remoteData.repos.filter((r) => selected[r.full_name]).map((r) => r.clone_url) : []
+    : validUrls;
+
+  const loadRemote = async () => {
+    const link = remoteLink.trim();
+    if (!link) return;
+    setRemoteError("");
+    setRemoteBusy(true);
+    setRemoteData(null);
+    setSelected({});
+    try {
+      const res = await fetch("/api/remotes/repos?link=" + encodeURIComponent(link));
+      if (!res.ok) {
+        const t = await res.json().catch(() => null);
+        throw new Error((t && t.detail) || "Failed to load repositories (HTTP " + res.status + ")");
+      }
+      const data = await res.json();
+      setRemoteData(data);
+      const all = {};
+      (data.repos || []).forEach((r) => { all[r.full_name] = true; });
+      setSelected(all);
+      if (!(name || "").trim()) setName(data.owner);
+    } catch (e) {
+      setRemoteError(e.message);
+    } finally {
+      setRemoteBusy(false);
+    }
+  };
+
+  const toggleRepo = (fullName) =>
+    setSelected((prev) => {
+      const next = { ...prev };
+      if (next[fullName]) delete next[fullName];
+      else next[fullName] = true;
+      return next;
+    });
+
+  const toggleAll = () => {
+    if (allSelected) setSelected({});
+    else {
+      const all = {};
+      (remoteData ? remoteData.repos : []).forEach((r) => { all[r.full_name] = true; });
+      setSelected(all);
+    }
+  };
+
   const submit = async () => {
     setError("");
     setLogs([]);
@@ -4411,10 +4481,10 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
         ? projPath(pid, "/rescan" + (pull ? "?pull=true" : ""))
         : projPath(pid, "/repos");
     const body = isCreate
-      ? { name: (name || "").trim() || "Untitled Project", repos: validUrls }
+      ? { name: (name || "").trim() || "Untitled Project", repos: repoUrls }
       : isRescan
         ? {}
-        : { repos: validUrls };
+        : { repos: repoUrls };
     let sawDone = false;
     try {
       const res = await fetch(endpoint, {
@@ -4472,7 +4542,9 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
 
   const busy = status === "running";
 
-  const progress = computeIngestProgress(logs, isRescan ? null : validUrls.length);
+  // Progress denominator = the repos actually being imported (selected repos
+  // in remote mode, not the hidden URL textarea).
+  const progress = computeIngestProgress(logs, isRescan ? null : repoUrls.length);
 
   return (
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose && onClose(); }}>
@@ -4502,7 +4574,28 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
             </label>
           )}
 
-          {!isRescan && (
+          {isCreate && (
+            <div className="import-mode-tabs">
+              <button
+                type="button"
+                className={"import-tab" + (importMode === "urls" ? " active" : "")}
+                onClick={() => setImportMode("urls")}
+                disabled={busy}
+              >
+                Git URLs
+              </button>
+              <button
+                type="button"
+                className={"import-tab" + (importMode === "remote" ? " active" : "")}
+                onClick={() => setImportMode("remote")}
+                disabled={busy}
+              >
+                Import from a git host
+              </button>
+            </div>
+          )}
+
+          {!isRescan && importMode === "urls" && (
             <label className="field">
               <span className="field-label">Git repository URLs ({validUrls.length})</span>
               <div className="url-list">
@@ -4526,10 +4619,70 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
             </label>
           )}
 
+          {isCreate && importMode === "remote" && (
+            <label className="field">
+              <span className="field-label">Project link (GitHub · GitLab · Bitbucket · Azure DevOps)</span>
+              <div className="url-row">
+                <input
+                  className="text-input mono remote-link"
+                  type="text"
+                  placeholder="https://github.com/acme"
+                  value={remoteLink}
+                  onChange={(e) => setRemoteLink(e.target.value)}
+                  disabled={busy || remoteBusy}
+                />
+                <button className="btn-ghost" onClick={loadRemote} disabled={busy || remoteBusy || !remoteLink.trim()}>
+                  {remoteBusy ? "Loading…" : "Load repos"}
+                </button>
+              </div>
+            </label>
+          )}
+
+          {remoteError && <div className="ingest-error">{remoteError}</div>}
+
+          {isCreate && importMode === "remote" && remoteData && (
+            <div className="remote-picker">
+              <div className="remote-picker-head">
+                <span className="remote-provider">{GIT_HOST_LABELS[remoteData.provider] || remoteData.provider}</span>
+                <span className="remote-owner">{remoteData.owner}</span>
+                <span className="remote-count">{totalCount} repo{totalCount === 1 ? "" : "s"}</span>
+              </div>
+              <div className="remote-toolbar">
+                <input
+                  className="text-input remote-search"
+                  type="text"
+                  placeholder="Search repos…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                <label className="remote-select-all">
+                  <input type="checkbox" checked={allSelected} onChange={toggleAll} />
+                  <span>Select all ({totalCount})</span>
+                </label>
+                <span className="remote-selected">{selectedCount} of {totalCount} selected</span>
+              </div>
+              <div className="remote-list">
+                {visibleRepos.length === 0 && <div className="muted small remote-empty">No repos match "{search}".</div>}
+                {visibleRepos.map((r) => (
+                  <label className={"remote-row" + (selected[r.full_name] ? " checked" : "")} key={r.full_name}>
+                    <input type="checkbox" checked={!!selected[r.full_name]} onChange={() => toggleRepo(r.full_name)} />
+                    <span className="remote-row-name">{r.name}</span>
+                    <span className="remote-row-full">{r.full_name}</span>
+                    {r.description && <span className="remote-row-desc">{r.description}</span>}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
           {!isRescan && (
             <p className="muted small">
-              Repos are cloned (shallow) and analysed together so cross-service links are detected.
-              Use <code>local:path</code> to add an existing folder on disk (git-backed ones are still tracked for updates).
+              {importMode === "remote"
+                ? "Only the checked repositories are cloned (shallow) and analysed together so cross-service links are detected."
+                : "Repos are cloned (shallow) and analysed together so cross-service links are detected."}
+              {importMode === "urls" && (
+                <> Use <code>local:path</code> to add an existing folder on disk (git-backed ones are still tracked for updates).</>
+              )}
               {!isCreate && " The project is re-analysed as a whole when you add a repo."}
             </p>
           )}
@@ -4542,43 +4695,43 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
             </p>
           )}
 
-          {(status === "running" || status === "done" || status === "error") && (
-            <div className="ingest-log">
-              <div className="ingest-log-head">
-                {status === "running" && <span className="badge busy">Working…</span>}
-                {status === "done" && <span className="badge ok">Done</span>}
-                {status === "error" && <span className="badge err">Failed</span>}
-              </div>
-              {status !== "error" && (
-                <div className="ingest-progress">
-                  <div className="ingest-progress-track">
-                    <div
-                      className={
-                        "ingest-progress-fill" +
-                        (progress.determinate ? "" : " indeterminate") +
-                        (status === "done" ? " done" : "")
-                      }
-                      style={progress.determinate ? { width: progress.pct + "%" } : undefined}
-                    />
-                  </div>
-                  <div className="ingest-progress-meta">
-                    <span className="ingest-progress-label">{progress.label}</span>
-                    {progress.determinate && <span className="ingest-progress-pct">{progress.pct}%</span>}
-                  </div>
-                </div>
-              )}
-              <div className="log-stream mono">
-                {logs.length === 0 && <div className="muted small">Starting…</div>}
-                {logs.map((l, i) => (
-                  <div className={"log-line phase-" + (l.phase || "info")} key={i}>{l.message}</div>
-                ))}
-                <div ref={logEndRef} />
-              </div>
-            </div>
-          )}
-
           {error && <div className="ingest-error">{error}</div>}
         </div>
+
+        {(status === "running" || status === "done" || status === "error") && (
+          <div className="ingest-log modal-ingest">
+            <div className="ingest-log-head">
+              {status === "running" && <span className="badge busy">Working…</span>}
+              {status === "done" && <span className="badge ok">Done</span>}
+              {status === "error" && <span className="badge err">Failed</span>}
+            </div>
+            {status !== "error" && (
+              <div className="ingest-progress">
+                <div className="ingest-progress-track">
+                  <div
+                    className={
+                      "ingest-progress-fill" +
+                      (progress.determinate ? "" : " indeterminate") +
+                      (status === "done" ? " done" : "")
+                    }
+                    style={progress.determinate ? { width: progress.pct + "%" } : undefined}
+                  />
+                </div>
+                <div className="ingest-progress-meta">
+                  <span className="ingest-progress-label">{progress.label}</span>
+                  {progress.determinate && <span className="ingest-progress-pct">{progress.pct}%</span>}
+                </div>
+              </div>
+            )}
+            <div className="log-stream mono">
+              {logs.length === 0 && <div className="muted small">Starting…</div>}
+              {logs.map((l, i) => (
+                <div className={"log-line phase-" + (l.phase || "info")} key={i}>{l.message}</div>
+              ))}
+              <div ref={logEndRef} />
+            </div>
+          </div>
+        )}
 
         <div className="modal-foot">
           {isRescan ? (
@@ -4596,7 +4749,7 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
               <button
                 className="btn-primary"
                 onClick={submit}
-                disabled={busy || validUrls.length === 0 || (isCreate && !(name || "").trim())}
+                disabled={busy || repoUrls.length === 0 || (isCreate && !(name || "").trim())}
               >
                 {busy ? "Importing…" : isCreate ? "Create & import" : "Add & re-analyse"}
               </button>

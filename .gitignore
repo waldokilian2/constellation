@@ -7,3 +7,9 @@ tests/repos/sample-spring-kafka-microservices/
 # Node / Vite
 node_modules/
 web/dist/
+
+# Playwright e2e artifacts
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+/test-results/

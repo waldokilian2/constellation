@@ -2517,6 +2517,7 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
         const ekey = step.repo + ">>" + child.step.repo + "|" + child.channel + "|" + (child.kind || "message");
         if (!seenEdges.has(ekey)) {
           seenEdges.add(ekey);
+          const isSync = child.kind === "http";
           edges.push({
             from: step.repo,
             to: child.step.repo,
@@ -2525,6 +2526,22 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
             verb: child.verb || "",
             responseType: child.responseType || "",
           });
+          // Sync calls are round-trips: emit the response edge pointing back,
+          // so the reader sees the request AND what comes back.
+          if (isSync && child.responseType) {
+            const rekey = child.step.repo + ">>" + step.repo + "|" + child.channel + "|http-response";
+            if (!seenEdges.has(rekey)) {
+              seenEdges.add(rekey);
+              edges.push({
+                from: child.step.repo,
+                to: step.repo,
+                channel: child.channel,
+                kind: "http-response",
+                verb: "",
+                responseType: child.responseType,
+              });
+            }
+          }
         }
         walk(child.step, depth + 1);
       });
@@ -2619,19 +2636,23 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
       return { mid, path };
     }
 
-    // Normal adjacent edge: gentle S-curve
-    const cp1 = { x: start.x + dx * 0.4, y: start.y };
-    const cp2 = { x: end.x - dx * 0.4, y: end.y };
+    // Normal adjacent edge: gentle S-curve. Parallel/opposite edges (request +
+    // response round-trips) separate vertically around the axis.
+    const sep = totalEdges > 1 ? (edgeIndex - (totalEdges - 1) / 2) * 26 : 0;
+    const midY = (start.y + end.y) / 2 + sep;
+    const cp1 = { x: start.x + dx * 0.4, y: start.y + sep };
+    const cp2 = { x: end.x - dx * 0.4, y: end.y + sep };
     const path = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y} ${cp2.x} ${cp2.y} ${end.x} ${end.y}`;
-    const mid = { x: start.x + dx / 2, y: (start.y + end.y) / 2 };
+    const mid = { x: start.x + dx / 2, y: midY };
     return { mid, path };
   };
 
-  // Group edges by from→to pair so we can offset multiples
+  // Group edges by unordered repo pair so opposite (request/response) edges
+  // share a group and separate vertically.
   const edgePairCount = useMemo(() => {
     const m = {};
     flowEdges.forEach((e) => {
-      const key = e.from + ">>" + e.to;
+      const key = e.from < e.to ? e.from + ">>" + e.to : e.to + ">>" + e.from;
       m[key] = (m[key] || 0) + 1;
     });
     return m;
@@ -2710,24 +2731,26 @@ function FlowView({ flow, graph, dims, onHome, onBack, onSelectRepoInFlow }) {
             if (!a || !b) return null;
             // Skip edge = spans more than 1 depth level (jumps over a repo)
             const isSkip = Math.abs(a.depth - b.depth) > 1;
-            const pairKey = e.from + ">>" + e.to;
+            const pairKey = e.from < e.to ? e.from + ">>" + e.to : e.to + ">>" + e.from;
             const total = edgePairCount[pairKey] || 1;
             const idx = edgePairIndex(pairKey);
             const g = edgeGeom(a, b, idx, total, isSkip);
             const isSync = e.kind === "http";
-            // Sync calls are round-trips: the request goes out and the response
-            // comes back. Double-headed arrow + response type in the label.
-            const label = isSync
-              ? (e.verb ? e.verb + " " : "") + e.channel + (e.responseType ? " → " + e.responseType : "")
-              : e.channel;
+            const isResp = e.kind === "http-response";
+            // Request edge: verb + path. Response edge: what comes back.
+            const label = isResp
+              ? "← " + (e.responseType || "response")
+              : isSync
+                ? (e.verb ? e.verb + " " : "") + e.channel
+                : e.channel;
             const pillW = label.length * 6.5 + 22;
             return (
               <g key={"fe-" + i}>
-                <path d={g.path} fill="none" stroke={isSync ? "#00e0a8" : "#00d4ff"} strokeWidth={isSync ? 2.2 : 2} opacity={isSkip ? "0.4" : "0.55"} markerStart={isSync ? "url(#flow-arrow-sync)" : undefined} markerEnd={isSync ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
-                <g className={"edge-label-pill" + (isSync ? " sync" : "")} transform={`translate(${g.mid.x}, ${g.mid.y})`}>
+                <path d={g.path} fill="none" stroke={isSync || isResp ? "#00e0a8" : "#00d4ff"} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={isResp ? "5 4" : undefined} opacity={isSkip ? "0.4" : "0.55"} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
+                <g className={"edge-label-pill" + (isSync || isResp ? " sync" : "")} transform={`translate(${g.mid.x}, ${g.mid.y})`}>
                   <rect className="edge-label-glow" x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
                   <rect className="edge-label-bg" x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />
-                  <text className={"edge-label" + (isSync ? " sync" : "")} x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
+                  <text className={"edge-label" + (isSync || isResp ? " sync" : "")} x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
             );

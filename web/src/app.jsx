@@ -1444,17 +1444,21 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
 }
 
 /* ---------------- Solar System View ---------------- */
-function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry }) {
+function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry, flows, onOpenFlow }) {
   const eps = useMemo(
     () => (graph.entry_points || []).filter((e) => e.repo === repo),
     [graph, repo]
   );
-  const producers = useMemo(
-    () => (graph.producers || []).filter((p) => p.repo === repo),
-    [graph, repo]
-  );
+  const channels = useMemo(() => {
+    const list = buildRepoChannels(repo, graph);
+    list.forEach((c) => {
+      c.inMethods.forEach((o) => { o.flows = flowsForUnit(flows, graph, repo, c, o, "in"); });
+      c.outMethods.forEach((o) => { o.flows = flowsForUnit(flows, graph, repo, c, o, "out"); });
+    });
+    return list;
+  }, [repo, graph, flows]);
   const [hidden, setHidden] = useState({});
-  const pz = usePanZoom(".star, .star-label, .producers-panel");
+  const pz = usePanZoom(".star, .star-label, .channels-panel");
 
   const W = dims.w, H = dims.h;
   const cx = W / 2, cy = H / 2;
@@ -1486,7 +1490,7 @@ function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry }) {
           { label: "Galaxy", onClick: onHome },
           { label: repo },
         ]} />
-        <div className="view-hint">{eps.length} entry points · {producers.length} producers</div>
+        <div className="view-hint">{eps.length} entry points · {channels.length} channels</div>
       </div>
 
       <div className="filters">
@@ -1538,59 +1542,264 @@ function SolarSystemView({ graph, repo, dims, onHome, onBack, onSelectEntry }) {
         </div>
       </div>
 
-      <ProducersPanel producers={producers} graph={graph} />
+      <ChannelsPanel channels={channels} onOpenFlow={onOpenFlow} />
       {pz.zoomControls}
     </div>
   );
 }
 
-function ProducersPanel({ producers, graph }) {
-  // Group producers by channel and find consumers from cross_repo_links
-  const channels = useMemo(() => {
-    const links = (graph || {}).cross_repo_links || [];
-    const ep_repos = (graph || {}).entry_points || [];
-    const map = {};
-    producers.forEach((p) => {
-      if (!map[p.channel]) map[p.channel] = [];
-      map[p.channel].push(p);
+/* ---------------- Channels panel (solar view) ---------------- */
+// Entry-point types that CONSUME from a message channel (vs expose an endpoint
+// like REST). Their `channel` field is the topic/queue they listen on.
+const CONSUMER_TYPES = new Set([
+  "kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer",
+  "event-listener", "websocket",
+]);
+// Producer types that PUBLISH to a message channel (vs a sync HTTP call).
+const PRODUCER_TYPES = new Set([
+  "rabbitmq-producer", "kafka-producer", "jms-producer", "event-publisher",
+  "pulsar-producer", "nats-producer",
+]);
+
+// Channel wiring for ONE repo: every channel it consumes (IN), emits (OUT), or
+// both (BOTH), plus its sync HTTP calls. Peers come from cross_repo_links
+// (producers → channel → consumers). One card per channel — a channel this repo
+// both consumes and emits appears ONCE as BOTH, never twice.
+function buildRepoChannels(repo, graph) {
+  const eps = (graph.entry_points || []).filter((e) => e.repo === repo);
+  const prods = (graph.producers || []).filter((p) => p.repo === repo);
+  const links = graph.cross_repo_links || [];
+  const byKey = new Map(); // key "kind|channel" -> card
+
+  const card = (key, kind) => {
+    let c = byKey.get(key);
+    if (!c) {
+      c = {
+        kind,                     // "msg" | "http"
+        channel: key.slice(key.indexOf("|") + 1),
+        direction: "in",          // in | out | both
+        verb: "",                 // http method (GET/POST/...)
+        inMethods: [],            // {m: consumer method, t: message payload type}
+        outMethods: [],           // {m: producer method, t: payload type} (http = t:"")
+        inPeers: [],              // repos producing INTO this channel
+        outPeers: [],             // repos consuming FROM this channel
+      };
+      byKey.set(key, c);
+    }
+    return c;
+  };
+
+  // Repo names on the other side of links for a channel, excluding this repo.
+  const peerRepos = (channel, side) => {
+    const repos = new Set();
+    links.forEach((l) => {
+      if (l.channel !== channel) return;
+      (l[side] || []).forEach((id) => {
+        const r = repoFromId(id);
+        if (r && r !== repo) repos.add(r);
+      });
     });
-    return Object.entries(map).map(([channel, prods]) => {
-      const link = links.find((l) => l.channel === channel);
-      const consumerRepos = link ? Array.from(new Set(
-        (link.consumers || [])
-          .map((c) => c.split(":")[0])
-          .filter((r) => r)
-      )) : [];
-      return { channel, producers: prods, consumerRepos };
+    return Array.from(repos).sort();
+  };
+
+  // IN — message consumers in this repo
+  eps.forEach((e) => {
+    if (!CONSUMER_TYPES.has(e.type) || !e.channel) return;
+    const c = card("msg|" + e.channel, "msg");
+    c.inMethods.push({ m: e.method || e.id.split(":").pop(), t: e.message_type || "" });
+    peerRepos(e.channel, "producers").forEach((r) => c.inPeers.push(r));
+  });
+
+  // OUT — message producers in this repo
+  prods.forEach((p) => {
+    if (!PRODUCER_TYPES.has(p.type) || !p.channel) return;
+    const c = card("msg|" + p.channel, "msg");
+    c.outMethods.push({ m: p.method, t: p.message_type || "" });
+    peerRepos(p.channel, "consumers").forEach((r) => c.outPeers.push(r));
+  });
+
+  // HTTP — sync outbound calls (verb + path as the "channel", return type as the payload analog)
+  prods.forEach((p) => {
+    if (p.type !== "http-call" || !p.channel) return;
+    const c = card("http|" + p.channel, "http");
+    c.verb = p.message_type || "";
+    c.outMethods.push({ m: p.method, t: p.response_type || "" });
+    peerRepos(p.channel, "consumers").forEach((r) => c.outPeers.push(r));
+  });
+
+  const cards = Array.from(byKey.values());
+  cards.forEach((c) => {
+    // Normalize OUT methods to {m,t} pairs, then dedupe both sides by method+type
+    c.outMethods = c.outMethods.map((o) => (typeof o === "string" ? { m: o, t: "" } : o));
+    const seenIn = new Set();
+    c.inMethods = c.inMethods.filter((o) => {
+      const k = o.m + "|" + o.t;
+      if (seenIn.has(k)) return false;
+      seenIn.add(k);
+      return true;
     });
-  }, [producers, graph]);
+    const seenOut = new Set();
+    c.outMethods = c.outMethods.filter((o) => {
+      const k = o.m + "|" + o.t;
+      if (seenOut.has(k)) return false;
+      seenOut.add(k);
+      return true;
+    });
+    c.inPeers = Array.from(new Set(c.inPeers));
+    c.outPeers = Array.from(new Set(c.outPeers));
+    if (c.inMethods.length > 0 && c.outMethods.length > 0) c.direction = "both";
+    else if (c.inMethods.length === 0) c.direction = "out";
+  });
+
+  // Sort: message channels (IN → BOTH → OUT) then HTTP calls
+  const dirOrder = { in: 0, both: 1, out: 2 };
+  return cards.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "http" ? 1 : -1;
+    return (dirOrder[a.direction] - dirOrder[b.direction]) || a.channel.localeCompare(b.channel);
+  });
+}
+
+// One self-contained sentence per method:
+// "emits OrderEvent through OrderEventProducer.publishCreated"
+const methodSentence = (verb, o) => verb + (o.t ? " " + o.t + " through " + o.m : " " + o.m);
+
+// ── Flow matching for channel units ─────────────────────────────
+// Flatten a flow's step tree to the step list (repo-level participations).
+function flowSteps(step, out = []) {
+  if (!step) return out;
+  out.push(step);
+  (step.children || []).forEach((ch) => flowSteps(ch.step, out));
+  return out;
+}
+
+// Does the call tree reach a node whose method matches `method`? Mirrors the
+// flow detector's reachability forms: `node.method` (resolved "Class.method"
+// or receiver.method) and `Class.shortMethod` from class_name + short name.
+function treeReaches(tree, method) {
+  if (!tree) return false;
+  const stack = [tree];
+  while (stack.length) {
+    const n = stack.pop();
+    if (n.method === method) return true;
+    const mName = (n.method || "").split(".").pop();
+    if (n.class_name && mName && n.class_name + "." + mName === method) return true;
+    (n.children || []).forEach((c) => stack.push(c));
+  }
+  return false;
+}
+
+// Flows a channel unit participates in. IN: this repo's flow step entered via
+// this channel through this handler. OUT: this repo's flow step publishes this
+// channel AND its entry's call tree reaches the producer method.
+function flowsForUnit(flows, graph, repo, card, o, side) {
+  const entryById = new Map((graph.entry_points || []).map((e) => [e.id, e]));
+  return flows.filter((f) =>
+    flowSteps(f.step).some((s) => {
+      if (s.repo !== repo) return false;
+      if (side === "in") {
+        return s.channel === card.channel && s.method === o.m;
+      }
+      if (!(s.publishesTo || []).includes(card.channel)) return false;
+      const ep = entryById.get(s.entryId);
+      return !!ep && treeReaches(ep.call_tree, o.m);
+    })
+  );
+}
+
+function ChannelCard({ c, onOpenFlow }) {
+  const flowChips = (o) =>
+    o.flows && o.flows.length > 0 ? (
+      <div className="cc-flows">
+        {o.flows.map((f) => (
+          <button
+            key={f.id}
+            className="cc-flow-chip"
+            title={"Open flow \u201C" + f.name + "\u201D"}
+            onClick={(e) => { e.stopPropagation(); onOpenFlow(f.id); }}
+          >
+            ↗ {f.name}
+          </button>
+        ))}
+      </div>
+    ) : null;
+  return (
+    <div className={"channel-card dir-" + c.direction + (c.kind === "http" ? " http" : "")}>
+      <div className="cc-top">
+        <span className="cc-badge">
+          {c.kind === "http" ? "REQUEST" : c.direction === "both" ? "IN+OUT" : c.direction.toUpperCase()}
+        </span>
+        <span className="cc-name mono">
+          {c.kind === "http" && c.verb ? c.verb + " " : ""}{c.channel}
+        </span>
+        <span className={"cc-kind " + c.kind} title={c.kind === "http" ? "Sync HTTP call" : "Message channel"}>
+          {c.kind === "http" ? "⚡" : "◆"}
+        </span>
+      </div>
+      {c.inMethods.length > 0 && (
+        <div className="cc-dir in">
+          {c.inMethods.map((o, i) => (
+            <div className="cc-unit" key={i}>
+              <div className="cc-sentence mono">{methodSentence("consumes", o)}</div>
+              <div className="cc-peerline">
+                {c.inPeers.length > 0
+                  ? <span className="cc-peer in">from {c.inPeers.join(", ")}</span>
+                  : <span className="cc-peer none">no producer found</span>}
+              </div>
+              {flowChips(o)}
+            </div>
+          ))}
+        </div>
+      )}
+      {c.outMethods.length > 0 && (
+        <div className="cc-dir out">
+          {c.outMethods.map((o, i) => (
+            <div className="cc-unit" key={i}>
+              <div className="cc-sentence mono">{methodSentence(c.kind === "http" ? "requests" : "emits", o)}</div>
+              <div className="cc-peerline">
+                {c.outPeers.length > 0
+                  ? <span className="cc-peer out">to {c.outPeers.join(", ")}</span>
+                  : <span className="cc-peer none">no consumer found</span>}
+              </div>
+              {flowChips(o)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChannelsPanel({ channels, onOpenFlow }) {
+  // Split by direction into clear sections. A channel this repo both consumes
+  // and emits is a bridge — it gets its own section, never a duplicate card.
+  const consumes = channels.filter((c) => c.direction === "in");
+  const bridges = channels.filter((c) => c.direction === "both");
+  const emits = channels.filter((c) => c.direction === "out");
+  const section = (title, items) =>
+    items.length === 0 ? null : (
+      <div key={title}>
+        <div className="cp-section">
+          <span className="cp-section-title">{title}</span>
+          <span className="cp-section-count">{items.length}</span>
+        </div>
+        {items.map((c) => <ChannelCard key={c.kind + "|" + c.channel} c={c} onOpenFlow={onOpenFlow} />)}
+      </div>
+    );
 
   return (
-    <aside className="producers-panel glass">
-      <h3>Outbound <span className="muted">({producers.length})</span></h3>
-      {producers.length === 0 && <p className="muted small">No outbound producers detected.</p>}
-      <ul className="producer-list">
-        {channels.map(({ channel, producers: prods, consumerRepos }) => (
-          <li className="producer-item" key={channel}>
-            <div className="producer-channel">
-              <span className="producer-channel-name">{channel}</span>
-              <span className="producer-arrow">→</span>
-            </div>
-            <div className="producer-flow-targets">
-              {consumerRepos.length > 0
-                ? consumerRepos.join(", ")
-                : "no consumer found"}
-            </div>
-            <div className="producer-flow">
-              {prods.map((p) => (
-                <div key={p.id} className="producer-flow-method">
-                  {p.method}
-                </div>
-              ))}
-            </div>
-          </li>
-        ))}
-      </ul>
+    <aside className="channels-panel glass">
+      <h3>Channels <span className="muted">({channels.length})</span></h3>
+      {channels.length === 0 ? (
+        <p className="muted small cp-empty">
+          No channels detected — this service has no inbound or outbound integration points.
+        </p>
+      ) : (
+        <div className="cp-list">
+          {section("Consumes", consumes)}
+          {section("Bridges", bridges)}
+          {section("Sends", emits)}
+        </div>
+      )}
     </aside>
   );
 }
@@ -3556,8 +3765,14 @@ function App() {
               graph={graph}
               repo={view.repo}
               dims={{ w: dims.w, h: stageH }}
+              flows={flows}
               onHome={goGalaxy}
               onBack={goGalaxy}
+              onOpenFlow={(flowId) => {
+                setSelectedNode(null);
+                setMode("flows");
+                setView({ name: "flow", flowId });
+              }}
               onSelectEntry={(id, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);
                 drill(x, y, () => { setSelectedNode(null); setView({ name: "path", entryId: id }); });

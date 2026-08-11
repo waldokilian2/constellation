@@ -121,6 +121,7 @@ class Producer:
     file: str
     line: int
     message_type: str = ""
+    response_type: str = ""  # HTTP calls: the return type of the client method
 
     def to_dict(self) -> dict:
         return {
@@ -132,6 +133,7 @@ class Producer:
             "file": self.file,
             "line": self.line,
             "message_type": self.message_type,
+            "response_type": self.response_type,
         }
 
 

@@ -14,6 +14,7 @@ in without this module changing.
 from __future__ import annotations
 from typing import Optional
 
+from .languages import java_ast
 from .symbol_index import SymbolIndex, TypeInfo, MethodInfo
 from .models import EntryPoint, CallNode, ConfidenceTag
 
@@ -49,6 +50,9 @@ class CallGraphBuilder:
 
     def __init__(self, index: SymbolIndex):
         self.index = index
+        # Java AST helpers (get_method_body, find_method_invocations, ...) —
+        # the builder resolves raw method Nodes handed to it by the index.
+        self.java = java_ast
 
     def build_tree(
         self,
@@ -263,17 +267,17 @@ class CallGraphBuilder:
             node, enclosing_ci = queue.pop()
             if enclosing_ci is None:
                 continue
-            body = self.parser.get_method_body(node)
+            body = self.java.get_method_body(node)
             if not body:
                 continue
             local_types = {
                 p["name"]: p["type"]
-                for p in self.parser.get_method_parameters(node)
+                for p in self.java.get_method_parameters(node)
                 if p.get("name") and p.get("type")
             }
-            local_types.update(self.parser.get_local_variables(body))
-            for inv in self.parser.find_method_invocations(body):
-                parsed = self.parser.parse_method_invocation(inv)
+            local_types.update(self.java.get_local_variables(body))
+            for inv in self.java.find_method_invocations(body):
+                parsed = self.java.parse_method_invocation(inv)
                 method_name = parsed["method"]
                 receiver = parsed["receiver"]
                 arity = len(parsed["args"])
@@ -305,11 +309,11 @@ class CallGraphBuilder:
         methods that DO contain calls. This inspects the body directly so such
         methods aren't mistaken for no-ops (thin-handler false positives).
         """
-        body = self.parser.get_method_body(method_node)
+        body = self.java.get_method_body(method_node)
         if not body:
             return True
-        for inv in self.parser.find_method_invocations(body):
-            parsed = self.parser.parse_method_invocation(inv)
+        for inv in self.java.find_method_invocations(body):
+            parsed = self.java.parse_method_invocation(inv)
             name = parsed.get("method", "")
             if not name:
                 continue

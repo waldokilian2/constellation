@@ -1710,6 +1710,45 @@ async def tool_dead_code(pid: str):
     return execute_tool(graph, "find_dead_code", {})
 
 
+@app.get("/api/projects/{pid}/tools/diff")
+async def tool_diff(pid: str):
+    """Graph diff: what changed since the last analysis (vs the latest snapshot)."""
+    graph = _load_graph(pid)
+    old = PROJECT_STORE.latest_snapshot(pid)
+    return execute_tool(graph, "diff_graphs", {"old_graph": old or {}})
+
+
+@app.get("/api/projects/{pid}/diff")
+async def project_diff(pid: str, at: str = "", light: bool = False):
+    """What changed since a previous snapshot — the diff *and* the two graphs.
+
+    ``at`` selects the snapshot to compare against (default: the latest one);
+    ``light=1`` omits the graphs for cheap project-list polling. The diff
+    itself always comes from the pure ``diff_graphs`` tool, so the engine
+    semantics stay the single source of truth; the graphs are returned so the
+    UI can render before/after details (metrics, call trees, link shapes).
+    """
+    graph = _load_graph(pid)
+    old = None
+    if at:
+        old = PROJECT_STORE.load_snapshot(pid, at)
+        if old is None:
+            raise HTTPException(status_code=404, detail=f"Snapshot '{at}' not found")
+    else:
+        old = PROJECT_STORE.latest_snapshot(pid)
+
+    result = execute_tool(graph, "diff_graphs", {"old_graph": old or {}})
+    payload = {
+        "diff": result,
+        "snapshots": PROJECT_STORE.list_snapshots(pid),
+        "compared_at": (old or {}).get("generated_at", "") or "",
+    }
+    if not light:
+        payload["old_graph"] = old
+        payload["new_graph"] = graph
+    return payload
+
+
 # ── Static frontend ────────────────────────────────────────────────
 
 # Vite builds to web/dist/. In production, server.py serves the built

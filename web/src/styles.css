@@ -463,7 +463,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 .legend-hint { font-size: 10px; color: var(--text-faint); margin-top: 4px; border-top: 1px solid var(--border); padding-top: 6px; }
 
 /* ---------- Solar system view ---------- */
-.solar { height: 100%; }
+.solar { position: relative; height: 100%; }
 .filters {
   position: absolute; top: 52px; left: 24px; z-index: 15;
   display: flex; gap: 8px; flex-wrap: wrap;
@@ -479,7 +479,8 @@ code { font-family: var(--mono); color: var(--cyan); }
 .filter-chip:hover { background: color-mix(in srgb, var(--c) 22%, rgba(17,24,39,.6)); }
 .chip-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
 
-.solar-canvas { position: relative; }
+/* Canvas fills the stage minus the docked channels panel (right offset set inline) */
+.solar-canvas { position: absolute; left: 0; top: 0; bottom: 0; }
 .star {
   position: absolute; transform: translate(-50%, -50%);
   border-radius: 50%; padding: 0; z-index: 5;
@@ -509,11 +510,16 @@ code { font-family: var(--mono); color: var(--cyan); }
   box-shadow: 0 0 10px rgba(74,222,128,.12);
 }
 
-/* ---------- Channels panel (solar view) ---------- */
+/* ---------- Channels panel (solar view) — docked right sidebar ---------- */
 .channels-panel {
-  position: absolute; top: 96px; right: 24px; z-index: 15;
-  width: 320px; max-height: calc(100% - 150px); overflow-y: auto;
-  border-radius: 14px; padding: 16px;
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 15;
+  width: 340px; padding: 16px;
+  border-radius: 0;
+  border-left: 1px solid rgba(255,255,255,.08);
+  background: rgba(10,14,26,.88);
+  backdrop-filter: blur(12px);
+  box-shadow: -10px 0 30px rgba(0,0,0,.3);
+  overflow-y: auto;
 }
 .channels-panel h3 { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 12px; }
 .cp-empty { padding: 4px 2px; line-height: 1.5; }
@@ -828,6 +834,7 @@ code { font-family: var(--mono); color: var(--cyan); }
   .meta-pill:nth-child(2) { display: none; }
   /* Panel is full-width here — don't shove the chat off-screen */
   .global-chat.detail-open { right: 24px; }
+  .global-chat.side-panel { right: 24px; }
 }
 
 /* ---------- Chat Interface ---------- */
@@ -973,6 +980,10 @@ code { font-family: var(--mono); color: var(--cyan); }
 /* Push inward so the FAB/window clears the detail panel (460px) when it opens */
 .global-chat.detail-open {
   right: calc(460px + 24px);
+}
+/* Push inward so the FAB/window clears the docked solar channels panel (340px) */
+.global-chat.side-panel {
+  right: calc(340px + 24px);
 }
 
 /* Floating action button */

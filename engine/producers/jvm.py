@@ -188,6 +188,9 @@ class JvmProducerDetector:
                     file=ci.file,
                     line=m_node.start_point[0] + 1,
                     message_type=REST_VERB_BY_ANN[ann_name],
+                    # The interface method's return type — the HTTP analog of a
+                    # message payload: "calls FulfillmentStatus through ...".
+                    response_type=self.java.get_method_return_type(m_node) or "",
                 ))
         return out
 
@@ -441,6 +444,22 @@ class JvmProducerDetector:
         return ""
 
     def _extract_message_type_from_invocation(self, invocation: Node) -> str:
+        """Best-effort message type from invocation arguments.
+
+        Priority: (1) the type of a ``new Payload(...)`` object creation — the
+        canonical producer pattern, e.g. ``convertAndSend("order-events",
+        new OrderEvent(...))`` → ``OrderEvent``; (2) the first uppercase-token
+        arg (strip a ``Class.`` prefix if present).
+        """
+        # 1) object-creation payloads — Spring Kafka/Rabbit/JMS etc.
+        for child in invocation.children:
+            if child.type == "argument_list":
+                for arg in child.children:
+                    if arg.type == "object_creation_expression":
+                        for oc in arg.children:
+                            if oc.type in ("type_identifier", "scoped_identifier"):
+                                return self.java.last_seg(oc)
+        # 2) fallback: uppercase-token identifier / constant args
         inv = self.java.parse_method_invocation(invocation)
         for arg in inv.get("args", []):
             if arg and arg[0].isupper():

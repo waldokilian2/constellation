@@ -203,6 +203,23 @@ TOOL_DEFINITIONS = [
         ),
         "parameters": {"type": "object", "properties": {}},
     },
+    {
+        "name": "diff_graphs",
+        "description": (
+            "Compare two graph snapshots and report what changed between analyses: "
+            "added/removed/changed entry points, producers, and cross-repo links, "
+            "plus a summary of counts. Use this to answer 'what changed since the "
+            "last scan?'.\n\n"
+            "The current graph is passed automatically; supply the previous "
+            "snapshot as old_graph."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "old_graph": {"type": "object", "description": "The previous graph dict (e.g. from a stored snapshot or last_diff source)"},
+            },
+        },
+    },
 ]
 
 
@@ -849,6 +866,86 @@ def get_architecture_overview(graph: dict) -> dict:
     }
 
 
+# ── Graph diff ─────────────────────────────────────────────────────
+
+def _ep_metric_signature(ep: dict) -> tuple:
+    """The complexity metrics that matter for 'changed' detection on an entry point."""
+    m = ep.get("metrics") or {}
+    return (m.get("depth", 0), m.get("total_nodes", 0), m.get("unique_files", 0))
+
+
+def _tree_node_set(tree: dict | None) -> frozenset:
+    """The set of ``(method, file, line)`` tuples in a call tree — the change key."""
+    return frozenset(
+        (n.get("method", ""), n.get("file", ""), n.get("line", 0))
+        for n in _walk_tree(tree)
+    )
+
+
+def _entry_point_changed(old_ep: dict, new_ep: dict) -> bool:
+    """True when an entry point's metrics or call-tree node set changed."""
+    return (
+        _ep_metric_signature(old_ep) != _ep_metric_signature(new_ep)
+        or _tree_node_set(old_ep.get("call_tree")) != _tree_node_set(new_ep.get("call_tree"))
+    )
+
+
+def diff_graphs(old: dict, new: dict) -> dict:
+    """
+    Compare two graph snapshots and report what changed between analyses.
+
+    Pure and deterministic — no I/O, no state. Entry points are keyed by
+    ``id``; producers by ``id``; cross-repo links by ``channel``. An entry
+    point counts as ``changed`` when its metrics (depth/nodes/files) or its
+    call-tree node set (``(method, file, line)`` tuples) changed.
+    """
+    old_eps = {ep.get("id"): ep for ep in old.get("entry_points", []) if ep.get("id")}
+    new_eps = {ep.get("id"): ep for ep in new.get("entry_points", []) if ep.get("id")}
+    old_prods = {p.get("id"): p for p in old.get("producers", []) if p.get("id")}
+    new_prods = {p.get("id"): p for p in new.get("producers", []) if p.get("id")}
+    old_links = {l.get("channel"): l for l in old.get("cross_repo_links", []) if l.get("channel")}
+    new_links = {l.get("channel"): l for l in new.get("cross_repo_links", []) if l.get("channel")}
+
+    entry_points = {
+        "added": sorted(set(new_eps) - set(old_eps)),
+        "removed": sorted(set(old_eps) - set(new_eps)),
+        "changed": sorted(
+            ep_id for ep_id in set(new_eps) & set(old_eps)
+            if _entry_point_changed(old_eps[ep_id], new_eps[ep_id])
+        ),
+    }
+    producers = {
+        "added": sorted(set(new_prods) - set(old_prods)),
+        "removed": sorted(set(old_prods) - set(new_prods)),
+        "changed": sorted(
+            prod_id for prod_id in set(new_prods) & set(old_prods)
+            if old_prods[prod_id] != new_prods[prod_id]
+        ),
+    }
+    cross_repo_links = {
+        "added": sorted(set(new_links) - set(old_links)),
+        "removed": sorted(set(old_links) - set(new_links)),
+    }
+
+    summary = {
+        "entry_points_added": len(entry_points["added"]),
+        "entry_points_removed": len(entry_points["removed"]),
+        "entry_points_changed": len(entry_points["changed"]),
+        "producers_added": len(producers["added"]),
+        "producers_removed": len(producers["removed"]),
+        "producers_changed": len(producers["changed"]),
+        "links_added": len(cross_repo_links["added"]),
+        "links_removed": len(cross_repo_links["removed"]),
+    }
+
+    return {
+        "entry_points": entry_points,
+        "producers": producers,
+        "cross_repo_links": cross_repo_links,
+        "summary": summary,
+    }
+
+
 # ── Tool dispatcher ───────────────────────────────────────────────
 
 def execute_tool(graph: dict, tool_name: str, arguments: dict) -> dict:
@@ -866,6 +963,7 @@ def execute_tool(graph: dict, tool_name: str, arguments: dict) -> dict:
         "find_orphans": lambda args: find_orphans(graph),
         "find_cycles": lambda args: find_cycles(graph),
         "find_dead_code": lambda args: find_dead_code(graph),
+        "diff_graphs": lambda args: diff_graphs(args.get("old_graph") or {}, graph),
         "get_source": lambda args: get_source(graph, **args),
         "get_architecture_overview": lambda args: get_architecture_overview(graph),
     }

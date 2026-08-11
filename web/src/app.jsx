@@ -3843,7 +3843,7 @@ function App() {
   }, []);
 
   const fetchProjectDiff = useCallback((pid) => {
-    fetchDiff(pid, "", true).then((d) => {
+    return fetchDiff(pid, "", true).then((d) => {
       setDiffsByPid((prev) => ({ ...prev, [pid]: d }));
     }).catch(() => {});
   }, [fetchDiff]);
@@ -3851,12 +3851,16 @@ function App() {
   const loadProjects = useCallback(() => {
     setProjStatus("loading");
     fetchJSON("/api/projects")
-      .then((d) => {
+      .then(async (d) => {
         const list = d.projects || [];
         setProjects(list);
+        // Load light diffs for every analysed project so the cards show
+        // "since last scan" chips immediately — no flash of empty state.
+        await Promise.allSettled(
+          list.filter((p) => p.status !== "analyzing").map((p) => fetchProjectDiff(p.id))
+        );
         setProjStatus("ready");
-        // Refresh staleness and diff chips for every analysed project.
-        list.forEach((p) => { if (p.status !== "analyzing") { fetchProjectUpdates(p.id); fetchProjectDiff(p.id); } });
+        list.forEach((p) => { if (p.status !== "analyzing") fetchProjectUpdates(p.id); });
       })
       .catch((e) => { setProjError(e.message); setProjStatus("error"); });
   }, [fetchProjectUpdates, fetchProjectDiff]);
@@ -4100,16 +4104,18 @@ function App() {
         stale={!!(updatesByPid[activeId] && updatesByPid[activeId].stale_count > 0)}
         crumbs={crumbs}
       />
-      <CompareBar
-        diffInfo={diffInfo}
-        compareInfo={compareInfo}
-        compareMode={compareMode}
-        compareTs={compareTs}
-        onEnter={enterCompare}
-        onExit={exitCompare}
-        onSelectTs={selectCompareTs}
-        onDismiss={dismissBanner}
-      />
+      {barVisible && (
+        <CompareBar
+          diffInfo={diffInfo}
+          compareInfo={compareInfo}
+          compareMode={compareMode}
+          compareTs={compareTs}
+          onEnter={enterCompare}
+          onExit={exitCompare}
+          onSelectTs={selectCompareTs}
+          onDismiss={dismissBanner}
+        />
+      )}
       <main className="stage" style={barVisible ? { marginTop: 0 } : undefined}>
         {/* ── Topology mode (existing) ── */}
         {mode === "topology" && view.name === "galaxy" && (

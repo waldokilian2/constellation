@@ -1,18 +1,21 @@
 """
 Call graph builder — traces execution paths from entry points.
 
-For each entry point, walks the method body, finds all method invocations, and
-resolves them to their definitions using the type-aware :class:`JavaIndex`
-(field type + interface→impl + import-aware). Recurses up to MAX_DEPTH levels
-deep, tagging each edge with a confidence level.
+For each entry point, asks the :class:`~engine.symbol_index.SymbolIndex` for the
+method's calls, resolves each to its definition (type-aware: field type +
+interface→impl + import-aware), and recurses up to MAX_DEPTH levels deep,
+tagging each edge with a confidence level.
+
+The builder consumes methods purely through the index's MethodBody accessors
+(``method_calls`` / ``method_local_types``) — it never handles a raw tree-sitter
+Node, so it is language-neutral: a different language's index backend can swap
+in without this module changing.
 """
 from __future__ import annotations
 from typing import Optional
-from tree_sitter import Node
 
-from .parser import JavaParser
-from .java_index import JavaIndex, ClassInfo
-from .models import EntryPoint, CallNode
+from .symbol_index import SymbolIndex, TypeInfo, MethodInfo
+from .models import EntryPoint, CallNode, ConfidenceTag
 
 
 MAX_DEPTH = 4
@@ -22,86 +25,66 @@ MAX_NODES = 50  # Safety valve — don't build infinite trees
 class CallGraphBuilder:
     """Builds execution path trees from entry points."""
 
-    def __init__(self, index: JavaIndex):
+    def __init__(self, index: SymbolIndex):
         self.index = index
-        self.parser = index.parser
 
     def build_tree(
         self,
         entry_point: EntryPoint,
-        entry_method_node: Node,
+        entry_method: MethodInfo,
     ) -> CallNode:
         """Build a call tree starting from the entry point's method.
 
-        Uses iterative BFS with a visited set (keyed on the *resolved target*)
-        to prevent cycles without merging same-named methods across classes.
+        Recursive expansion with a visited set (keyed on the *resolved target*)
+        prevents cycles without merging same-named methods across classes.
         """
-        visited: set[str] = set()
-        node_count = 0
-
         root = CallNode(
             method=f"{entry_point.class_name}.{entry_point.method}",
             file=entry_point.file,
             line=entry_point.line,
             class_name=entry_point.class_name,
         )
-        visited.add(self._key(root.method, root.file, root.line))
-        node_count += 1
+        visited: set[str] = {self._key(root.method, root.file, root.line)}
 
         enclosing_ci = self.index.class_by_loc(
             entry_point.repo, entry_point.file, entry_point.class_name
         )
 
-        self._expand_node(
-            node=entry_method_node,
+        self._expand(
+            method=entry_method,
             call_node=root,
             depth=0,
             visited=visited,
-            node_count=[node_count],
+            node_count=[1],
             enclosing_ci=enclosing_ci,
         )
-
         return root
 
-    def _expand_node(
+    def _expand(
         self,
-        node: Node,
+        method: MethodInfo,
         call_node: CallNode,
         depth: int,
         visited: set[str],
         node_count: list[int],
-        enclosing_ci: Optional[ClassInfo],
+        enclosing_ci: Optional[TypeInfo],
     ):
-        """Recursively expand a method body, finding invocations and resolving them."""
+        """Recursively expand a method, resolving its calls to definitions."""
         if depth >= MAX_DEPTH:
-            call_node.confidence = "EXTRACTED"
+            call_node.confidence = ConfidenceTag.EXTRACTED.value
             return
         if node_count[0] >= MAX_NODES:
-            call_node.confidence = "TRUNCATED"
+            call_node.confidence = ConfidenceTag.TRUNCATED.value
             return
         if enclosing_ci is None:
             return
 
-        body = self.parser.get_method_body(node)
-        if not body:
-            return
+        local_types = self.index.method_local_types(method)
 
-        # Type map for local receivers: method parameters + local variables,
-        # so chained calls on locals resolve instead of staying INFERRED.
-        local_types = {
-            p["name"]: p["type"]
-            for p in self.parser.get_method_parameters(node)
-            if p.get("name") and p.get("type")
-        }
-        local_types.update(self.parser.get_local_variables(body))
-
-        invocations = self.parser.find_method_invocations(body)
-
-        for inv in invocations:
+        for parsed in self.index.method_calls(method):
             if node_count[0] >= MAX_NODES:
                 break
 
-            parsed = self.parser.parse_method_invocation(inv)
             method_name = parsed["method"]
             receiver = parsed["receiver"]
             arity = len(parsed["args"])
@@ -130,21 +113,21 @@ class CallGraphBuilder:
                     file=resolved.file,
                     line=resolved.line,
                     class_name=resolved.class_simple,
-                    confidence="AMBIGUOUS" if ambiguous else "EXTRACTED",
+                    confidence=(ConfidenceTag.AMBIGUOUS.value if ambiguous
+                                else ConfidenceTag.EXTRACTED.value),
                 )
                 call_node.children.append(child)
                 node_count[0] += 1
 
                 next_ci = self.index.class_for_method(resolved)
-                if resolved.node:
-                    self._expand_node(
-                        node=resolved.node,
-                        call_node=child,
-                        depth=depth + 1,
-                        visited=visited,
-                        node_count=node_count,
-                        enclosing_ci=next_ci,
-                    )
+                self._expand(
+                    method=resolved,
+                    call_node=child,
+                    depth=depth + 1,
+                    visited=visited,
+                    node_count=node_count,
+                    enclosing_ci=next_ci,
+                )
             else:
                 # Unresolved — record the call but mark it inferred (no recursion).
                 if display_name in visited:
@@ -152,7 +135,7 @@ class CallGraphBuilder:
                 visited.add(display_name)
                 child = CallNode(
                     method=display_name,
-                    confidence="INFERRED",
+                    confidence=ConfidenceTag.INFERRED.value,
                 )
                 call_node.children.append(child)
                 node_count[0] += 1

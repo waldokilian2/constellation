@@ -11,7 +11,7 @@ Two kinds of edges:
   the HTTP verb when both sides know it.
 """
 from __future__ import annotations
-from .entry_detector import EntryPointDetector
+from . import http_paths
 from .models import (
     EntryPoint,
     EntryPointType,
@@ -93,7 +93,7 @@ class CrossRepoLinker:
                 continue
             ch = ep.channel or ""
             if ch and ch != "unknown":
-                rest_by_path.setdefault(EntryPointDetector._normalize_http_path(ch), []).append((ep, ch))
+                rest_by_path.setdefault(http_paths.normalize_http_path(ch), []).append((ep, ch))
 
         http_index: dict[tuple[str, str], dict] = {}  # (norm_path, verb) -> link data
         for prod in producers:
@@ -102,7 +102,7 @@ class CrossRepoLinker:
             ch = prod.channel or ""
             if not ch or ch == "unknown":
                 continue
-            norm = EntryPointDetector._normalize_http_path(ch)
+            norm = http_paths.normalize_http_path(ch)
             verb = (prod.message_type or "").upper()
             for ep, raw_ch in rest_by_path.get(norm, []):
                 if ep.repo == prod.repo:

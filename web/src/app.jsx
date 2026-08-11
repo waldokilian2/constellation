@@ -1474,9 +1474,35 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
                 <div className="repo-orphan-line">
                   <span className="repo-orphan-kind cons">consumes, no producer</span>
                   <span className="mono repo-orphan-chans">{hoverRepo.cons.join(", ")}</span>
+            </div>
+          )}
+
+          {/* Removed-from-call-tree strip (compare mode) */}
+          {diffCtx && diffCtx.status !== "added" && diffCtx.removedNodes.length > 0 && (
+            <div
+              className="pv-removed-strip"
+              style={{
+                top: layout.maxY + (outboundChannels.length > 0 ? 140 : 70),
+                left: 0,
+                width: Math.max(PV_NODE_W + 100, 380),
+              }}
+            >
+              <button className="pv-removed-title" onClick={() => setRemovedOpen((v) => !v)}>
+                <span>{removedOpen ? "▼" : "▶"}</span> {diffCtx.removedNodes.length} call node{diffCtx.removedNodes.length > 1 ? "s" : ""} removed since last scan
+              </button>
+              {removedOpen && (
+                <div className="pv-removed-list">
+                  {diffCtx.removedNodes.map((n, i) => (
+                    <div className="pv-removed-node" key={i}>
+                      <span className="pv-removed-method mono">{n.method}</span>
+                      <span className="pv-removed-loc mono">{fmtFile(n.file)}{n.line ? ":" + n.line : ""}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
+          )}
+        </div>
           );
         })()}
       </div>
@@ -2231,6 +2257,59 @@ const PV_VGAP = 50;     // vertical gap between sibling nodes
 function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, compare }) {
   const tree = entryPoint.call_tree;
 
+  const [removedOpen, setRemovedOpen] = useState(false);
+
+  // ── Diff overlay (compare mode) ────────────────────────────────
+  const diffCtx = useMemo(() => {
+    if (!compare || !compare.old_graph) return null;
+    const oldEp = oldEntryPoint(compare, entryPoint.id);
+    if (!oldEp) return { status: "added" };
+    const oldTree = oldEp.call_tree || null;
+    const oldKeys = collectNodeKeys(oldTree);
+    const newKeys = collectNodeKeys(tree);
+    const oldDesc = {};
+    (function walk(n, desc) {
+      if (!n) return;
+      const kids = n.children || [];
+      kids.forEach((k) => walk(k, desc));
+      desc[nodeKeyOf(n)] = collectNodeKeys(n);
+    })(oldTree, oldDesc);
+    const statusOf = (n) => {
+      const k = nodeKeyOf(n);
+      if (!oldKeys.has(k)) return "added";
+      if (newKeys.size === 0) return "same";
+      const oldDescKeys = oldDesc[k] || new Set();
+      const newDescKeys = collectNodeKeys(n);
+      if (oldDescKeys.size !== newDescKeys.size) return "changed";
+      for (const dk of newDescKeys) if (!oldDescKeys.has(dk)) return "changed";
+      for (const dk of oldDescKeys) if (!newDescKeys.has(dk)) return "changed";
+      return "same";
+    };
+    const removedNodes = [];
+    (function walkOld(n) {
+      if (!n) return;
+      if (!newKeys.has(nodeKeyOf(n))) removedNodes.push(n);
+      (n.children || []).forEach(walkOld);
+    })(oldTree);
+    const statusMap = new Map();
+    (function walkNew(n) {
+      if (!n) return;
+      statusMap.set(nodeKeyOf(n), statusOf(n));
+      (n.children || []).forEach(walkNew);
+    })(tree);
+    const oldMetrics = oldEp.metrics || {};
+    const newMetrics = entryPoint.metrics || {};
+    const metricsChanged = oldMetrics.depth !== newMetrics.depth
+      || oldMetrics.total_nodes !== newMetrics.total_nodes
+      || oldMetrics.unique_files !== newMetrics.unique_files;
+    return { oldEp, removedNodes, statusMap, oldMetrics, newMetrics, metricsChanged };
+  }, [compare, entryPoint, tree]);
+
+  const nodeStatusOf = (n) => {
+    if (!diffCtx || diffCtx.status === "added") return diffCtx ? "added" : null;
+    return diffCtx.statusMap.get(nodeKeyOf(n)) || "same";
+  };
+
   // Outbound channels for this entry point
   const outboundChannels = useMemo(() => {
     if (!graph) return [];
@@ -2474,6 +2553,14 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
           {entryPoint.metrics && (
             <>· depth {entryPoint.metrics.depth} · {entryPoint.metrics.total_nodes} nodes</>
           )}
+          {diffCtx && diffCtx.status === "added" && (
+            <span className="edge-popup-status st-added">▲ new since last scan</span>
+          )}
+          {diffCtx && diffCtx.status !== "added" && diffCtx.metricsChanged && (
+            <span className="compare-inline">
+              · depth {diffCtx.oldMetrics.depth} → {diffCtx.newMetrics.depth} · {diffCtx.oldMetrics.total_nodes} → {diffCtx.newMetrics.total_nodes} nodes
+            </span>
+          )}
         </div>
       </div>
 
@@ -2520,13 +2607,15 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
             const conf = confMeta(d.confidence);
             const isSel = selectedNode && sameNode(d, selectedNode);
             const isRoot = node.depth === 0;
+            const dstatus = nodeStatusOf(d);
             return (
               <div
                 key={node.path}
                 className={
                   "pv-node" +
                   (isSel ? " sel" : "") +
-                  (isRoot ? " root" : "")
+                  (isRoot ? " root" : "") +
+                  (dstatus && dstatus !== "same" ? " st-" + dstatus : "")
                 }
                 style={{ left: node.x, top: node.y, width: PV_NODE_W }}
               >
@@ -2540,6 +2629,11 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
                   <div className="pv-loc mono">{fmtFile(d.file)}{d.line ? ":" + d.line : ""}</div>
                   {d.confidence && (
                     <span className="conf-badge" style={{ "--c": conf.color }}>{d.confidence}</span>
+                  )}
+                  {dstatus && dstatus !== "same" && (
+                    <span className={"pv-diff-chip st-" + dstatus}>
+                      {dstatus === "added" ? "▲ new" : "~ changed"}
+                    </span>
                   )}
                 </button>
                 {node.hasKids && (
@@ -2574,9 +2668,17 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
               }}
             >
               <div className="exit-point-label">EMITS TO</div>
-              {outboundChannels.map((oc, i) => (
-                <div className="exit-point-flow" key={i}>
+              {outboundChannels.map((oc, i) => {
+                const st = diffCtx ? (diffStatus(compare) || {}).chStatus : null;
+                const status = st ? (st[oc.channel] || "same") : null;
+                return (
+                <div className={"exit-point-flow" + (status && status !== "same" ? " st-" + status : "")} key={i}>
                   <span className="exit-point-channel">{oc.channel}</span>
+                  {status && status !== "same" && (
+                    <span className={"edge-popup-status st-" + status}>
+                      {status === "added" ? "▲ new" : status === "removed" ? "▼ removed" : "~ changed"}
+                    </span>
+                  )}
                   <span className="exit-point-arrow">→</span>
                   <span className="exit-point-target">
                     {oc.consumerRepos.length > 0
@@ -2584,7 +2686,8 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
                       : "no consumer"}
                   </span>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

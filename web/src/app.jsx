@@ -1798,7 +1798,19 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
     return list;
   }, [repo, graph, flows]);
   const [hidden, setHidden] = useState({});
+  const [hideRemoved, setHideRemoved] = useState(false);
   const pz = usePanZoom(".star, .star-label, .channels-panel");
+
+  // Diff overlay: entry point statuses + removed entry points from the old graph.
+  const cmp = useMemo(() => {
+    const base = diffStatus(compare);
+    if (!base) return null;
+    const oldEps = (compare.old_graph && compare.old_graph.entry_points || []).filter((e) => e.repo === repo);
+    const removedEps = oldEps.filter((e) => base.epStatus[e.id] === "removed");
+    const removedById = {};
+    removedEps.forEach((e) => (removedById[e.id] = e));
+    return { ...base, removedEps, removedById, oldCount: oldEps.length };
+  }, [compare, repo]);
 
   // The channels panel is docked to the right edge (340px + 12px gap); the
   // star field lays out in the remaining width so nothing hides under it.
@@ -1820,16 +1832,44 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
         x: cx + rr * Math.cos(angle),
         y: cy + rr * Math.sin(angle),
         color: meta.color, glow: meta.glow,
+        status: cmp ? (cmp.epStatus[ep.id] || "same") : null,
       };
     });
-  }, [eps, W, H]);
+  }, [eps, cmp, W, H]);
+
+  const removedStars = useMemo(() => {
+    if (!cmp) return [];
+    const list = cmp.removedEps;
+    if (list.length === 0) return [];
+    const maxNodes = Math.max(1, ...list.map((e) => (e.metrics && e.metrics.total_nodes) || 1));
+    return list.map((ep, i) => {
+      const angle = i * 2.39996323;
+      const rr = Math.sqrt(i + 0.6) * Math.min(W, H) * 0.085;
+      const meta = typeMeta(ep.type);
+      const nodes = (ep.metrics && ep.metrics.total_nodes) || 1;
+      const size = 14 + (nodes / maxNodes) * 34;
+      return {
+        ep, size,
+        x: cx + rr * Math.cos(angle),
+        y: cy + rr * Math.sin(angle),
+        color: meta.color, glow: meta.glow,
+      };
+    });
+  }, [cmp, W, H]);
 
   const visible = stars.filter((s) => !hidden[s.ep.type]);
 
   return (
     <div className="solar">
       <div className="view-top">
-        <div className="view-hint">{eps.length} entry points · {channels.length} channels</div>
+        <div className="view-hint">
+          {eps.length} entry points · {channels.length} channels
+          {cmp && (
+            <span className="compare-inline">
+              · was {cmp.oldCount} {cmp.oldCount === 1 ? "entry point" : "entry points"} before
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="filters">
@@ -1847,6 +1887,15 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
             </button>
           );
         })}
+        {cmp && cmp.removedEps.length > 0 && (
+          <button
+            className={"filter-chip diff-chip removed" + (hideRemoved ? " off" : "")}
+            onClick={() => setHideRemoved((v) => !v)}
+            title="Toggle removed entry points (ghosts)"
+          >
+            ▼ {cmp.removedEps.length} removed {hideRemoved ? "(hidden)" : ""}
+          </button>
+        )}
       </div>
 
       <div
@@ -1865,23 +1914,43 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
         {visible.map((s) => (
           <button
             key={s.ep.id}
-            className="star"
+            className={"star" + (s.status && s.status !== "same" ? " st-" + s.status : "")}
             style={{ left: s.x, top: s.y, width: s.size, height: s.size, "--c": s.color, "--glow": s.glow }}
             title={s.ep.id}
             onClick={(e) => onSelectEntry(s.ep.id, e)}
           >
+            {s.status && s.status !== "same" && (
+              <span className={"star-badge st-" + s.status}>
+                {s.status === "added" ? "▲" : s.status === "removed" ? "▼" : "~"}
+              </span>
+            )}
             <span className="star-core" style={{ width: s.size, height: s.size }}></span>
           </button>
+        ))}
+        {!hideRemoved && removedStars.map((s) => (
+          <div
+            key={"ghost-" + s.ep.id}
+            className="star ghost"
+            style={{ left: s.x, top: s.y, width: s.size, height: s.size, "--c": s.color, "--glow": s.glow }}
+            title={s.ep.id + " (removed)"}
+          >
+            <span className="star-core" style={{ width: s.size, height: s.size }}></span>
+          </div>
         ))}
         {visible.map((s) => (
           <div key={"l" + s.ep.id} className="star-label" style={{ left: s.x, top: s.y + s.size / 2 + 8 }}>
             <span className="star-label-name">{s.ep.method || s.ep.id.split(":").pop()}</span>
           </div>
         ))}
+        {!hideRemoved && removedStars.map((s) => (
+          <div key={"gl-" + s.ep.id} className="star-label ghost-label" style={{ left: s.x, top: s.y + s.size / 2 + 8 }}>
+            <span className="star-label-name">{s.ep.method || s.ep.id.split(":").pop()}</span>
+          </div>
+        ))}
         </div>
       </div>
 
-      <ChannelsPanel channels={channels} repo={repo} onOpenFlow={onOpenFlow} />
+      <ChannelsPanel channels={channels} repo={repo} onOpenFlow={onOpenFlow} channelStatus={cmp ? cmp.chStatus : null} />
       {pz.zoomControls}
     </div>
   );
@@ -2045,7 +2114,7 @@ function flowsForUnit(flows, graph, repo, card, o, side) {
   );
 }
 
-function ChannelCard({ c, onOpenFlow }) {
+function ChannelCard({ c, onOpenFlow, status }) {
   const flowChips = (o) =>
     o.flows && o.flows.length > 0 ? (
       <div className="cc-flows">
@@ -2062,7 +2131,7 @@ function ChannelCard({ c, onOpenFlow }) {
       </div>
     ) : null;
   return (
-    <div className={"channel-card dir-" + c.direction + (c.kind === "http" ? " http" : "")}>
+    <div className={"channel-card dir-" + c.direction + (c.kind === "http" ? " http" : "") + (status && status !== "same" ? " st-" + status : "")}>
       <div className="cc-top">
         <span className="cc-badge">
           {c.kind === "http" ? "REQUEST" : c.direction === "both" ? "IN+OUT" : c.direction.toUpperCase()}
@@ -2070,6 +2139,11 @@ function ChannelCard({ c, onOpenFlow }) {
         <span className="cc-name mono">
           {c.kind === "http" && c.verb ? c.verb + " " : ""}{c.channel}
         </span>
+        {status && status !== "same" && (
+          <span className={"diff-chip " + status} title={DIFF_LABELS[status] + " since last scan"}>
+            {status === "added" ? "▲" : status === "removed" ? "▼" : "~"} {DIFF_LABELS[status]}
+          </span>
+        )}
         <span className={"cc-kind " + c.kind} title={c.kind === "http" ? "Sync HTTP call" : "Message channel"}>
           {c.kind === "http" ? "⚡" : "◆"}
         </span>
@@ -2108,7 +2182,7 @@ function ChannelCard({ c, onOpenFlow }) {
   );
 }
 
-function ChannelsPanel({ channels, repo, onOpenFlow }) {
+function ChannelsPanel({ channels, repo, onOpenFlow, channelStatus }) {
   // Split by direction into clear sections. A channel this repo both consumes
   // and emits is a bridge — it gets its own section, never a duplicate card.
   const consumes = channels.filter((c) => c.direction === "in");
@@ -2121,7 +2195,7 @@ function ChannelsPanel({ channels, repo, onOpenFlow }) {
           <span className="cp-section-title">{title}</span>
           <span className="cp-section-count">{items.length}</span>
         </div>
-        {items.map((c) => <ChannelCard key={c.kind + "|" + c.channel} c={c} onOpenFlow={onOpenFlow} />)}
+        {items.map((c) => <ChannelCard key={c.kind + "|" + c.channel} c={c} onOpenFlow={onOpenFlow} status={channelStatus ? (channelStatus[c.channel] || "same") : null} />)}
       </div>
     );
 
@@ -4013,10 +4087,13 @@ function App() {
   const stageH = dims.h - (barVisible ? DIFF_BAR_H : 0);
 
   // Active compare overlay: the diff data for the snapshot being compared.
+  // Only non-null when the user has explicitly entered compare mode; the
+  // CompareBar banner outside compare mode reads diffInfo directly.
   const compare = useMemo(() => {
+    if (!compareMode) return null;
     const info = compareInfo && compareInfo.diff ? compareInfo : diffInfo && diffInfo.diff ? diffInfo : null;
     return info;
-  }, [compareInfo, diffInfo]);
+  }, [compareMode, compareInfo, diffInfo]);
 
   // Single navigation trail rendered in the header (see buildCrumbs above).
   const crumbs = useMemo(

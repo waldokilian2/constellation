@@ -77,6 +77,7 @@ def _ai_model(model: str = "") -> str:
     )
 
 
+from engine import git_hosts
 from engine.project_store import ProjectStore
 
 PROJECT_STORE = ProjectStore(BASE_DIR)
@@ -356,6 +357,28 @@ async def project_updates(pid: str):
         "total": len(repos),
         "stale_count": sum(1 for r in repos if r["stale"]),
     }
+
+
+# ── Git-host import (remote repo discovery) ────────────────────────
+
+@app.get("/api/remotes/repos")
+async def remote_repos(link: str = ""):
+    """Resolve an org/workspace/team-project link into its repository list.
+
+    Supports github.com, gitlab.com, bitbucket.org and dev.azure.com
+    (public repos; GitHub additionally uses ``gh auth token`` / a
+    ``GITHUB_TOKEN`` env var when available). Only the provider's fixed
+    API base is contacted — ``link`` is used solely to extract a
+    validated owner identifier.
+    """
+    if not (link or "").strip():
+        raise HTTPException(status_code=400, detail="A git-host link is required")
+    try:
+        return git_hosts.fetch_repos(link.strip(), token=git_hosts.github_token())
+    except git_hosts.GitHostError as e:
+        raise HTTPException(status_code=e.status if e.status else 400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Failed to reach the git host API")
 
 
 # ── AI proxy endpoints ─────────────────────────────────────────────

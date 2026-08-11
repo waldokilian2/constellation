@@ -1,0 +1,12 @@
+﻿{
+  "name": "constellation-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Playwright e2e tests for the Constellation UI (dev-only; not part of the app runtime)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

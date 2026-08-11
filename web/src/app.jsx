@@ -4193,7 +4193,7 @@ function App() {
           onDismiss={dismissBanner}
         />
       )}
-      <main className="stage" style={barVisible ? { marginTop: 0 } : undefined}>
+      <main className="stage" style={barVisible ? { marginTop: 0, height: `calc(100% - var(--topbar-h) - ${DIFF_BAR_H}px)` } : undefined}>
         {/* ── Topology mode (existing) ── */}
         {mode === "topology" && view.name === "galaxy" && (
           <div className="view" key="galaxy">

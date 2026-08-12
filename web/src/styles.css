@@ -2672,8 +2672,8 @@ code { font-family: var(--mono); color: var(--cyan); }
   background: rgba(248,113,113,.06);
   text-decoration: line-through; text-decoration-color: rgba(248,113,113,.55);
 }
-.pv-removed-method { color: #fca5a5; overflow-wrap: anywhere; }
-.pv-removed-loc { color: var(--text-faint); white-space: nowrap; }
+.pv-removed-method { color: #fca5a5; overflow-wrap: break-word; flex: 1 1 auto; min-width: 0; }
+.pv-removed-loc { color: var(--text-faint); white-space: nowrap; flex: none; }
 .exit-point-flow.st-added   .exit-point-channel { color: #4ade80; }
 .exit-point-flow.st-changed .exit-point-channel { color: #fbbf24; }
 .exit-point-flow.st-removed .exit-point-channel { color: #f87171; text-decoration: line-through; }

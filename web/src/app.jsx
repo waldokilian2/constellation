@@ -2474,13 +2474,25 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
   return (
     <div className="galaxy flow-index">
       <div className="view-top">
-        <div className="view-top-row">
-          <div className="view-hint">
-            {isFiltering
-              ? searched.length + " of " + flows.length + " flows"
-              : flows.length + " flows detected"}
-            {" · "}{flows.filter(f => f.hasCrossRepo).length} cross-repo
-          </div>
+        <div className="flow-index-bar">
+          {originTypesPresent.length > 1 && (
+            <div className="flow-filters">
+              {originTypesPresent.map((cls) => {
+                const m = flowOriginMeta(cls);
+                return (
+                  <button
+                    key={cls}
+                    className={"filter-chip" + (hidden[cls] ? " off" : "")}
+                    style={{ "--c": m.color }}
+                    onClick={() => setHidden((h) => ({ ...h, [cls]: !h[cls] }))}
+                  >
+                    <span className="chip-dot" style={{ background: m.color, color: m.color }}></span>
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {flows.length > 0 && (
             <div className="flow-search">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -2498,27 +2510,15 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
               )}
             </div>
           )}
-        </div>
-        {originTypesPresent.length > 1 && (
-          <div className="flow-filters">
-            {originTypesPresent.map((cls) => {
-              const m = flowOriginMeta(cls);
-              return (
-                <button
-                  key={cls}
-                  className={"filter-chip" + (hidden[cls] ? " off" : "")}
-                  style={{ "--c": m.color }}
-                  onClick={() => setHidden((h) => ({ ...h, [cls]: !h[cls] }))}
-                >
-                  <span className="chip-dot" style={{ background: m.color, color: m.color }}></span>
-                  {m.label}
-                </button>
-              );
-            })}
+          <div className="view-hint">
+            {isFiltering
+              ? searched.length + " of " + flows.length + " flows"
+              : flows.length + " flows detected"}
+            {" · "}{flows.filter(f => f.hasCrossRepo).length} cross-repo
           </div>
-        )}
+        </div>
       </div>
-      <div className="canvas flow-scroll" style={{ height: H }}>
+      <div className="canvas flow-scroll">
         <div className="flow-grid flow-grid-static">
           {searched.map((f, i) => (
             <div

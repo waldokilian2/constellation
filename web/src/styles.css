@@ -357,6 +357,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 
 /* ---------- Galaxy view ---------- */
 .galaxy { height: 100%; }
+.flow-index { display: flex; flex-direction: column; }
 .repo-wrap {
   position: absolute; transform: translate(-50%, -50%);
   width: 0; height: 0;
@@ -486,21 +487,31 @@ code { font-family: var(--mono); color: var(--cyan); }
   display: flex; gap: 8px; flex-wrap: wrap;
 }
 
-/* Flows index top bar: stack into a column (hint + search row, then the type
-   chips below), and clear the card grid far enough that the taller top bar
-   never overlaps the first row of cards. */
+/* Flows index top bar: a single row laid out as a 3-column grid —
+   filter chips on the left, search centered, and the hint on the right.
+   Relative positioning so it participates in the normal flow (the scroll
+   container below naturally positions cards beneath it). Kept transparent
+   so the starfield background is continuous behind the bar. */
 .flow-index .view-top {
+  position: relative;
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
   gap: 12px;
+  padding-bottom: 12px;
 }
-.view-top-row {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; flex-wrap: wrap;
+.flow-index-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
 }
-.flow-index .view-top ~ .canvas .flow-grid-static {
-  padding-top: 104px;
+.flow-index-bar .flow-filters { justify-self: start; }
+.flow-index-bar .flow-search { justify-self: center; }
+.flow-index-bar .view-hint { justify-self: end; }
+.flow-index .flow-scroll {
+  flex: 1;
+  min-height: 0;
 }
 
 /* Free-text search box in the Flows top bar. */
@@ -2778,6 +2789,29 @@ code { font-family: var(--mono); color: var(--cyan); }
    .ai-error-msg, .chat-msg-text, .chat-msg-role, .chat-tools, .chat-welcome,
    .chat-welcome-icon from the GlobalChat section above. Only layout/shell classes
    are defined here. */
+
+/* Planner welcome — title, description, stat pills and suggested prompts. */
+.planner-welcome-title {
+  font-size: 16px !important;
+  font-weight: 700;
+  color: var(--text) !important;
+  margin-bottom: 4px;
+}
+.planner-welcome-stats {
+  display: flex; flex-wrap: wrap; justify-content: center;
+  gap: 8px; margin-top: 10px;
+}
+.planner-welcome-stat {
+  font-size: 11px; color: var(--text-dim);
+  background: rgba(0, 212, 255, .06);
+  border: 1px solid rgba(0, 212, 255, .14);
+  border-radius: 999px; padding: 4px 11px;
+  white-space: nowrap;
+}
+.planner-welcome-stat b {
+  color: var(--cyan); font-family: var(--mono);
+  font-weight: 700; margin-right: 2px;
+}
 
 .planner-chat {
   position: relative;

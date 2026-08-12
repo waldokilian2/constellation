@@ -55,6 +55,7 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
 
   const repos = (graph && graph.repos) || [];
   const channelCount = (graph && graph.cross_repo_links) ? graph.cross_repo_links.length : 0;
+  const epCount = (graph && graph.entry_points) ? graph.entry_points.length : 0;
 
   const sendMsg = (text) => {
     if (!text.trim() || loading) return;
@@ -113,8 +114,13 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
         {messages.length === 0 && !loading && (
           <div className="chat-welcome">
             <div className="chat-welcome-icon">✦</div>
-            <p>Describe a change and the planner will map its impact across services.</p>
-            <p className="muted small">Plans render as markdown in the chat. The planner drives the right-side canvas with its <code>render_diagram</code> tool — ask it to add, replace, or remove diagrams there.</p>
+            <p className="planner-welcome-title">Plan architecture changes before you code</p>
+            <p className="muted small">Describe a change and the planner maps its blast radius across services — then renders diagrams for the affected flows on the right.</p>
+            <div className="planner-welcome-stats">
+              <span className="planner-welcome-stat"><b>{repos.length}</b> repos</span>
+              <span className="planner-welcome-stat"><b>{epCount}</b> entry points</span>
+              <span className="planner-welcome-stat"><b>{channelCount}</b> channels</span>
+            </div>
           </div>
         )}
 

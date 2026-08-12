@@ -203,12 +203,110 @@ TOOL_DEFINITIONS = [
         ),
         "parameters": {"type": "object", "properties": {}},
     },
+    {
+        "name": "task_complete",
+        "description": (
+            "Signal completion status of the current task. Call this after you've "
+            "finished all requested work, or when you need to report interim progress "
+            "and continue with remaining steps.\n\n"
+            "Always call this when you are done answering, instead of just stopping. "
+            "Use status 'complete' once the user's request is fully answered. Use "
+            "'incomplete' only if you have more concrete steps to execute and want to "
+            "checkpoint progress first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["complete", "incomplete"],
+                    "description": "'complete' when all work is done; 'incomplete' when there are remaining steps to execute",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Brief summary of what was accomplished",
+                },
+                "next_steps": {
+                    "type": "string",
+                    "description": "If incomplete, what steps remain. Keep this concise and actionable.",
+                },
+            },
+            "required": ["status"],
+        },
+    },
+    {
+        "name": "render_diagram",
+        "description": (
+            "Manage the diagrams shown in the user's plan-preview panel (the right "
+            "side of the planner). Use this to DISPLAY visuals — Mermaid diagrams or "
+            "small HTML — instead of embedding them in chat text. NEVER put "
+            "```mermaid or ```html blocks in your chat reply; ALWAYS call this tool "
+            "instead. The panel is the ONLY place for diagrams. Each diagram has a "
+            "header (title) and a body.\n\n"
+            "Actions:\n"
+            "  - add     — append a new diagram. An id is auto-generated if omitted.\n"
+            "  - replace — update an existing diagram by id (header/code/kind). If you "
+            "               omit the id and exactly one diagram exists, it updates that "
+            "               one; with none it adds; with many and a bad id it errors and "
+            "               tells you to call 'get' first.\n"
+            "  - remove  — delete a single diagram by id.\n"
+            "  - get     — return the diagrams currently shown in the panel.\n"
+            "  - clear   — remove every diagram from the panel.\n\n"
+            "Every call returns the full current list of diagrams (id, header, kind) "
+            "so you can verify the panel state. STOP once the user's visuals are "
+            "shown: create each diagram ONCE and then call task_complete. To improve "
+            "a diagram you already added, use action 'replace' with its diagram_id — "
+            "never add a second copy of the same visual. Mermaid is validated before "
+            "storing; on 'ok: false' with a parse error, fix the exact error and "
+            "retry once, then simplify if it fails again. Prefer Mermaid (kind "
+            "'mermaid') for flows; keep syntax simple and ALWAYS double-quote edge "
+            "labels, e.g. A -.->|\"@EventListener\"| B. Use kind 'html' only for "
+            "visuals Mermaid cannot express (HTML/CSS only, no scripts, keep it small)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "replace", "remove", "get", "clear"],
+                    "description": "What to do with the panel diagram(s).",
+                },
+                "diagram_id": {
+                    "type": "string",
+                    "description": "Diagram id (from a previous add/get). Required for remove; optional for replace; ignored for add/clear/get.",
+                },
+                "header": {
+                    "type": "string",
+                    "description": "Title shown above the diagram (add/replace).",
+                },
+                "code": {
+                    "type": "string",
+                    "description": "Diagram source — Mermaid or HTML (add/replace).",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["mermaid", "html"],
+                    "description": "Render mode for the diagram body. Default 'mermaid'.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 
-def get_tool_definitions() -> list[dict]:
-    """Return the tool definitions for LLM function-calling."""
-    return TOOL_DEFINITIONS
+def get_tool_definitions(include_planner_tools: bool = False) -> list[dict]:
+    """Return the tool definitions for LLM function-calling.
+
+    Planner-only tools are included only when ``include_planner_tools`` is
+    set. ``render_diagram`` drives the planner's right-side preview panel
+    and is stateful (persisted on the conversation), so it is exposed solely
+    to the planner chat — never to the global topology chat, the MCP server,
+    or the REST ``/api/tools`` surface.
+    """
+    if include_planner_tools:
+        return TOOL_DEFINITIONS
+    return [t for t in TOOL_DEFINITIONS if t.get("name") != "render_diagram"]
 
 
 # ── Helper ────────────────────────────────────────────────────────
@@ -849,12 +947,36 @@ def get_architecture_overview(graph: dict) -> dict:
     }
 
 
+
 # ── Tool dispatcher ───────────────────────────────────────────────
+
+def task_complete(status: str = "complete", summary: str = "", next_steps: str = "") -> dict:
+    """Passthrough result for the ``task_complete`` tool.
+
+    This is a signalling tool: the server's tool loop inspects the returned
+    ``status`` field to decide whether to stop (``complete``) or continue
+    (``incomplete``). The function itself does no work beyond echoing the
+    arguments back as structured data.
+    """
+    return {
+        "type": "task_complete",
+        "status": status if status in ("complete", "incomplete") else "complete",
+        "summary": summary or "",
+        "next_steps": next_steps or "",
+    }
+
 
 def execute_tool(graph: dict, tool_name: str, arguments: dict) -> dict:
     """
     Execute a tool by name with the given arguments.
     Returns the tool result dict, or an error dict.
+
+    Note: ``render_diagram`` is a planner-only, stateful UI tool whose
+    state lives on the conversation (not the graph). It is intentionally
+    NOT in this dispatch table — it is special-cased in the streaming
+    layer (``server._stream_llm_events_v2``), which has the conversation
+    id needed to persist panel diagrams via ``ConversationStore``. If it
+    ever reaches here, it is treated as unknown.
     """
     dispatch = {
         "search_code": lambda args: search_code(graph, **args),
@@ -868,6 +990,7 @@ def execute_tool(graph: dict, tool_name: str, arguments: dict) -> dict:
         "find_dead_code": lambda args: find_dead_code(graph),
         "get_source": lambda args: get_source(graph, **args),
         "get_architecture_overview": lambda args: get_architecture_overview(graph),
+        "task_complete": lambda args: task_complete(**args),
     }
 
     handler = dispatch.get(tool_name)

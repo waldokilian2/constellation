@@ -150,7 +150,7 @@ test.describe.serial("Graph diff & compare UI", () => {
     await page.locator(".project-card", { hasText: PROJECT_NAME }).click();
     const pill = page.locator(".compare-pill");
     await expect(pill).toHaveClass(/can-toggle/);
-    await expect(pill.locator(".seg-diff")).toHaveText(/changes since last scan/);
+    await expect(pill.locator(".seg-diff")).toHaveText(/view changes since last scan/);
   });
 
   test("project card shows the change chips", async ({ page }) => {
@@ -249,7 +249,10 @@ test.describe.serial("Graph diff & compare UI", () => {
 
     const select = page.locator(".compare-select");
     const options = select.locator("option");
-    await expect(options.first()).toContainText("previous snapshot");
+    // The redundant "previous snapshot" prefix is gone — the first option is
+    // just the snapshot date (locale-formatted).
+    await expect(options.first()).not.toContainText("previous snapshot");
+    await expect(options.first()).toContainText(/[0-9]/);
     expect(await options.count()).toBeGreaterThanOrEqual(2);
     await select.selectOption({ index: 1 });
     await expect(page.locator(".compare-pill.comparing")).toHaveCount(1);

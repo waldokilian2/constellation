@@ -456,7 +456,7 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, compareTs, sna
       {comparing && snapshots.length > 1 && (
         <select className="compare-select" value={compareTs} onChange={(e) => onSelectCompareTs(e.target.value)}
                 title="Compare against an older snapshot" aria-label="Compare against an older snapshot">
-          <option value="">previous snapshot ({snapshots[0] ? fmtSnapshot(snapshots[0]) : "—"})</option>
+          <option value="">{snapshots[0] ? fmtSnapshot(snapshots[0]) : "—"}</option>
           {snapshots.slice(1).map((ts) => (
             <option key={ts} value={ts}>{fmtSnapshot(ts)}</option>
           ))}
@@ -477,7 +477,7 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, compareTs, sna
         {canCompare && !comparing && (
           <span className={"seg seg-diff" + (hasChanges ? " st-diff" : "")}>
             <span className="seg-sep">|</span>
-            {hasChanges ? "changes since last scan" : "no changes"}
+            {hasChanges ? "view changes since last scan" : "no changes"}
           </span>
         )}
         {comparing && <span className="seg seg-exit">✕ exit</span>}

@@ -292,19 +292,23 @@ class CallGraphBuilder:
                 display = f"{receiver}.{method_name}" if receiver else method_name
                 if self._is_trivial(display, arity):
                     continue
-                resolved, _ambiguous, _recv = self.index.resolve_call(
+                # Reachability fans out to EVERY candidate (all interface
+                # impls / overloads). A method reachable through any impl of a
+                # called interface is not dead code, even though the displayed
+                # call tree pins a single AMBIGUOUS target.
+                for resolved in self.index.resolve_call_all(
                     enclosing_ci, receiver, method_name, arity=arity, local_types=local_types
-                )
-                if not resolved:
-                    continue  # unresolved call → no edge to follow
-                rkey = self._key(
-                    f"{resolved.class_simple}.{resolved.name}", resolved.file, resolved.line
-                )
-                if rkey in reached:
-                    continue
-                reached.add(rkey)
-                if resolved.node:
-                    queue.append((resolved.node, self.index.class_for_method(resolved)))
+                ):
+                    if not resolved:
+                        continue  # unresolved call → no edge to follow
+                    rkey = self._key(
+                        f"{resolved.class_simple}.{resolved.name}", resolved.file, resolved.line
+                    )
+                    if rkey in reached:
+                        continue
+                    reached.add(rkey)
+                    if resolved.node:
+                        queue.append((resolved.node, self.index.class_for_method(resolved)))
         return reached
 
     def is_noop_entry(self, method_node: Node) -> bool:

@@ -2432,71 +2432,25 @@ function DetailPanel({ node, entryPoint, onClose, pid }) {
 
 
 /* ---------------- Flows Mode: Flow Index View ---------------- */
-// Galaxy equivalent — shows all detected flows as cards in the starfield
+// Galaxy equivalent — shows all detected flows as cards in the starfield.
+// Standard scroll layout: cards flow into a responsive CSS grid and the canvas
+// scrolls normally when there are more flows than fit on screen. No pan/zoom —
+// with many flows the shrink-to-fit + zoom model became unusable.
 function FlowIndexView({ graph, dims, onSelectFlow }) {
   const flows = useMemo(() => detectFlows(graph), [graph]);
-  const W = dims.w, H = dims.h;
-  const TOPBAR_H = 72; // matches --topbar-h in styles.css
-  // Center within the VISIBLE stage area (below the fixed topbar), not the full window
-  const cx = W / 2, cy = (H - TOPBAR_H) / 2;
-  const pz = usePanZoom(".flow-card");
+  const H = dims.h;
 
-  // Uniform card height: all cards share the tallest card's height
+  // Uniform card height: all cards share the tallest card's height so rows
+  // stay aligned (same behaviour as the old grid, kept for the scroll layout).
   const [uniformH, setUniformH] = useState(null);
   const cardRefs = useRef([]);
   useLayoutEffect(() => {
     if (flows.length === 0) return;
-    // Measure natural heights of all cards (no explicit height set yet)
     const hs = cardRefs.current.map((el) => (el ? el.offsetHeight : 0));
     if (hs.length === 0) return;
     const maxH = Math.max(...hs);
     setUniformH((prev) => (prev === maxH ? prev : maxH));
   }, [flows]);
-
-  // Position flow cards in a grid that FITS the visible stage. The whole grid is
-  // scaled down (transform: scale) when it would overflow, so cards never clip.
-  const layout = useMemo(() => {
-    const n = flows.length;
-    const cols = Math.min(n, n <= 4 ? 2 : 3);
-    const cardW = 240;
-    const gapX = 50, gapY = 36;
-    const rows = Math.ceil(n / cols);
-    // Uniform height across the whole grid (fall back to a reasonable estimate
-    // before the first measurement lands)
-    const cardH = uniformH || 196;
-    const totalW = cols * cardW + (cols - 1) * gapX;
-    const totalH = rows * cardH + (rows - 1) * gapY;
-    // Shrink-to-fit with a small margin around the visible stage
-    const margin = 24;
-    const fit = Math.min(1, (W - margin * 2) / totalW, (cy * 2 - margin * 2) / totalH);
-    const scaledW = totalW * fit;
-    const scaledH = totalH * fit;
-
-    const positions = [];
-    let y = 0;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const idx = r * cols + c;
-        if (idx >= n) break;
-        positions.push({
-          x: c * (cardW + gapX),
-          y: y,
-          w: cardW,
-          h: uniformH || null, // null = keep natural (auto) height until measured
-        });
-      }
-      y += cardH + gapY;
-    }
-    return {
-      positions,
-      // Wrapper placed so the scaled grid is centered in the visible area
-      left: cx - scaledW / 2,
-      top: cy - scaledH / 2,
-      width: totalW,
-      height: totalH,
-      fit,
-    };
-  }, [flows, cx, cy, uniformH]);
 
   return (
     <div className="galaxy flow-index">
@@ -2505,39 +2459,14 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
           {flows.length} flows detected · {flows.filter(f => f.hasCrossRepo).length} cross-repo
         </div>
       </div>
-      <div
-        className="canvas pan-canvas"
-        ref={pz.containerRef}
-        style={{ height: H }}
-        {...pz.handlers}
-      >
-        <div
-          className={"canvas-world" + (pz.animating ? " animating" : "")}
-          style={{
-            transform: `translate(${pz.viewport.x}px, ${pz.viewport.y}px) scale(${pz.viewport.zoom})`,
-            transformOrigin: "0 0",
-          }}
-        >
-        <div
-          className="flow-grid"
-          style={{
-            position: "absolute",
-            left: layout.left,
-            top: layout.top,
-            width: layout.width,
-            height: layout.height,
-            transform: "scale(" + layout.fit + ")",
-            transformOrigin: "top left",
-          }}
-        >
-        {flows.map((f, i) => {
-          const pos = layout.positions[i];
-          return (
+      <div className="canvas flow-scroll" style={{ height: H }}>
+        <div className="flow-grid flow-grid-static">
+          {flows.map((f, i) => (
             <div
               key={f.id}
               ref={(el) => { cardRefs.current[i] = el; }}
               className={"flow-card" + (f.hasCrossRepo ? " cross-repo" : "")}
-              style={{ left: pos.x, top: pos.y, width: pos.w, height: pos.h || undefined, animationDelay: (i * 45) + "ms" }}
+              style={{ height: uniformH || undefined, animationDelay: (i * 45) + "ms" }}
               onClick={(e) => onSelectFlow(f, e)}
             >
               <div className="flow-card-glow" />
@@ -2579,12 +2508,9 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
                 ))}
               </div>
             </div>
-          );
-        })}
-        </div>
+          ))}
         </div>
       </div>
-      {pz.zoomControls}
     </div>
   );
 }

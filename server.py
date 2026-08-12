@@ -29,7 +29,7 @@ from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ── Setup ──────────────────────────────────────────────────────────
 
@@ -79,11 +79,16 @@ def _ai_model(model: str = "") -> str:
 
 from engine import git_hosts
 from engine.project_store import ProjectStore
+from engine.conversation_store import ConversationStore, Conversation
 
 PROJECT_STORE = ProjectStore(BASE_DIR)
 # Import a pre-multi-project graph.json (e.g. produced by start.sh) as a
 # "Default" project so the app isn't empty on first load.
 PROJECT_STORE.ensure_legacy_seed()
+
+# Conversation persistence (multi-turn chat history). Project-scoped, like
+# ProjectStore, so each project's conversations live under its own directory.
+CONVERSATION_STORE = ConversationStore(BASE_DIR)
 
 app = FastAPI(title="Constellation API", version="0.1.0")
 
@@ -407,20 +412,89 @@ class AIRequest(BaseModel):
     model: str = ""
 
 
+class ToolCallFunction(BaseModel):
+    """OpenAI-format tool-call function payload."""
+    name: str = ""
+    arguments: str = ""  # JSON-encoded string
+
+
+class ToolCall(BaseModel):
+    """A single assistant tool call."""
+    id: str = ""
+    type: str = "function"
+    function: ToolCallFunction = Field(default_factory=ToolCallFunction)
+
+
 class ChatMessage(BaseModel):
-    """A single message in a conversation."""
-    role: str = "user"  # "user" | "assistant" | "system"
+    """A single message in a conversation (OpenAI chat-completions format).
+
+    ``tool_calls`` is present on ``assistant`` messages that requested tool
+    execution; ``tool_call_id`` + ``name`` identify the tool result on
+    ``tool``-role messages. All optional so legacy clients that only send
+    ``role``/``content`` keep working.
+    """
+    role: str = "user"  # "user" | "assistant" | "system" | "tool"
     content: str = ""
+    tool_calls: Optional[list[ToolCall]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+
+    def to_openai_dict(self) -> dict:
+        """Serialize to the dict shape the LLM API expects.
+
+        Drops empty ``content`` when tool_calls are present (the OpenAI
+        spec wants ``content: null`` there) and omits the optional tool
+        fields entirely when unset.
+        """
+        d: dict = {"role": self.role}
+        if self.tool_calls:
+            d["content"] = self.content if self.content else None
+            d["tool_calls"] = [
+                {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in self.tool_calls
+            ]
+        else:
+            d["content"] = self.content
+        if self.tool_call_id is not None:
+            d["tool_call_id"] = self.tool_call_id
+        if self.name is not None:
+            d["name"] = self.name
+        return d
 
 
 class ChatRequest(BaseModel):
-    """Request body for the conversational chat endpoint."""
+    """Request body for the conversational chat endpoint (stateless variant)."""
     entry_point_id: str = ""
     node: dict = {}  # the selected call_tree node
     messages: list[ChatMessage] = []  # conversation history (user/assistant only)
     model: str = ""
     repo: str = ""  # optional repo context (for solar/flow views)
     flow_context: dict = {}  # optional flow context (name, repos, hops, etc.)
+    planner: bool = False  # when True, uses the change-planner system prompt
+    conversation_id: str = ""  # optional: target a persisted conversation
+
+
+class ConversationCreateRequest(BaseModel):
+    """Create a new conversation."""
+    title: str = ""
+    is_default: bool = False
+
+
+class ConversationChatRequest(BaseModel):
+    """Send a message into a persisted conversation (streaming endpoint).
+
+    The context fields (``entry_point_id``, ``node``, ``repo``,
+    ``flow_context``, ``planner``) shape the system prompt for *this* turn
+    only; the conversation itself carries the full message history (incl.
+    tool calls/results) across turns.
+    """
+    content: str = ""
+    model: str = ""
+    entry_point_id: str = ""
+    node: dict = {}
+    repo: str = ""
+    flow_context: dict = {}
+    planner: bool = False
 
 
 def _build_ai_context(graph: dict, entry_point_id: str, node: dict) -> tuple[str, str]:
@@ -542,7 +616,12 @@ def _call_llm(
             # If the model wants to call tools, execute them
             tool_calls = msg.get("tool_calls", [])
             if tool_calls and graph is not None:
-                full_messages.append(msg)  # add assistant's tool-call message
+                # Append the assistant's tool-call message, minus reasoning-only
+                # fields (non-standard on the OpenAI wire format).
+                full_messages.append({
+                    k: v for k, v in msg.items()
+                    if k not in ("reasoning_content", "reasoning")
+                })
 
                 for tc in tool_calls:
                     func = tc.get("function", {})
@@ -563,9 +642,14 @@ def _call_llm(
                 # Continue loop — let the model process tool results
                 continue
 
-            # No tool calls — extract the text response
+            # No tool calls — extract the text response (and any reasoning)
             text = msg.get("content", "")
-            return {"available": True, "response": text.strip() if text else ""}
+            reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            return {
+                "available": True,
+                "response": text.strip() if text else "",
+                "reasoning": reasoning,
+            }
 
         # Exceeded max iterations — return what we have
         return {"available": True, "response": text.strip() if text else "(tool loop limit reached)"}
@@ -583,6 +667,11 @@ def _call_llm(
 
 def _build_chat_prompt(req, graph: dict) -> str:
     """Build the system prompt for a chat request (incl. flow/repo context)."""
+    if req.planner:
+        from engine.context_builder import ContextBuilder
+        cb = ContextBuilder(graph)
+        return cb.build_planner_prompt(req.repo or "")
+
     system_prompt, _ = _build_ai_context(graph, req.entry_point_id, req.node)
 
     if req.flow_context:
@@ -607,6 +696,16 @@ def _build_chat_prompt(req, graph: dict) -> str:
     if req.repo and not req.entry_point_id:
         system_prompt += f"\n\n## CURRENT REPO CONTEXT\nThe user is viewing the **{req.repo}** service. Focus your answers on this service."
 
+    # Reinforce the task_complete tool so the AI explicitly signals when it's
+    # done (rather than just stopping). The server auto-continues on 'incomplete'.
+    system_prompt += (
+        "\n\n## COMPLETION\n"
+        "When you have fully answered the user's request, call the `task_complete` "
+        "tool with status 'complete' and a brief summary. If you have more steps to "
+        "execute and want to checkpoint progress first, call it with status "
+        "'incomplete' and describe the remaining next_steps."
+    )
+
     return system_prompt
 
 
@@ -616,6 +715,63 @@ def _truncate_json(obj, limit: int = 900) -> str:
     if len(s) <= limit:
         return s
     return s[:limit] + "…"
+
+
+def _append_diagram_context(system_prompt: str, pid: str, cid: str, planner: bool) -> str:
+    """Tell the planner what's currently in the plan-preview panel.
+
+    Only appended in planner mode. The AI uses this to decide whether to
+    ``add``, ``replace`` (by id), or ``remove`` via the ``render_diagram``
+    tool. Non-planner chats have no preview panel, so they're untouched.
+    """
+    if not planner or not pid or not cid:
+        return system_prompt
+    diags = CONVERSATION_STORE.get_diagrams(pid, cid)
+    if diags:
+        lines = [
+            "",
+            "## PLAN-PREVIEW PANEL (current state)",
+            "The right-side panel currently shows these diagrams:",
+        ]
+        for d in diags:
+            lines.append(f"- id `{d.get('id')}` — {d.get('header')} ({d.get('kind')})")
+        lines.append(
+            "Use render_diagram 'replace' (with the id) to edit one of these, "
+            "'remove' (with the id) to delete one, or 'add' for a new diagram. "
+            "Don't duplicate a diagram already shown unless you're replacing it."
+        )
+        return system_prompt + "\n" + "\n".join(lines)
+    return system_prompt + (
+        "\n\n## PLAN-PREVIEW PANEL\n"
+        "The right-side panel is empty. Use the render_diagram tool (action "
+        "'add') to show diagrams there — Mermaid flows are preferred."
+    )
+
+
+def _delta_reasoning(delta: dict) -> str:
+    """Pull reasoning tokens out of a streamed delta.
+
+    Reasoning-style models (DeepSeek's ``reasoning_content``, Qwen's
+    ``reasoning``) stream their chain-of-thought in a separate delta field
+    rather than ``content``. Without reading it, those tokens are silently
+    dropped — never shown and never persisted.
+    """
+    return delta.get("reasoning_content") or delta.get("reasoning") or ""
+
+
+def _strip_reasoning(messages: list[dict]) -> list[dict]:
+    """Return a copy of ``messages`` with UI-side ``reasoning`` fields removed.
+
+    ``reasoning`` is stored on assistant messages so the UI can render it, but
+    it is not part of the OpenAI wire format — strip it before sending history
+    back to the LLM.
+    """
+    out = []
+    for m in messages:
+        m = dict(m)
+        m.pop("reasoning", None)
+        out.append(m)
+    return out
 
 
 def _stream_llm_events(
@@ -684,6 +840,7 @@ def _stream_llm_events(
 
         tool_acc: dict[int, dict] = {}
         content_acc = ""
+        reasoning_acc = ""
         finish = None
 
         try:
@@ -708,6 +865,10 @@ def _stream_llm_events(
                     if c:
                         content_acc += c
                         yield {"type": "token", "text": c}
+                    r = _delta_reasoning(delta)
+                    if r:
+                        reasoning_acc += r
+                        yield {"type": "reasoning", "text": r}
                     for tc in delta.get("tool_calls") or []:
                         idx = tc.get("index", 0)
                         acc = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
@@ -740,11 +901,14 @@ def _stream_llm_events(
                     "type": "function",
                     "function": {"name": acc["name"], "arguments": acc["arguments"]},
                 })
-            full_messages.append({
+            assistant_msg = {
                 "role": "assistant",
                 "content": content_acc or None,
                 "tool_calls": tool_calls,
-            })
+            }
+            if reasoning_acc:
+                assistant_msg["reasoning"] = reasoning_acc
+            full_messages.append(assistant_msg)
             for tc in tool_calls:
                 fn = tc["function"]
                 tool_name = fn["name"]
@@ -770,6 +934,301 @@ def _stream_llm_events(
         yield {"type": "done"}
         return
 
+    yield {"type": "done"}
+
+
+def _stream_llm_events_v2(
+    system_prompt: str,
+    full_messages: list[dict],
+    model: str = "",
+    tools: list[dict] = None,
+    graph: dict = None,
+    max_iterations: int = 20,
+    pid: str = "",
+    cid: str = "",
+):
+    """
+    Generator yielding SSE event dicts for a multi-turn streaming chat with
+    tool use, full tool-history, and ``task_complete`` auto-continuation.
+
+    Mutates ``full_messages`` in place: each iteration appends the assistant
+    message (with ``tool_calls``) and the corresponding ``tool``-role result
+    messages, so when the generator returns the caller can persist
+    ``full_messages`` (minus the leading system prompt) as the conversation's
+    authoritative history.
+
+    Events (superset of ``_stream_llm_events``):
+      {"type": "token",       "text": "..."}
+      {"type": "tool_start",  "name", "args": {...}}
+      {"type": "tool_result", "name", "result": "..."}        — truncated for UI
+      {"type": "tool_result", "name": "render_diagram", "result", "diagrams"}
+                                                              — FULL + panel state
+      {"type": "task_complete", "status", "summary", "next_steps"}
+      {"type": "done"}
+      {"type": "error", "message"}
+
+    Differences from v1:
+      * 20 iterations (was 5) and 4096 max_tokens (was 1200) — enough runway
+        for the planner to explore + produce a full plan.
+      * Full tool history across iterations is preserved in ``full_messages``.
+      * ``task_complete`` with status ``complete`` ends the stream; ``incomplete``
+        injects a system nudge and continues.
+      * ``render_diagram`` (planner-only) is executed against the persisted
+        conversation (needs ``pid``/``cid``) and emits the full, un-truncated
+        result plus the current panel ``diagrams`` for the frontend to mirror.
+    """
+    api_key = _ai_api_key()
+    if not api_key:
+        yield {"type": "error", "message": "AI features require an API key. Set OPENCODE_API_KEY (or OPENAI_API_KEY) in your .env / environment."}
+        return
+
+    from engine.graph_tools import execute_tool
+
+    url = _ai_base_url() + "/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": _USER_AGENT,
+    }
+    model = _ai_model(model)
+
+    oai_tools = None
+    if tools:
+        oai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["parameters"],
+                },
+            }
+            for t in tools
+        ]
+
+    for _iteration in range(max_iterations):
+        # Signal the start of a new assistant message (one per LLM iteration).
+        # The frontend uses this to open a fresh chat segment, so a multi-step
+        # turn renders as separate bubbles: [tool chips] … [final answer].
+        yield {"type": "message_start"}
+
+        body_dict = {
+            "model": model,
+            "messages": full_messages,
+            "max_tokens": 4096,
+            "stream": True,
+        }
+        if oai_tools:
+            body_dict["tools"] = oai_tools
+
+        body = json.dumps(body_dict).encode()
+        req_obj = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+        tool_acc: dict[int, dict] = {}
+        content_acc = ""
+        reasoning_acc = ""
+        finish = None
+
+        try:
+            with urllib.request.urlopen(req_obj, timeout=180) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        finish = "stop"
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    c = delta.get("content")
+                    if c:
+                        content_acc += c
+                        yield {"type": "token", "text": c}
+                    r = _delta_reasoning(delta)
+                    if r:
+                        reasoning_acc += r
+                        yield {"type": "reasoning", "text": r}
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        acc = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                        if tc.get("id"):
+                            acc["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            acc["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            acc["arguments"] += fn["arguments"]
+                    fr = choices[0].get("finish_reason")
+                    if fr:
+                        finish = fr
+                        if fr in ("stop", "tool_calls"):
+                            break
+        except urllib.error.HTTPError as e:
+            yield {"type": "error", "message": f"HTTP {e.code}: {e.read().decode()[:300]}"}
+            return
+        except Exception as e:
+            yield {"type": "error", "message": str(e)}
+            return
+
+        # The AI asked to call tools — execute them and loop for the final answer
+        if tool_acc and graph is not None:
+            tool_calls = []
+            for idx in sorted(tool_acc):
+                acc = tool_acc[idx]
+                tool_calls.append({
+                    "id": acc["id"],
+                    "type": "function",
+                    "function": {"name": acc["name"], "arguments": acc["arguments"]},
+                })
+            # Append the assistant's tool-call message to the running history.
+            assistant_msg = {
+                "role": "assistant",
+                "content": content_acc or None,
+                "tool_calls": tool_calls,
+            }
+            if reasoning_acc:
+                assistant_msg["reasoning"] = reasoning_acc
+            full_messages.append(assistant_msg)
+
+            has_task_complete = any(
+                tc["function"]["name"] == "task_complete" for tc in tool_calls
+            )
+
+            tc_result_by_name: list[tuple[str, dict]] = []
+
+            for tc in tool_calls:
+                fn = tc["function"]
+                tool_name = fn["name"]
+                try:
+                    tool_args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    tool_args = {}
+                yield {"type": "tool_start", "name": tool_name, "args": tool_args}
+
+                if tool_name == "render_diagram":
+                    # Planner-only, stateful UI tool. State lives on the
+                    # conversation, so this is handled here (with pid/cid)
+                    # rather than in the pure graph-tool dispatcher.
+                    rd_action = str(tool_args.get("action", "add"))
+                    rd_kind = str(tool_args.get("kind", "mermaid"))
+                    rd_code = str(tool_args.get("code", ""))
+
+                    # Validate Mermaid BEFORE storing so the AI gets the parse
+                    # error in the tool result and can self-correct this turn
+                    # (don't pollute the panel with an unrenderable diagram).
+                    # Validation runs on the REPAIRED source (same repair the
+                    # browser applies) and returns the repaired code to store —
+                    # so fixable trivia like a bare edge label never triggers
+                    # a rejection/retry loop; only genuinely broken syntax does.
+                    rd_error = ""
+                    rd_code_stored = rd_code
+                    if rd_kind == "mermaid" and rd_action in ("add", "replace") and rd_code.strip():
+                        try:
+                            from engine.mermaid_validator import validate_mermaid
+                            ok, err, repaired = validate_mermaid(rd_code)
+                            if not ok:
+                                rd_error = err
+                            elif repaired:
+                                rd_code_stored = repaired
+                        except Exception as ve:  # validator infra problem → don't block
+                            rd_error = ""
+
+                    if rd_error:
+                        tool_result = {
+                            "action": rd_action,
+                            "ok": False,
+                            "error": (
+                                "Mermaid failed to render, so it was NOT added "
+                                "to the panel. Fix the syntax and call "
+                                f"render_diagram again. Parse error: {rd_error}"
+                            ),
+                            "diagrams": CONVERSATION_STORE.get_diagrams(pid, cid),
+                        }
+                    else:
+                        tool_result = CONVERSATION_STORE.mutate_diagrams(
+                            pid, cid,
+                            action=rd_action,
+                            diagram_id=str(tool_args.get("diagram_id", "")),
+                            header=str(tool_args.get("header", "")),
+                            code=rd_code_stored,
+                            kind=rd_kind,
+                        )
+                    # Diagrams can be large Mermaid — never truncate; also
+                    # pass the current panel list so the frontend can mirror.
+                    yield {
+                        "type": "tool_result",
+                        "name": tool_name,
+                        "result": json.dumps(tool_result, default=str),
+                        "diagrams": tool_result.get("diagrams", []),
+                    }
+                else:
+                    tool_result = execute_tool(graph, tool_name, tool_args)
+                    if tool_name == "task_complete":
+                        yield {
+                            "type": "task_complete",
+                            "status": tool_result.get("status", "complete"),
+                            "summary": tool_result.get("summary", ""),
+                            "next_steps": tool_result.get("next_steps", ""),
+                        }
+                    else:
+                        yield {"type": "tool_result", "name": tool_name, "result": _truncate_json(tool_result)}
+
+                tc_result_by_name.append((tool_name, tool_result))
+                full_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": tool_name,
+                    "content": json.dumps(tool_result, default=str),
+                })
+
+            # task_complete decides whether to stop or continue.
+            if has_task_complete:
+                tc_result = next(
+                    (r for (n, r) in tc_result_by_name if n == "task_complete"), {}
+                )
+                status = tc_result.get("status", "complete")
+                if status == "complete":
+                    yield {"type": "done"}
+                    return
+                # incomplete — nudge the model to continue the remaining steps.
+                next_steps = tc_result.get("next_steps") or "the remaining steps"
+                full_messages.append({
+                    "role": "system",
+                    "content": (
+                        f"Continue working. Remaining steps: {next_steps}. "
+                        "Do not call task_complete again until you have completed "
+                        "these steps or need to checkpoint."
+                    ),
+                })
+                continue
+
+            continue  # loop to let the LLM process the tool results
+
+        elif tool_acc:
+            yield {"type": "error", "message": "Tool use requested but no graph available."}
+            return
+
+        # No tools — the stream is complete. Persist the final answer so it
+        # survives refresh/reload (tool-call turns are appended above, but a
+        # plain text reply was previously discarded here).
+        if content_acc or reasoning_acc:
+            assistant_msg = {"role": "assistant", "content": content_acc}
+            if reasoning_acc:
+                assistant_msg["reasoning"] = reasoning_acc
+            full_messages.append(assistant_msg)
+        yield {"type": "done"}
+        return
+
+    # Exhausted the iteration budget — stop gracefully. (Reachable only if
+    # every iteration requested tools, so the last assistant message — with
+    # its tool_calls — was already appended above; nothing extra to save.)
     yield {"type": "done"}
 
 
@@ -895,6 +1354,213 @@ async def ai_chat_stream(pid: str, req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── Conversation endpoints ─────────────────────────────────────────
+
+
+@app.post("/api/projects/{pid}/conversations")
+async def create_conversation(pid: str, req: ConversationCreateRequest = ConversationCreateRequest()):
+    """Create a new conversation. Body: {title?, is_default?}."""
+    _load_project(pid)
+    conv = CONVERSATION_STORE.create(pid, title=req.title or "")
+    return conv.meta()
+
+
+@app.get("/api/projects/{pid}/conversations")
+async def list_conversations(pid: str):
+    """List all conversations for a project (metadata only)."""
+    _load_project(pid)
+    return {"conversations": CONVERSATION_STORE.list(pid)}
+
+
+@app.get("/api/projects/{pid}/conversations/default")
+async def get_default_conversation(pid: str):
+    """Return (or create) the project's default conversation, with messages."""
+    _load_project(pid)
+    conv = CONVERSATION_STORE.get_or_create_default(pid)
+    return conv.to_dict()
+
+
+@app.get("/api/projects/{pid}/conversations/{cid}")
+async def get_conversation(pid: str, cid: str):
+    """Get a full conversation with messages."""
+    _load_project(pid)
+    conv = CONVERSATION_STORE.get(pid, cid)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"Conversation '{cid}' not found")
+    return conv.to_dict()
+
+
+@app.delete("/api/projects/{pid}/conversations/{cid}")
+async def delete_conversation(pid: str, cid: str):
+    """Delete a conversation."""
+    _load_project(pid)
+    if not CONVERSATION_STORE.delete(pid, cid):
+        raise HTTPException(status_code=404, detail=f"Conversation '{cid}' not found")
+    return {"ok": True, "id": cid}
+
+
+@app.get("/api/projects/{pid}/conversations/{cid}/diagrams")
+async def get_conversation_diagrams(pid: str, cid: str):
+    """Return the diagrams currently shown in a conversation's preview panel."""
+    _load_project(pid)
+    if not CONVERSATION_STORE.get(pid, cid):
+        raise HTTPException(status_code=404, detail=f"Conversation '{cid}' not found")
+    return {"diagrams": CONVERSATION_STORE.get_diagrams(pid, cid)}
+
+
+@app.delete("/api/projects/{pid}/conversations/{cid}/diagrams/{diagram_id}")
+async def delete_conversation_diagram(pid: str, cid: str, diagram_id: str):
+    """Remove a single diagram from the preview panel (manual × button)."""
+    _load_project(pid)
+    if not CONVERSATION_STORE.get(pid, cid):
+        raise HTTPException(status_code=404, detail=f"Conversation '{cid}' not found")
+    res = CONVERSATION_STORE.mutate_diagrams(pid, cid, action="remove", diagram_id=diagram_id)
+    return {"ok": True, "diagrams": res.get("diagrams", [])}
+
+
+@app.delete("/api/projects/{pid}/conversations/{cid}/diagrams")
+async def clear_conversation_diagrams(pid: str, cid: str):
+    """Clear every diagram from the preview panel."""
+    _load_project(pid)
+    if not CONVERSATION_STORE.get(pid, cid):
+        raise HTTPException(status_code=404, detail=f"Conversation '{cid}' not found")
+    res = CONVERSATION_STORE.mutate_diagrams(pid, cid, action="clear")
+    return {"ok": True, "diagrams": res.get("diagrams", [])}
+
+
+@app.post("/api/projects/{pid}/conversations/{cid}/chat/stream")
+async def conversation_chat_stream(pid: str, cid: str, req: ConversationChatRequest):
+    """
+    Send a message into a persisted conversation and stream the response.
+
+    The conversation carries full message history (user, assistant with
+    tool_calls, tool results) across turns. The context fields on the request
+    shape the system prompt for *this* turn only.
+    """
+    from engine.graph_tools import get_tool_definitions
+
+    _load_project(pid)
+    conv = CONVERSATION_STORE.get(pid, cid)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"Conversation '{cid}' not found")
+
+    graph = _load_graph(pid)
+
+    system_prompt = _build_chat_prompt(req, graph)
+    system_prompt = _append_diagram_context(system_prompt, pid, cid, req.planner)
+
+    conv.messages.append({"role": "user", "content": req.content})
+
+    # full_messages = system prompt + full conversation history (plain dicts).
+    # System-role messages persisted from prior "continue" nudges are stripped
+    # because the system prompt is rebuilt fresh each turn from view context.
+    # UI-side `reasoning` fields are stripped too — not part of the wire format.
+    full_messages: list[dict] = [{"role": "system", "content": system_prompt}] + _strip_reasoning([
+        m for m in conv.messages if m.get("role") != "system"
+    ])
+
+    tools = get_tool_definitions(include_planner_tools=req.planner)
+
+    _SENTINEL = object()
+
+    async def event_stream():
+        q: queue.Queue = queue.Queue()
+
+        def _produce():
+            try:
+                for ev in _stream_llm_events_v2(
+                    system_prompt, full_messages,
+                    model=req.model, tools=tools, graph=graph,
+                    pid=pid, cid=cid,
+                ):
+                    q.put(ev)
+            except Exception as e:
+                q.put({"type": "error", "message": str(e)})
+            finally:
+                q.put(_SENTINEL)
+
+        threading.Thread(target=_produce, daemon=True).start()
+        loop = asyncio.get_running_loop()
+        while True:
+            ev = await loop.run_in_executor(None, q.get)
+            if ev is _SENTINEL:
+                break
+            yield "data: " + json.dumps(ev) + "\n\n"
+
+        # Persist the updated history. _stream_llm_events_v2 mutated
+        # full_messages in place (appended assistant + tool messages); strip
+        # the leading system prompt (rebuilt each turn) and save the rest.
+        try:
+            CONVERSATION_STORE.replace_messages(pid, cid, full_messages[1:])
+        except Exception:
+            pass  # persistence failure must not invalidate a successful stream
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/projects/{pid}/conversations/{cid}/chat")
+async def conversation_chat(pid: str, cid: str, req: ConversationChatRequest):
+    """Non-streaming variant of the conversation-scoped chat endpoint."""
+    from engine.graph_tools import get_tool_definitions
+
+    _load_project(pid)
+    conv = CONVERSATION_STORE.get(pid, cid)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"Conversation '{cid}' not found")
+
+    graph = _load_graph(pid)
+
+    system_prompt = _build_chat_prompt(req, graph)
+    system_prompt = _append_diagram_context(system_prompt, pid, cid, req.planner)
+
+    conv.messages.append({"role": "user", "content": req.content})
+
+    full_messages: list[dict] = [{"role": "system", "content": system_prompt}] + _strip_reasoning([
+        m for m in conv.messages if m.get("role") != "system"
+    ])
+
+    tools = get_tool_definitions(include_planner_tools=req.planner)
+
+    # Run the v2 tool loop synchronously, collecting the streamed text.
+    content_parts: list[str] = []
+    tool_events: list[dict] = []
+    had_error = ""
+    for ev in _stream_llm_events_v2(
+        system_prompt, full_messages, req.model, tools=tools, graph=graph,
+        pid=pid, cid=cid,
+    ):
+        t = ev.get("type")
+        if t == "token":
+            content_parts.append(ev.get("text", ""))
+        elif t == "tool_result":
+            tool_events.append({"name": ev.get("name"), "result": ev.get("result", "")})
+        elif t == "task_complete":
+            tool_events.append({"name": "task_complete", "status": ev.get("status")})
+        elif t == "error":
+            had_error = ev.get("message", "")
+        elif t == "done":
+            break
+
+    if had_error:
+        return {"available": False, "error": had_error}
+
+    CONVERSATION_STORE.replace_messages(pid, cid, full_messages[1:])
+
+    return {
+        "available": True,
+        "response": "".join(content_parts).strip(),
+        "tools": tool_events,
+    }
 
 
 def _fetch_models_json(base: str, api_key: str) -> dict:

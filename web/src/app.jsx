@@ -4,7 +4,12 @@
    ============================================================ */
 
 import React, { useState, useEffect, useRef, useMemo, useLayoutEffect, useCallback } from "react";
-import { marked } from "marked";
+import ChangePlannerView from "./changePlanner.jsx";
+import ConversationMenu from "./ConversationMenu.jsx";
+import MarkdownContent from "./Markdown.jsx";
+import ReasoningBlock from "./ReasoningBlock.jsx";
+import ToolSteps from "./ToolSteps.jsx";
+import { useConversationChat } from "./useConversationChat.js";
 import "./styles.css";
 
 /* ---------------- helpers ---------------- */
@@ -44,26 +49,6 @@ const CONFIDENCE = {
   TRUNCATED: { color: "#a78bfa" },
 };
 const confMeta = (c) => CONFIDENCE[c] || { color: "#94a3b8" };
-
-function renderMarkdown(src) {
-  if (!src) return "";
-  return sanitizeHTML(marked.parse(src, { breaks: true }));
-}
-
-function sanitizeHTML(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("script,style,iframe,object,embed,link,meta").forEach((el) => el.remove());
-  doc.querySelectorAll("*").forEach((el) => {
-    [...el.attributes].forEach((a) => {
-      const name = a.name.toLowerCase();
-      if (name.startsWith("on")) { el.removeAttribute(a.name); return; }
-      if ((name === "href" || name === "src") && a.value.trim().toLowerCase().startsWith("javascript:")) {
-        el.removeAttribute(a.name);
-      }
-    });
-  });
-  return doc.body.innerHTML;
-}
 
 function escapeHTML(s) {
   return String(s)
@@ -332,9 +317,13 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs }) {
             onClick={() => onModeChange("flows")}
           >Flows</button>
           <button
-            className={"mode-btn" + (mode === "dead" ? " active" : "")}
-            onClick={() => onModeChange("dead")}
-          >Dead code</button>
+          className={"mode-btn" + (mode === "dead" ? " active" : "")}
+          onClick={() => onModeChange("dead")}
+        >Dead code</button>
+        <button
+          className={"mode-btn" + (mode === "planner" ? " active" : "")}
+          onClick={() => onModeChange("planner")}
+        >Planner</button>
         </div>
       )}
       <div className="meta">
@@ -482,6 +471,9 @@ function buildCrumbs(view, mode, graph, flows, projectName, nav) {
         { label: view.repo, current: true },
       ];
     }
+  }
+  if (mode === "planner") {
+    return [...root, { label: "AI Change Planner", current: true }];
   }
   return root;
 }
@@ -1076,7 +1068,7 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps }) {
         </div>
         {gapCount > 0 && (
           <button className="gaps-pill" onClick={onOpenGaps} title="Unconnected channels & dependency cycles">
-            <span className="gaps-pill-dot" />
+            <span className="gaps-pill-dot" aria-hidden="true">i</span>
             {gapCount} repo{gapCount === 1 ? "" : "s"} with gaps
           </button>
         )}
@@ -2440,71 +2432,25 @@ function DetailPanel({ node, entryPoint, onClose, pid }) {
 
 
 /* ---------------- Flows Mode: Flow Index View ---------------- */
-// Galaxy equivalent — shows all detected flows as cards in the starfield
+// Galaxy equivalent — shows all detected flows as cards in the starfield.
+// Standard scroll layout: cards flow into a responsive CSS grid and the canvas
+// scrolls normally when there are more flows than fit on screen. No pan/zoom —
+// with many flows the shrink-to-fit + zoom model became unusable.
 function FlowIndexView({ graph, dims, onSelectFlow }) {
   const flows = useMemo(() => detectFlows(graph), [graph]);
-  const W = dims.w, H = dims.h;
-  const TOPBAR_H = 72; // matches --topbar-h in styles.css
-  // Center within the VISIBLE stage area (below the fixed topbar), not the full window
-  const cx = W / 2, cy = (H - TOPBAR_H) / 2;
-  const pz = usePanZoom(".flow-card");
+  const H = dims.h;
 
-  // Uniform card height: all cards share the tallest card's height
+  // Uniform card height: all cards share the tallest card's height so rows
+  // stay aligned (same behaviour as the old grid, kept for the scroll layout).
   const [uniformH, setUniformH] = useState(null);
   const cardRefs = useRef([]);
   useLayoutEffect(() => {
     if (flows.length === 0) return;
-    // Measure natural heights of all cards (no explicit height set yet)
     const hs = cardRefs.current.map((el) => (el ? el.offsetHeight : 0));
     if (hs.length === 0) return;
     const maxH = Math.max(...hs);
     setUniformH((prev) => (prev === maxH ? prev : maxH));
   }, [flows]);
-
-  // Position flow cards in a grid that FITS the visible stage. The whole grid is
-  // scaled down (transform: scale) when it would overflow, so cards never clip.
-  const layout = useMemo(() => {
-    const n = flows.length;
-    const cols = Math.min(n, n <= 4 ? 2 : 3);
-    const cardW = 240;
-    const gapX = 50, gapY = 36;
-    const rows = Math.ceil(n / cols);
-    // Uniform height across the whole grid (fall back to a reasonable estimate
-    // before the first measurement lands)
-    const cardH = uniformH || 196;
-    const totalW = cols * cardW + (cols - 1) * gapX;
-    const totalH = rows * cardH + (rows - 1) * gapY;
-    // Shrink-to-fit with a small margin around the visible stage
-    const margin = 24;
-    const fit = Math.min(1, (W - margin * 2) / totalW, (cy * 2 - margin * 2) / totalH);
-    const scaledW = totalW * fit;
-    const scaledH = totalH * fit;
-
-    const positions = [];
-    let y = 0;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const idx = r * cols + c;
-        if (idx >= n) break;
-        positions.push({
-          x: c * (cardW + gapX),
-          y: y,
-          w: cardW,
-          h: uniformH || null, // null = keep natural (auto) height until measured
-        });
-      }
-      y += cardH + gapY;
-    }
-    return {
-      positions,
-      // Wrapper placed so the scaled grid is centered in the visible area
-      left: cx - scaledW / 2,
-      top: cy - scaledH / 2,
-      width: totalW,
-      height: totalH,
-      fit,
-    };
-  }, [flows, cx, cy, uniformH]);
 
   return (
     <div className="galaxy flow-index">
@@ -2513,39 +2459,14 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
           {flows.length} flows detected · {flows.filter(f => f.hasCrossRepo).length} cross-repo
         </div>
       </div>
-      <div
-        className="canvas pan-canvas"
-        ref={pz.containerRef}
-        style={{ height: H }}
-        {...pz.handlers}
-      >
-        <div
-          className={"canvas-world" + (pz.animating ? " animating" : "")}
-          style={{
-            transform: `translate(${pz.viewport.x}px, ${pz.viewport.y}px) scale(${pz.viewport.zoom})`,
-            transformOrigin: "0 0",
-          }}
-        >
-        <div
-          className="flow-grid"
-          style={{
-            position: "absolute",
-            left: layout.left,
-            top: layout.top,
-            width: layout.width,
-            height: layout.height,
-            transform: "scale(" + layout.fit + ")",
-            transformOrigin: "top left",
-          }}
-        >
-        {flows.map((f, i) => {
-          const pos = layout.positions[i];
-          return (
+      <div className="canvas flow-scroll" style={{ height: H }}>
+        <div className="flow-grid flow-grid-static">
+          {flows.map((f, i) => (
             <div
               key={f.id}
               ref={(el) => { cardRefs.current[i] = el; }}
               className={"flow-card" + (f.hasCrossRepo ? " cross-repo" : "")}
-              style={{ left: pos.x, top: pos.y, width: pos.w, height: pos.h || undefined, animationDelay: (i * 45) + "ms" }}
+              style={{ height: uniformH || undefined, animationDelay: (i * 45) + "ms" }}
               onClick={(e) => onSelectFlow(f, e)}
             >
               <div className="flow-card-glow" />
@@ -2587,12 +2508,9 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
                 ))}
               </div>
             </div>
-          );
-        })}
-        </div>
+          ))}
         </div>
       </div>
-      {pz.zoomControls}
     </div>
   );
 }
@@ -3280,34 +3198,7 @@ function FlowTraceView({ flow, repo, graph, dims, onSelectNode, selectedNode, ch
 
 /* ---------------- Global Chat Widget (unified, context-aware) ---------------- */
 function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePanel, flows, pid, open, onOpenChange }) {
-  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [model, setModel] = useState("");
-  const [models, setModels] = useState([]);
-  const [error, setError] = useState("");
-  const scrollRef = useRef(null);
-  const inputRef = useRef(null);
-
-  useEffect(() => {
-    let alive = true;
-    fetchJSON("/api/ai/models")
-      .then((m) => { if (alive) { setModels(m.models || []); setModel(m.models && m.models.length ? m.models[0] : ""); } })
-      .catch(() => {});
-    return () => { alive = false; };
-  }, []);
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages, loading]);
-
-  useEffect(() => {
-    if (open && messages.length === 0 && inputRef.current) {
-      inputRef.current.focus();
-    }
-  }, [open, messages.length]);
 
   // ── Context: translate the current view + selection into (a) API context and (b) a readable label ──
   const ctx = useMemo(() => {
@@ -3401,106 +3292,36 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
     return { payload: { entry_point_id: "", node: {} }, label: "Whole system", scope: "system" };
   }, [view, selectedNode, flows, entryPoint]);
 
-  const send = async (text) => {
-    const msg = text.trim();
-    if (!msg || loading) return;
+  // ── Unified conversation chat hook ──
+  const {
+    messages, loading, model, models, error,
+    send, newConversation, loadConversation, deleteConversation,
+    setModel, setError,
+    scrollRef, inputRef,
+    conversationId, convList, refreshConvList,
+  } = useConversationChat({ pid, ctxPayload: ctx.payload, planner: false });
 
-    const newHistory = [...messages, { role: "user", content: msg }];
-    // Live assistant message: content streams in, tools fill in as the AI calls them
-    const liveMsg = { role: "assistant", content: "", tools: [], streaming: true };
-    setMessages([...newHistory, liveMsg]);
-    setInput("");
-    setError("");
-    setLoading(true);
+  const [showHistory, setShowHistory] = useState(false);
+  const openHistory = () => { refreshConvList(); setShowHistory(true); };
 
-    const patchLive = (fn) => {
-      setMessages((prev) => {
-        const next = prev.slice();
-        const idx = next.findIndex((m) => m.streaming);
-        if (idx !== -1) next[idx] = fn(next[idx]);
-        return next;
-      });
-    };
-
-    try {
-      const res = await fetch(projPath(pid, "/ai/chat/stream"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...ctx.payload,
-          messages: newHistory,
-          model,
-        }),
-      });
-
-      if (!res.ok || !res.body) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`Stream failed (${res.status}) ${body.slice(0, 200)}`);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        // Split on SSE double-newline
-        const events = buf.split("\n\n");
-        buf = events.pop();
-        for (const evRaw of events) {
-          const line = evRaw.trim();
-          if (!line.startsWith("data:")) continue;
-          const dataStr = line.slice(5).trim();
-          if (!dataStr || dataStr === "[DONE]") continue;
-          let ev;
-          try { ev = JSON.parse(dataStr); } catch { continue; }
-
-          if (ev.type === "token" && ev.text) {
-            patchLive((m) => ({ ...m, content: m.content + ev.text }));
-          } else if (ev.type === "tool_start") {
-            patchLive((m) => ({
-              ...m,
-              tools: [...m.tools, {
-                name: ev.name,
-                args: ev.args || {},
-                status: "running",
-                result: "",
-              }],
-            }));
-          } else if (ev.type === "tool_result") {
-            patchLive((m) => ({
-              ...m,
-              tools: m.tools.map((t) =>
-                t.name === ev.name && t.status === "running"
-                  ? { ...t, status: "done", result: ev.result || "" }
-                  : t
-              ),
-            }));
-          } else if (ev.type === "error") {
-            setError(ev.message || "Stream error");
-          } else if (ev.type === "done") {
-            // finalize
-            patchLive((m) => ({ ...m, streaming: false }));
-          }
-        }
-      }
-      // Stream ended without explicit done — finalize anyway
-      patchLive((m) => ({ ...m, streaming: false }));
-    } catch (e) {
-      setError(e.message);
-      patchLive((m) => ({ ...m, streaming: false }));
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    if (open && messages.length === 0 && inputRef.current) {
+      inputRef.current.focus();
     }
+  }, [open, messages.length]);
+
+  // ── Send wrapper: clear input, pass text ──
+  const sendMsg = (text) => {
+    if (!text.trim() || loading) return;
+    send(text.trim());
+    setInput("");
   };
 
+  // ── New conversation wrapper: reset input + delegate to the hook ──
   const newChat = () => {
-    setMessages([]);
-    setError("");
+    newConversation();
     setInput("");
-    setLoading(false);
+    setError("");
   };
 
   // Generate suggestions dynamically from the current context + actual graph data
@@ -3587,6 +3408,11 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
               <span>Constellation AI</span>
             </div>
             <div className="chat-window-controls">
+              <button className="chat-history-btn" onClick={openHistory} title="Past conversations" disabled={loading}>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" />
+                </svg>
+              </button>
               {messages.length > 0 && (
                 <button className="chat-new-btn" onClick={newChat} title="Start a new conversation">+ New</button>
               )}
@@ -3604,6 +3430,16 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
             </div>
           </div>
 
+          {showHistory && (
+            <ConversationMenu
+              conversations={convList}
+              activeId={conversationId}
+              onSelect={(cid) => { loadConversation(cid); }}
+              onDelete={(cid) => deleteConversation(cid)}
+              onClose={() => setShowHistory(false)}
+            />
+          )}
+
           {/* Context chip — always visible, shows what the AI can see */}
           <div className="chat-ctx">
             <span className="chat-ctx-dot"></span>
@@ -3620,7 +3456,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
                 <p className="muted small">I see what you're looking at and answer in that context — code, flows, or the whole system.</p>
                 <div className="chat-suggestions">
                   {suggestions.map((s, i) => (
-                    <button key={i} className="chat-suggestion" onClick={() => send(s)}>
+                    <button key={i} className="chat-suggestion" onClick={() => sendMsg(s)}>
                       {s}
                     </button>
                   ))}
@@ -3629,35 +3465,24 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
             )}
 
             {messages.map((msg, i) => (
-              <div key={i} className={"chat-msg " + msg.role + (msg.streaming ? " streaming" : "")}>
-                <div className="chat-msg-role">{msg.role === "user" ? "You" : "AI" + (msg.streaming ? " 🔮" : "")}</div>
-                {msg.tools && msg.tools.length > 0 && (
-                  <div className="chat-tools">
-                    {msg.tools.map((t, ti) => (
-                      <details key={ti} className={"chat-tool " + t.status}>
-                        <summary>
-                          {t.status === "running"
-                            ? <span className="tool-spin">◌</span>
-                            : t.status === "done"
-                              ? <span className="tool-ok">✓</span>
-                              : <span className="tool-err">!</span>}
-                          <span className="tool-name">{t.name}</span>
-                          {t.args && Object.keys(t.args).length > 0 && (
-                            <span className="tool-args">{JSON.stringify(t.args)}</span>
-                          )}
-                          {t.status === "running" && <span className="tool-running">running…</span>}
-                        </summary>
-                        <pre className="tool-result">{t.result}</pre>
-                      </details>
-                    ))}
+              <React.Fragment key={i}>
+                {/* Text bubble — user always; assistant when it has real text or is streaming w/o tools yet */}
+                {(msg.role === "user" || (msg.content && msg.content.trim()) || msg.reasoning || (msg.streaming && (!msg.tools || !msg.tools.length))) && (
+                  <div className={"chat-msg " + msg.role + (msg.streaming ? " streaming" : "")}>
+                    <div className="chat-msg-role">{msg.role === "user" ? "You" : "AI" + (msg.streaming ? " 🔮" : "")}</div>
+                    <div className="chat-msg-text markdown">
+                      <ReasoningBlock text={msg.reasoning} live={msg.streaming} />
+                      <MarkdownContent src={msg.content || ""} live={msg.streaming} />
+                    </div>
+                    {msg.streaming && !msg.content && !msg.reasoning && <div className="ai-loading">Analyzing<span className="dots"></span></div>}
+                    {msg.streaming && msg.content && <span className="stream-caret"></span>}
                   </div>
                 )}
-                <div className="chat-msg-text markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content || (msg.streaming ? "" : "")) }}></div>
-                {msg.streaming && msg.content.length === 0 && msg.tools.length === 0 && (
-                  <div className="ai-loading">Analyzing<span className="dots"></span></div>
+                {/* Tool chips as a standalone step (control tools like task_complete are hidden) */}
+                {msg.tools && msg.tools.some((t) => t.name !== "task_complete") && (
+                  <ToolSteps tools={msg.tools} />
                 )}
-                {msg.streaming && msg.content.length > 0 && <span className="stream-caret"></span>}
-              </div>
+              </React.Fragment>
             ))}
 
             {loading && !messages.some((m) => m.streaming) && (
@@ -3679,10 +3504,10 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
               placeholder={"Ask about " + (ctx.scope === "node" ? "this function" : ctx.scope === "repo" ? "this service" : ctx.scope === "entry" ? "this flow" : "the architecture") + "…"}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") send(input); }}
+              onKeyDown={(e) => { if (e.key === "Enter") sendMsg(input); }}
               disabled={loading}
             />
-            <button className="chat-send" onClick={() => send(input)} disabled={!input.trim() || loading}>
+            <button className="chat-send" onClick={() => sendMsg(input)} disabled={!input.trim() || loading}>
               ↑
             </button>
           </div>
@@ -3857,6 +3682,7 @@ function App() {
     setSelectedNode(null);
     if (m === "topology") setView({ name: "galaxy" });
     else if (m === "dead") setView({ name: "dead" });
+    else if (m === "planner") setView({ name: "planner" });
     else setView({ name: "flowIndex" });
   };
 
@@ -4062,6 +3888,13 @@ function App() {
             </div>
           );
         })()}
+
+        {/* ── AI Change Planner ── */}
+        {mode === "planner" && (
+          <div className="view" key="planner">
+            <ChangePlannerView graph={graph} pid={activeId} />
+          </div>
+        )}
       </main>
 
       {selectedNode && (view.name === "path" || view.name === "flowTrace") && (() => {
@@ -4094,7 +3927,8 @@ function App() {
         );
       })()}
 
-      <GlobalChat
+      {mode !== "planner" && (
+        <GlobalChat
         graph={graph}
         view={view}
         selectedNode={selectedNode}
@@ -4114,6 +3948,7 @@ function App() {
         detailOpen={!!selectedNode && (view.name === "path" || view.name === "flowTrace")}
         sidePanel={view.name === "solar"}
       />
+      )}
 
       {sourceModal && (
         <SourceModal

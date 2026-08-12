@@ -115,7 +115,16 @@ These are set in `call_graph.py` (`_resolve_call`, `_is_trivial`, `_expand_node`
 
 The 11 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`, `find_orphans`, `find_cycles`, `find_dead_code`.
 
-**Rule:** if you add a tool, register it in **all** of: `TOOL_DEFINITIONS`, the `execute_tool` dispatch table, `_filter_args` (implicit via schema), and `get_tool_definitions`. Keep the functions pure (no I/O, no state) — they operate only on the graph dict.
+- **Graph-query tools** (pure): `search_code`, `get_node`, `find_callers`, `trace_path`, `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`, `find_orphans`, `find_cycles`, `find_dead_code`. These are pure data-in/data-out over the graph dict — register them in `TOOL_DEFINITIONS` **and** the `execute_tool` dispatch table.
+- **Signalling / stateful tools**: `task_complete` (a passthrough the server's tool loop inspects to decide stop-vs-continue) and `render_diagram` (planner-only; drives the right-side preview panel and is persisted on the conversation). These are **not** in the `execute_tool` dispatch table — they are special-cased in the streaming layer (`server._stream_llm_events_v2`), which is the only place with the conversation id needed to persist panel diagrams via `ConversationStore`. `task_complete` is a pure echo; `render_diagram` is intentionally stateful.
+
+**Rule:** if you add a *graph-query* tool, register it in `TOOL_DEFINITIONS` **and** the `execute_tool` dispatch table (plus `_filter_args`, which is schema-driven). If you add a *planner-only / stateful* tool, add it to `TOOL_DEFINITIONS` and special-case its execution in `_stream_llm_events_v2` — and keep it out of `get_tool_definitions()` unless `include_planner_tools=True`.
+
+`get_tool_definitions(include_planner_tools=False)` returns the always-applicable set; the planner chat passes `include_planner_tools=True` to also expose `render_diagram`. The MCP server and global topology chat never receive planner-only tools.
+
+### Mermaid validation (render_diagram)
+
+`engine/mermaid_validator.py` + `engine/mermaid_validate.mjs` validate Mermaid **at tool-call time**: the Python wrapper shells out to Node (jsdom + the bundled `mermaid` package, already in `node_modules`), runs `mermaid.parse`, and the streaming loop returns the parse error **in the `render_diagram` tool result** (`ok: false`, diagram NOT stored) so the AI self-corrects in the same turn. If Node/mermaid/jsdom is unavailable it degrades to accept — the frontend's render-time fallback (`repairMermaid` in `web/src/mermaid.jsx`) is the last resort. Env override: `CONSTELLATION_NODE_BIN`.
 
 ## Conventions
 
@@ -131,6 +140,7 @@ The 11 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chan
 - All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (graph, source, tools, ai/chat, ai/chat/stream). The flat `/api/graph`, `/api/source`, `/api/tools/*`, `/api/ai/*` routes no longer exist; only `/api/ai/models` and `/api/graph` (legacy alias → first ready project) remain non-scoped. The frontend builds these via `projPath(pid, rest)` in `web/src/app.jsx`.
 - The MCP server loads `graph.json` once at startup; restart to pick up graph changes.
 - Call resolution is import-aware for single types plus interface→impl and local-variable/parameter receivers (see `engine/java_index.py`), and resolves methods up a **multi-level supertype chain** via `find_methods_in_hierarchy` (used as a fallback in `resolve_call`). It still can produce false positives when a simple name maps to multiple unimported classes across repos — see the "Limitations" section of `README.md`. Do not silently change the `EXTRACTED`/`INFERRED`/`AMBIGUOUS` semantics that the tests and UI depend on.
+- Chat persistence: `_stream_llm_events_v2` previously streamed the model's **final text-only reply** (no tool calls) without appending it to the conversation history, so prose answers vanished after refresh. **Fixed**: the no-tools branch now appends `content_acc` to `full_messages` before yielding done. Keep this: every assistant turn must land in `full_messages` (persisted by `replace_messages`), not just tool-call turns.
 
 ## Roadmap Context (README)
 

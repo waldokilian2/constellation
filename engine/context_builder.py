@@ -236,7 +236,190 @@ class ContextBuilder:
             "search_code, find_callers, trace_path, get_channel_flow, "
             "list_channels, get_node, get_source, get_architecture_overview, "
             "find_orphans, find_cycles, find_dead_code. "
-            "Use them to answer specific questions accurately."
+            "Use them to answer specific questions accurately. The chat "
+            "renders markdown live: use ```mermaid fenced blocks for flow "
+            "diagrams and ```html fenced blocks for custom visuals."
+        )
+
+        return "\n\n".join(sections)
+
+    def build_planner_prompt(self, repo: str = "") -> str:
+        """
+        Build a system prompt for AI change planning mode.
+
+        Gives the AI a full architecture overview and instructs it to
+        gather context, reason about impact, and present the plan — tables
+        in the chat, flows/diagrams in the plan-preview panel via the
+        ``render_diagram`` tool (never as embedded Mermaid or HTML blocks).
+        """
+        sections = []
+
+        # ── Role ─────────────────────────────────────────────────
+        sections.append(
+            "## PLANNER MODE\n\n"
+            "You are an AI change planner for a microservice codebase mapped by "
+            "Constellation. The user will describe a change they want to make. "
+            "Your job:\n\n"
+            "1. **Gather context** — use tools (search_code, "
+            "get_architecture_overview, get_channel_flow, list_channels, "
+            "get_node, trace_path) to understand the current architecture "
+            "and how the affected repos, entry points, and data flows work.\n\n"
+            "2. **Reason about impact** — what repos, entry points, producers, "
+            "and data flows need to change? What are the knock-on effects?\n\n"
+            "3. **Present the plan** — start with a table for the system-wide "
+            "view (Channel | Broker | Producer | Consumer | Status), then "
+            "use the ``render_diagram`` tool to add one Mermaid flow per "
+            "new/changed path to the plan-preview panel. Use exact code "
+            "references inline (Class.method, file:line) and health "
+            "annotations (⚠️ was ORPHAN — now REVIVED). Never embed diagrams "
+            "or Mermaid/HTML blocks in your chat text — the panel is where "
+            "visuals live.\n\n"
+            "4. **Explain the plan** — give a structured text breakdown in the "
+            "chat: what changes in each repo, what new code is needed, what "
+            "existing entry points/producers are affected, and any risks or "
+            "dependencies.\n\n"
+            "Be thorough but concise. When uncertain about "
+            "implementation details, note assumptions."
+        )
+
+        # ── Chat-text output rules (NO diagrams here) ─────────────
+        sections.append(
+            "## CHAT-TEXT OUTPUT RULES\n\n"
+            "Your chat-text answer is plain markdown. It must NOT contain "
+            "diagrams, Mermaid blocks, or HTML — visuals go through the "
+            "``render_diagram`` tool into the dedicated plan-preview panel. "
+            "The chat is for:\n\n"
+            "- **Tables** for the system-wide view (Channel | Broker | "
+            "Producer | Consumer | Status).\n"
+            "- **Text breakdowns** of what changes per repo.\n"
+            "- **Code references**: Class.method, repo-relative file:line.\n"
+            "- **Health annotations** inline (⚠️ ORPHAN, ⚰️ DEAD, 🟢 REVIVED).\n\n"
+            "Do NOT use ```mermaid or ```html fenced blocks in your reply — "
+            "any diagram you want to show must be added via the "
+            "``render_diagram`` tool with action ``add``."
+        )
+
+        # ── Preview-panel diagrams (the render_diagram tool) ─────
+        sections.append(
+            "## PLAN-PREVIEW PANEL (render_diagram tool)\n\n"
+            "The right-side preview panel is a separate canvas you drive "
+            "**explicitly** with the ``render_diagram`` tool. It is the "
+            "canonical place for the plan's visuals. Each diagram you add "
+            "shows there with a header (title) and a Mermaid or HTML body, "
+            "and persists with the conversation.\n\n"
+            "How to use it:\n"
+            "- To **show** a visual, call ``render_diagram`` with action "
+            "``add``, a short ``header``, the diagram ``code``, and "
+            "``kind`` (``mermaid`` by default; ``html`` only for visuals "
+            "Mermaid cannot express — HTML/CSS only, no scripts).\n"
+            "- To **update** an existing diagram, call it with action "
+            "``replace`` and the diagram ``diagram_id`` (call ``get`` first "
+            "if you don't know the id). To **remove** one, action "
+            "``remove`` with the id. Action ``clear`` wipes the panel.\n"
+            "- **STOP after the user's visuals are shown.** Create the "
+            "diagram(s) the request needs ONCE, then call ``task_complete`` "
+            "with status 'complete'. Do NOT keep adding variations of the "
+            "same diagram — if you want to improve one you already added, "
+            "use ``replace`` with its ``diagram_id``, never a second "
+            "``add``. Repeated ``add`` calls for the same visual are a bug.\n"
+            "- **Mermaid is validated before it is shown.** If your "
+            "diagram has a syntax error the tool returns ``ok: false`` "
+            "with the parse error and does NOT add it. On the FIRST "
+            "rejection, fix the exact error and retry once. If it fails "
+            "again, simplify the diagram (drop fancy labels/shapes, use "
+            "plain ``A --> B`` edges) instead of retrying the same "
+            "pattern. Bare edge labels are auto-quoted for you, but write "
+            "``|\"label\"|`` yourself anyway. A node id may not be a quoted "
+            "path with a trailing bracket — use ``myId[\"GET /api/orders/{id}\"]`` "
+            "(simple id, label in the brackets) not ``\"/api/orders/{id}\"[http]``.\n"
+            "- Mermaid syntax rules above apply here too: keep it simple "
+            "and always double-quote edge labels.\n\n"
+            "**Diagrams live in the panel, NOT in chat text.** Your chat "
+            "reply must never contain ```mermaid or ```html fenced blocks "
+            "— instead call the ``render_diagram`` tool. Keep the chat for "
+            "the written breakdown (tables, file references, per-repo "
+            "changes, risks) and put every flow/diagram in the panel."
+        )
+
+        # ── Architecture overview ────────────────────────────────
+        repos = self.graph.get("repos", [])
+        links = self.graph.get("cross_repo_links", [])
+        entry_points = self.graph.get("entry_points", [])
+        producers = self.graph.get("producers", [])
+
+        arch_lines = ["ARCHITECTURE OVERVIEW:"]
+        arch_lines.append(f"  {len(repos)} repositories: {', '.join(repos)}")
+        arch_lines.append(f"  {len(entry_points)} entry points")
+        arch_lines.append(f"  {len(producers)} message producers")
+        arch_lines.append(f"  {len(links)} cross-repo channels")
+
+        # Type breakdown
+        type_counts: dict[str, int] = {}
+        for ep in entry_points:
+            t = ep.get("type", "unknown")
+            type_counts[t] = type_counts.get(t, 0) + 1
+        if type_counts:
+            type_str = ", ".join(f"{count} {t}" for t, count in sorted(type_counts.items()))
+            arch_lines.append(f"  Entry point types: {type_str}")
+
+        if links:
+            arch_lines.append("  Channels:")
+            for link in links:
+                prod_repos = self._repos_from_ids(link.get("producers", []))
+                cons_repos = self._repos_from_ids(link.get("consumers", []))
+                kind = link.get("kind", "message")
+                verb = link.get("verb", "")
+                kind_tag = f" [{kind}" + (f" {verb}" if verb else "") + "]"
+                arch_lines.append(
+                    f'    "{link["channel"]}"{kind_tag}: '
+                    f"{prod_repos} → {cons_repos}"
+                )
+
+        sections.append("\n".join(arch_lines))
+
+        # ── Per-repo summary ─────────────────────────────────────
+        repo_summary: dict[str, dict] = {}
+        for ep in entry_points:
+            r = ep["repo"]
+            if r not in repo_summary:
+                repo_summary[r] = {"entry_points": 0, "producers": 0, "types": set()}
+            repo_summary[r]["entry_points"] += 1
+            repo_summary[r]["types"].add(ep.get("type", ""))
+        for prod in producers:
+            r = prod["repo"]
+            if r not in repo_summary:
+                repo_summary[r] = {"entry_points": 0, "producers": 0, "types": set()}
+            repo_summary[r]["producers"] += 1
+
+        repo_lines = ["REPO SUMMARY:"]
+        for r, data in sorted(repo_summary.items()):
+            types_str = ", ".join(sorted(t for t in data["types"] if t))
+            repo_lines.append(
+                f"  {r}: {data['entry_points']} entry points "
+                f"({types_str}), {data['producers']} producers"
+            )
+        sections.append("\n".join(repo_lines))
+
+        # ── Repo focus note ──────────────────────────────────────
+        if repo:
+            sections.append(
+                f"The user arrived from the **{repo}** service view. "
+                f"Start by scoping changes from that service outward."
+            )
+
+        # ── Tool hint ────────────────────────────────────────────
+        sections.append(
+            "You have tools available to explore the codebase in detail: "
+            "search_code, find_callers, trace_path, get_channel_flow, "
+            "list_channels, get_node, get_source, get_architecture_overview, "
+            "find_orphans, find_cycles, find_dead_code. "
+            "Use them to understand the current state before planning — "
+            "especially find_orphans and find_dead_code, which surface the "
+            "half-wired channels and unreachable code your plan can revive.\n"
+            "Use the ``render_diagram`` tool for every visual (one Mermaid "
+            "flow per new/changed path, one HTML preview per custom visual). "
+            "Follow the CHAT-TEXT OUTPUT RULES above for your text reply "
+            "(tables, code references, health annotations only)."
         )
 
         return "\n\n".join(sections)

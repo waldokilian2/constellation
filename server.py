@@ -42,6 +42,13 @@ FRONTEND_DIR = BASE_DIR / "web"
 _API_TOKEN = os.environ.get("CONSTELLATION_API_TOKEN", "")
 _USER_AGENT = os.environ.get("CONSTELLATION_USER_AGENT", "Constellation/0.1")
 
+# Windows proactor accept-resilience: a transient network blip (WinError 64
+# etc.) must not close the listening socket — retry instead. Installed here,
+# at import time, before uvicorn creates the event loop.
+import win_accept_resilience
+
+win_accept_resilience.install()
+
 # ── AI provider config (OpenAI-compatible; Zen by default) ─────────
 # Zen (https://opencode.ai/zen) exposes an OpenAI-compatible API. Any
 # OpenAI-compatible gateway works by overriding the *_BASE_URL vars.
@@ -371,7 +378,7 @@ async def project_updates(pid: str):
     poll (``git ls-remote``, no checkout). Local-seed repos are excluded.
     """
     _load_project(pid)
-    repos = PROJECT_STORE.check_updates(pid)
+    repos = await run_in_threadpool(PROJECT_STORE.check_updates, pid)
     return {
         "repos": repos,
         "total": len(repos),
@@ -1708,6 +1715,45 @@ async def tool_dead_code(pid: str):
     """Possible dead code: unreachable methods, thin handlers, isolated repos."""
     graph = _load_graph(pid)
     return execute_tool(graph, "find_dead_code", {})
+
+
+@app.get("/api/projects/{pid}/tools/diff")
+async def tool_diff(pid: str):
+    """Graph diff: what changed since the last analysis (vs the latest snapshot)."""
+    graph = _load_graph(pid)
+    old = PROJECT_STORE.latest_snapshot(pid)
+    return execute_tool(graph, "diff_graphs", {"old_graph": old or {}})
+
+
+@app.get("/api/projects/{pid}/diff")
+async def project_diff(pid: str, at: str = "", light: bool = False):
+    """What changed since a previous snapshot — the diff *and* the two graphs.
+
+    ``at`` selects the snapshot to compare against (default: the latest one);
+    ``light=1`` omits the graphs for cheap project-list polling. The diff
+    itself always comes from the pure ``diff_graphs`` tool, so the engine
+    semantics stay the single source of truth; the graphs are returned so the
+    UI can render before/after details (metrics, call trees, link shapes).
+    """
+    graph = _load_graph(pid)
+    old = None
+    if at:
+        old = PROJECT_STORE.load_snapshot(pid, at)
+        if old is None:
+            raise HTTPException(status_code=404, detail=f"Snapshot '{at}' not found")
+    else:
+        old = PROJECT_STORE.latest_snapshot(pid)
+
+    result = execute_tool(graph, "diff_graphs", {"old_graph": old or {}})
+    payload = {
+        "diff": result,
+        "snapshots": PROJECT_STORE.list_snapshots(pid),
+        "compared_at": (old or {}).get("generated_at", "") or "",
+    }
+    if not light:
+        payload["old_graph"] = old
+        payload["new_graph"] = graph
+    return payload
 
 
 # ── Static frontend ────────────────────────────────────────────────

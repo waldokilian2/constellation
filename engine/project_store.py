@@ -22,14 +22,17 @@ stay confined.
 """
 from __future__ import annotations
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Iterator, Optional
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 
 
 # ── Allowed git URL schemes ────────────────────────────────────────
@@ -41,6 +44,19 @@ _ALLOWED_SCHEMES = ("https://", "http://")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """Write JSON to ``path`` atomically (temp file + rename).
+
+    A crash mid-write must never leave a half-written graph/diff/snapshot on
+    disk — the next load would fail with a JSONDecodeError and the UI would
+    lose the project's data. ``os.replace`` is atomic on the same filesystem.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, path)
 
 
 def _slugify(name: str, fallback: str = "project") -> str:
@@ -144,6 +160,12 @@ class ProjectStore:
     def repos_dir(self, pid: str) -> Path:
         return self.project_dir(pid) / "repos"
 
+    def snapshots_dir(self, pid: str) -> Path:
+        return self.project_dir(pid) / "snapshots"
+
+    def last_diff_path(self, pid: str) -> Path:
+        return self.project_dir(pid) / "last_diff.json"
+
     # ── index I/O ──────────────────────────────────────────────────
 
     def _read_index(self) -> list[dict]:
@@ -176,6 +198,92 @@ class ProjectStore:
         if not path.exists():
             raise FileNotFoundError(f"Project '{pid}' has no graph yet")
         return json.loads(path.read_text())
+
+    # ── versioning (snapshots + diff) ──────────────────────────────
+    # Every rescan snapshots the previous graph before overwriting it, so
+    # "what changed since the last analysis?" is answerable deterministically.
+    SNAPSHOT_LIMIT = 10
+
+    def _save_snapshot(self, pid: str, graph: dict) -> None:
+        """Persist a timestamped copy of ``graph``; prune to the newest N."""
+        snaps = self.snapshots_dir(pid)
+        snaps.mkdir(parents=True, exist_ok=True)
+        ts = time.time_ns()
+        _atomic_write_json(snaps / f"{ts}.json", graph)
+        for stale in sorted(snaps.glob("*.json"))[:-self.SNAPSHOT_LIMIT]:
+            stale.unlink(missing_ok=True)
+
+    def latest_snapshot(self, pid: str) -> Optional[dict]:
+        """Return the most recent snapshot graph, or ``None`` if none exists."""
+        files = self.list_snapshots(pid)
+        if not files:
+            return None
+        return self.load_snapshot(pid, files[-1])
+
+    def list_snapshots(self, pid: str) -> list[str]:
+        """Return the stored snapshot timestamps (ascending, oldest first)."""
+        snaps = self.snapshots_dir(pid)
+        if not snaps.exists():
+            return []
+        return sorted(f.stem for f in snaps.glob("*.json"))
+
+    def load_snapshot(self, pid: str, ts: str) -> Optional[dict]:
+        """Load the snapshot graph with timestamp ``ts`` (or ``None``).
+
+        ``ts`` is validated as a plain integer timestamp before touching the
+        filesystem, so a crafted value can't escape the snapshots directory.
+        """
+        if not isinstance(ts, str) or not re.fullmatch(r"\d+", ts):
+            return None
+        path = self.snapshots_dir(pid) / f"{ts}.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def load_last_diff(self, pid: str) -> dict:
+        """Return the stored last_diff.json, or an empty diff dict."""
+        path = self.last_diff_path(pid)
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text())
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _persist_graph(self, pid: str, graph) -> dict:
+        """Snapshot the previous graph, persist the new one, and store the diff.
+
+        Returns the computed diff dict (empty ``{}`` when no previous graph
+        existed, i.e. the first analysis of the project). The diff is also
+        written to ``last_diff.json`` so the UI can show change counts without
+        recomputing.
+        """
+        graph_dict = graph.to_dict() if hasattr(graph, "to_dict") else graph
+        graph_path = self.graph_path(pid)
+        graph_path.parent.mkdir(parents=True, exist_ok=True)
+
+        old_graph = None
+        if graph_path.exists():
+            try:
+                old_graph = json.loads(graph_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                old_graph = None
+            if old_graph is not None:
+                self._save_snapshot(pid, old_graph)
+
+        _atomic_write_json(graph_path, graph_dict)
+
+        diff: dict = {}
+        if old_graph is not None:
+            from engine.graph_tools import diff_graphs
+            diff = diff_graphs(old_graph, graph_dict)
+            diff["compared_at"] = _now()
+            _atomic_write_json(self.last_diff_path(pid), diff)
+        return diff
 
     # ── mutation ───────────────────────────────────────────────────
 
@@ -401,9 +509,8 @@ class ProjectStore:
 
         graph = _capture_stdout(_run, log)
 
-        # Persist graph + stats.
-        self.graph_path(pid).parent.mkdir(parents=True, exist_ok=True)
-        self.graph_path(pid).write_text(graph.to_json())
+        # Persist graph (snapshots previous version first) + stats.
+        self._persist_graph(pid, graph)
 
         meta["stats"] = {
             "repos": len(repo_dirs),
@@ -463,14 +570,40 @@ class ProjectStore:
         if not meta:
             raise ValueError(f"Unknown project: {pid}")
 
-        out: list[dict] = []
-        for r in meta.get("repos", []):
+        repos = meta.get("repos", [])
+        out: list[dict] = [None] * len(repos)
+
+        # Resolve every remote repo's HEAD concurrently — ls-remote is a
+        # network round-trip per repo, and large projects (dozens of repos)
+        # must not serialize them. Local repos are handled inline below.
+        remote_idx = [i for i, r in enumerate(repos) if not (r.get("source", "") or "").startswith("local:")]
+        if remote_idx:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {i: pool.submit(self._remote_head, repos[i]["source"]) for i in remote_idx}
+                for i in remote_idx:
+                    try:
+                        remote, err = futures[i].result()
+                    except Exception as e:  # defensive: never fail the whole poll
+                        remote, err = None, f"ls-remote failed: {e}"
+                    r = repos[i]
+                    out[i] = {
+                        "name": r.get("name"),
+                        "source": r.get("source", ""),
+                        "current_commit": r.get("commit"),
+                        "remote_commit": remote,
+                        "stale": bool(remote) and remote != r.get("commit"),
+                        "error": err,
+                    }
+
+        for i, r in enumerate(repos):
+            if out[i] is not None:
+                continue
             source = r.get("source", "")
             current = r.get("commit")
             if source.startswith("local:"):
                 path = Path(r.get("path", ""))
                 head = self._current_commit(path) if path else None
-                entry = {
+                out[i] = {
                     "name": r.get("name"),
                     "source": source,
                     "current_commit": current,
@@ -478,19 +611,17 @@ class ProjectStore:
                     "stale": bool(head) and bool(current) and head != current,
                     "error": None,
                 }
-                out.append(entry)
-                continue
-            remote, err = self._remote_head(source)
-            entry = {
-                "name": r.get("name"),
-                "source": source,
-                "current_commit": current,
-                "remote_commit": remote,
-                "stale": bool(remote) and remote != current,
-                "error": err,
-            }
-            out.append(entry)
-        return out
+            else:
+                remote, err = self._remote_head(source)
+                out[i] = {
+                    "name": r.get("name"),
+                    "source": source,
+                    "current_commit": current,
+                    "remote_commit": remote,
+                    "stale": bool(remote) and remote != current,
+                    "error": err,
+                }
+        return [e for e in out if e is not None]
 
     def pull_repos(
         self,

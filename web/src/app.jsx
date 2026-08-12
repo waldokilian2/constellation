@@ -1474,35 +1474,9 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
                 <div className="repo-orphan-line">
                   <span className="repo-orphan-kind cons">consumes, no producer</span>
                   <span className="mono repo-orphan-chans">{hoverRepo.cons.join(", ")}</span>
-            </div>
-          )}
-
-          {/* Removed-from-call-tree strip (compare mode) */}
-          {diffCtx && diffCtx.status !== "added" && diffCtx.removedNodes.length > 0 && (
-            <div
-              className="pv-removed-strip"
-              style={{
-                top: layout.maxY + (outboundChannels.length > 0 ? 140 : 70),
-                left: 0,
-                width: Math.max(PV_NODE_W + 100, 380),
-              }}
-            >
-              <button className="pv-removed-title" onClick={() => setRemovedOpen((v) => !v)}>
-                <span>{removedOpen ? "▼" : "▶"}</span> {diffCtx.removedNodes.length} call node{diffCtx.removedNodes.length > 1 ? "s" : ""} removed since last scan
-              </button>
-              {removedOpen && (
-                <div className="pv-removed-list">
-                  {diffCtx.removedNodes.map((n, i) => (
-                    <div className="pv-removed-node" key={i}>
-                      <span className="pv-removed-method mono">{n.method}</span>
-                      <span className="pv-removed-loc mono">{fmtFile(n.file)}{n.line ? ":" + n.line : ""}</span>
-                    </div>
-                  ))}
                 </div>
               )}
             </div>
-          )}
-        </div>
           );
         })()}
       </div>
@@ -2310,6 +2284,9 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
     return diffCtx.statusMap.get(nodeKeyOf(n)) || "same";
   };
 
+  // Channel-level diff status for the exit-point flows (cheap, memoized).
+  const cmp = useMemo(() => diffStatus(compare), [compare]);
+
   // Outbound channels for this entry point
   const outboundChannels = useMemo(() => {
     if (!graph) return [];
@@ -2669,8 +2646,7 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
             >
               <div className="exit-point-label">EMITS TO</div>
               {outboundChannels.map((oc, i) => {
-                const st = diffCtx ? (diffStatus(compare) || {}).chStatus : null;
-                const status = st ? (st[oc.channel] || "same") : null;
+                const status = cmp ? (cmp.chStatus[oc.channel] || "same") : null;
                 return (
                 <div className={"exit-point-flow" + (status && status !== "same" ? " st-" + status : "")} key={i}>
                   <span className="exit-point-channel">{oc.channel}</span>
@@ -2688,6 +2664,32 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
                 </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Removed-from-call-tree strip (compare mode) */}
+          {diffCtx && diffCtx.status !== "added" && diffCtx.removedNodes.length > 0 && (
+            <div
+              className="pv-removed-strip"
+              style={{
+                top: layout.maxY + (outboundChannels.length > 0 ? 140 : 70),
+                left: 0,
+                width: Math.max(PV_NODE_W + 100, 380),
+              }}
+            >
+              <button className="pv-removed-title" onClick={() => setRemovedOpen((v) => !v)}>
+                <span>{removedOpen ? "▼" : "▶"}</span> {diffCtx.removedNodes.length} call node{diffCtx.removedNodes.length > 1 ? "s" : ""} removed since last scan
+              </button>
+              {removedOpen && (
+                <div className="pv-removed-list">
+                  {diffCtx.removedNodes.map((n, i) => (
+                    <div className="pv-removed-node" key={i}>
+                      <span className="pv-removed-method mono">{n.method}</span>
+                      <span className="pv-removed-loc mono">{fmtFile(n.file)}{n.line ? ":" + n.line : ""}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

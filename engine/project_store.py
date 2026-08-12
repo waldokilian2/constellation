@@ -22,6 +22,7 @@ stay confined.
 """
 from __future__ import annotations
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Iterator, Optional
 import hashlib
@@ -555,14 +556,40 @@ class ProjectStore:
         if not meta:
             raise ValueError(f"Unknown project: {pid}")
 
-        out: list[dict] = []
-        for r in meta.get("repos", []):
+        repos = meta.get("repos", [])
+        out: list[dict] = [None] * len(repos)
+
+        # Resolve every remote repo's HEAD concurrently — ls-remote is a
+        # network round-trip per repo, and large projects (dozens of repos)
+        # must not serialize them. Local repos are handled inline below.
+        remote_idx = [i for i, r in enumerate(repos) if not (r.get("source", "") or "").startswith("local:")]
+        if remote_idx:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {i: pool.submit(self._remote_head, repos[i]["source"]) for i in remote_idx}
+                for i in remote_idx:
+                    try:
+                        remote, err = futures[i].result()
+                    except Exception as e:  # defensive: never fail the whole poll
+                        remote, err = None, f"ls-remote failed: {e}"
+                    r = repos[i]
+                    out[i] = {
+                        "name": r.get("name"),
+                        "source": r.get("source", ""),
+                        "current_commit": r.get("commit"),
+                        "remote_commit": remote,
+                        "stale": bool(remote) and remote != r.get("commit"),
+                        "error": err,
+                    }
+
+        for i, r in enumerate(repos):
+            if out[i] is not None:
+                continue
             source = r.get("source", "")
             current = r.get("commit")
             if source.startswith("local:"):
                 path = Path(r.get("path", ""))
                 head = self._current_commit(path) if path else None
-                entry = {
+                out[i] = {
                     "name": r.get("name"),
                     "source": source,
                     "current_commit": current,
@@ -570,19 +597,17 @@ class ProjectStore:
                     "stale": bool(head) and bool(current) and head != current,
                     "error": None,
                 }
-                out.append(entry)
-                continue
-            remote, err = self._remote_head(source)
-            entry = {
-                "name": r.get("name"),
-                "source": source,
-                "current_commit": current,
-                "remote_commit": remote,
-                "stale": bool(remote) and remote != current,
-                "error": err,
-            }
-            out.append(entry)
-        return out
+            else:
+                remote, err = self._remote_head(source)
+                out[i] = {
+                    "name": r.get("name"),
+                    "source": source,
+                    "current_commit": current,
+                    "remote_commit": remote,
+                    "stale": bool(remote) and remote != current,
+                    "error": err,
+                }
+        return [e for e in out if e is not None]
 
     def pull_repos(
         self,

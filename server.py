@@ -378,7 +378,7 @@ async def project_updates(pid: str):
     poll (``git ls-remote``, no checkout). Local-seed repos are excluded.
     """
     _load_project(pid)
-    repos = PROJECT_STORE.check_updates(pid)
+    repos = await run_in_threadpool(PROJECT_STORE.check_updates, pid)
     return {
         "repos": repos,
         "total": len(repos),

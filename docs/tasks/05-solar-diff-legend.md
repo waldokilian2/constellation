@@ -1,6 +1,6 @@
 # Task 05 — Solar View: Bottom-Left Diff Legend (replace the colliding diff-key)
 
-> Branch: `feature/compare-mode-ux` (continue on the same branch) · Status: planned (not started)
+> Branch: `feature/compare-mode-ux` (continue on the same branch) · Status: done
 > Area: frontend — `web/src/app.jsx`, `web/src/styles.css`, `tests/e2e/diff-compare.spec.js`
 > No engine changes.
 
@@ -253,18 +253,18 @@ failures: `test_conversation_title` + 3× `test_mermaid_validator` — unrelated
 
 ## Acceptance Criteria
 
-- [ ] No `.diff-key` element remains anywhere in `web/src`.
-- [ ] In compare mode, the solar view shows a bottom-left `.legend.solar-legend`
+- [x] No `.diff-key` element remains anywhere in `web/src`.
+- [x] In compare mode, the solar view shows a bottom-left `.legend.solar-legend`
       glass panel titled "Since last scan" with rows `+ added`, `~ changed`,
       `− removed`.
-- [ ] The legend is not visible outside compare mode (any solar view visit
+- [x] The legend is not visible outside compare mode (any solar view visit
       without compare mode).
-- [ ] The channels panel repo name ("java-ee-order-service") is never covered
+- [x] The channels panel repo name ("java-ee-order-service") is never covered
       by diff chips in compare mode.
-- [ ] The legend does not pan or zoom with the canvas; stars remain clickable
+- [x] The legend does not pan or zoom with the canvas; stars remain clickable
       underneath the rest of the canvas.
-- [ ] Galaxy legend and all task-04 surfaces are visually unchanged.
-- [ ] e2e `diff-compare.spec.js` passes; no new Python test failures.
+- [x] Galaxy legend and all task-04 surfaces are visually unchanged.
+- [x] e2e `diff-compare.spec.js` passes; no new Python test failures.
 
 ## Risks & Mitigations
 

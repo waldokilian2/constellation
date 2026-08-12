@@ -131,6 +131,15 @@ test.describe.serial("Graph diff & compare UI", () => {
     await expect(pill.locator(".seg-diff")).toHaveCount(0);
     await expect(page.locator(".compare-select")).toHaveCount(0);
     await expect(page.locator(".repo-node").first()).toBeVisible();
+
+    // Solar view without compare mode: no diff legend, no diff-key, and the
+    // channels panel header is fully visible.
+    const repo = page.locator(".repo-wrap", { has: page.locator(".repo-label", { hasText: "order-service" }) });
+    await repo.locator(".repo-node").click();
+    await expect(page.locator(".star").first()).toBeVisible();
+    await expect(page.locator(".legend.solar-legend")).toHaveCount(0);
+    await expect(page.locator(".diff-key")).toHaveCount(0);
+    await expect(page.locator(".channels-panel .cp-repo")).toBeVisible();
   });
 
   test("source change + rescan produces the diff pill with changes", async ({ page }) => {
@@ -189,6 +198,23 @@ test.describe.serial("Graph diff & compare UI", () => {
     await expect(addedStar).toHaveCount(1);
     await expect(addedStar.locator(".star-badge")).toHaveText("+");
     await expect(page.locator(".view-hint")).toContainText(/was \d+ entry points before/);
+  });
+
+  test("solar system: bottom-left diff legend in compare mode", async ({ page }) => {
+    await enterProjectCompare(page);
+    await drillToOrderService(page);
+
+    const legend = page.locator(".legend.solar-legend");
+    await expect(legend).toBeVisible();
+    await expect(legend.locator(".legend-title")).toHaveText("Since last scan");
+    await expect(legend.locator(".diff-chip.added")).toHaveText("+");
+    await expect(legend.locator(".diff-chip.changed")).toHaveText("~");
+    await expect(legend.locator(".diff-chip.removed")).toHaveText("−");
+
+    // Regression guards: the old colliding diff-key is gone and the channels
+    // panel repo name is unobstructed (still visible) in compare mode.
+    await expect(page.locator(".diff-key")).toHaveCount(0);
+    await expect(page.locator(".channels-panel .cp-repo")).toBeVisible();
   });
 
   test("path view: new entry point is diff-marked", async ({ page }) => {

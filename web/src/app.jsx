@@ -1776,6 +1776,31 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
   );
 }
 
+/* ---------------- Solar diff legend (compare mode only) ---------------- */
+// Bottom-left glass panel mirroring the galaxy legend's "Since last scan"
+// section. Rendered outside the pan canvas so it stays fixed while the star
+// field pans/zooms. Gate: compare mode only (cmp truthy).
+function SolarDiffLegend({ cmp }) {
+  if (!cmp) return null;
+  return (
+    <div className="legend solar-legend glass" role="note" aria-label="Diff legend">
+      <div className="legend-title">Since last scan</div>
+      <div className="legend-item">
+        <span className="diff-chip added">+</span>
+        <span>added</span>
+      </div>
+      <div className="legend-item">
+        <span className="diff-chip changed">~</span>
+        <span>changed</span>
+      </div>
+      <div className="legend-item">
+        <span className="diff-chip removed">−</span>
+        <span>removed</span>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Solar System View ---------------- */
 function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, compare }) {
   const eps = useMemo(
@@ -1863,13 +1888,6 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
             </span>
           )}
         </div>
-        {cmp && (
-          <span className="diff-key">
-            <span className="diff-chip added">+ new</span>
-            <span className="diff-chip changed">~ changed</span>
-            <span className="diff-chip removed">− removed</span>
-          </span>
-        )}
       </div>
 
       <div className="filters">
@@ -1897,6 +1915,8 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
           </button>
         )}
       </div>
+
+      <SolarDiffLegend cmp={cmp} />
 
       <div
         className="canvas solar-canvas pan-canvas"

@@ -104,6 +104,7 @@ if [ ! -f "output/graph.json" ] || [ ! -f "output/graph-java-ee.json" ] || [ "$1
                     tests/repos/order-service \
                     tests/repos/fulfillment-service \
                     tests/repos/notification-service \
+                    tests/repos/analytics-service \
                     --output output/graph.json 2>&1 | grep -v RuntimeWarning
             fi
             # Second demo project: Java EE / Jakarta annotations coverage.

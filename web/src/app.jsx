@@ -10,6 +10,7 @@ import MarkdownContent from "./Markdown.jsx";
 import ReasoningBlock from "./ReasoningBlock.jsx";
 import ToolSteps from "./ToolSteps.jsx";
 import { useConversationChat } from "./useConversationChat.js";
+import satImg from "./assets/broken-satellite.png";
 import "./styles.css";
 
 /* ---------------- helpers ---------------- */
@@ -541,6 +542,29 @@ function originDescriptor(entry, isRest) {
   const meta = ORIGIN_KINDS[entry.type] || { tag: "EXTERNAL", cls: "external", noun: "external event" };
   return { kind: entry.type || "external", tag: meta.tag, cls: meta.cls, noun: meta.noun };
 }
+
+// Filter-chip metadata for the Flows view, keyed by the origin CSS class
+// (f.originClass). Colors/labels mirror TYPE_META and the .flow-origin-tag
+// rules so the chips match the flow cards and the rest of the UI.
+const FLOW_ORIGIN_META = {
+  rest:       { color: "#ff4d6d", label: "REST" },
+  kafka:      { color: "#ffd60a", label: "Kafka" },
+  rabbitmq:   { color: "#ff8c42", label: "RabbitMQ" },
+  event:      { color: "#4895ef", label: "Event" },
+  scheduled:  { color: "#34d399", label: "Scheduled" },
+  websocket:  { color: "#a855f7", label: "WebSocket" },
+  jms:        { color: "#2dd4bf", label: "JMS" },
+  sqs:        { color: "#e879f9", label: "SQS" },
+  servlet:    { color: "#38bdf8", label: "Servlet" },
+  soap:       { color: "#d4a373", label: "SOAP" },
+  graphql:    { color: "#f472b6", label: "GraphQL" },
+  grpc:       { color: "#14b8a6", label: "gRPC" },
+  lifecycle:  { color: "#64748b", label: "Lifecycle" },
+  main:       { color: "#818cf8", label: "Main" },
+  function:   { color: "#c084fc", label: "Function" },
+  external:   { color: "#94a3b8", label: "External" },
+};
+const flowOriginMeta = (cls) => FLOW_ORIGIN_META[cls] || { color: "#94a3b8", label: (cls || "External") };
 
 function detectFlows(graph) {
   const entries = graph.entry_points || [];
@@ -1444,52 +1468,18 @@ function SourceModal({ pid, file, line, onClose }) {
 /* ---------------- Dead Code View ---------------- */
 // A top-level mode (next to Topology / Flows). Lists unreachable methods,
 // thin handlers, and isolated repos. Reuses the Gaps-view aesthetic.
-/* ---------------- Broken satellites (dead-code background motif) ---------------- */
-// Dead stars + debris drifting through the dead-code view — the metaphor for
-// abandoned code in a constellation. Monochrome star glyphs (not emoji) so CSS
-// color + glow apply fully and they read as broken/dying. Purely decorative.
-const SAT_GLYPHS = ["✦", "✧", "🛰️", "✷", "✸", "✹", "✺", "⛓️‍💥", "◆", "◇", "🛑", "✱"];
-// Distress reds/oranges (dying stars) dominate, with a couple cold tones (dead dwarfs) for variety.
-const SAT_COLORS = ["#f87171", "#ef4444", "#fb923c", "#f5a524", "#d80202", "#682201"];
-function BrokenSatellites({ count = 18 }) {
-  const sats = useMemo(
-    () => Array.from({ length: count }, () => ({
-      left: Math.random() * 100,
-      top: Math.random() * 96,
-      delay: Math.random() * 20,
-      flick: 9 + Math.random() * 12,           // slower twinkle — each flash lingers
-      drift: 12 + Math.random() * 30,
-      size: 8 + Math.random() * 22,
-      rot: -40 + Math.random() * 80,           // base rotation (deg)
-      dx: -30 + Math.random() * 60,            // drift delta x (px)
-      dy: -22 + Math.random() * 40,            // drift delta y (px)
-      peak: 0.35 + Math.random() * 0.45,       // per-debris brightness peak
-      glyph: SAT_GLYPHS[Math.floor(Math.random() * SAT_GLYPHS.length)],
-      color: SAT_COLORS[Math.floor(Math.random() * SAT_COLORS.length)],
-    })),
-    [count]
-  );
+/* ---------------- Broken satellite (dead-code background motif) ---------------- */
+// A single broken-satellite image drifting slowly behind the dead-code list —
+// the wreckage metaphor for abandoned code. Purely decorative.
+function BrokenSatellite() {
   return (
-    <div className="broken-sats" aria-hidden="true">
-      {sats.map((s, i) => (
-        <span
-          className="broken-sat"
-          key={i}
-          style={{
-            left: s.left + "%", top: s.top + "%", fontSize: s.size + "px",
-            animationDelay: s.delay + "s",
-            animationDuration: s.flick + "s, " + s.drift + "s",
-            "--rot": s.rot + "deg",
-            "--dx": s.dx + "px",
-            "--dy": s.dy + "px",
-            "--peak": s.peak,
-            "--c": s.color,
-          }}
-        >
-          {s.glyph}
-        </span>
-      ))}
-    </div>
+    <img
+      className="broken-satellite"
+      src={satImg}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+    />
   );
 }
 
@@ -1505,7 +1495,7 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
   return (
     <div className="gaps dead">
       <div className="dead-bg" aria-hidden="true" />
-      <BrokenSatellites />
+      <BrokenSatellite />
       <div className="view-top">
         <div className="view-hint">
           {dc.method_index_available
@@ -2440,28 +2430,97 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
   const flows = useMemo(() => detectFlows(graph), [graph]);
   const H = dims.h;
 
+  // Type filter chips (mirrors the Solar view): toggle a flow's origin type
+  // on/off. hidden maps originClass -> true when that type is filtered out.
+  const [hidden, setHidden] = useState({});
+  const originTypesPresent = useMemo(
+    () => Array.from(new Set(flows.map((f) => f.originClass).filter(Boolean))),
+    [flows]
+  );
+  const visible = useMemo(
+    () => flows.filter((f) => !hidden[f.originClass]),
+    [flows, hidden]
+  );
+  const filterActive = originTypesPresent.some((cls) => hidden[cls]);
+
+  // Free-text search across flow names, origins, channels and repos. Composes
+  // with the type chips — both narrow down the same card list.
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const searched = useMemo(() => {
+    if (!q) return visible;
+    return visible.filter((f) =>
+      (f.name || "").toLowerCase().includes(q) ||
+      (f.originLabel || "").toLowerCase().includes(q) ||
+      (f.originTag || "").toLowerCase().includes(q) ||
+      (f.originChannel || "").toLowerCase().includes(q) ||
+      (f.repos || []).some((r) => r.toLowerCase().includes(q))
+    );
+  }, [visible, q]);
+  const isFiltering = filterActive || q.length > 0;
+
   // Uniform card height: all cards share the tallest card's height so rows
   // stay aligned (same behaviour as the old grid, kept for the scroll layout).
   const [uniformH, setUniformH] = useState(null);
   const cardRefs = useRef([]);
   useLayoutEffect(() => {
-    if (flows.length === 0) return;
+    if (searched.length === 0) return;
     const hs = cardRefs.current.map((el) => (el ? el.offsetHeight : 0));
     if (hs.length === 0) return;
     const maxH = Math.max(...hs);
     setUniformH((prev) => (prev === maxH ? prev : maxH));
-  }, [flows]);
+  }, [searched]);
 
   return (
     <div className="galaxy flow-index">
       <div className="view-top">
-        <div className="view-hint">
-          {flows.length} flows detected · {flows.filter(f => f.hasCrossRepo).length} cross-repo
+        <div className="view-top-row">
+          <div className="view-hint">
+            {isFiltering
+              ? searched.length + " of " + flows.length + " flows"
+              : flows.length + " flows detected"}
+            {" · "}{flows.filter(f => f.hasCrossRepo).length} cross-repo
+          </div>
+          {flows.length > 0 && (
+            <div className="flow-search">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input
+                type="text"
+                placeholder="Search flows…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search flows"
+              />
+              {query && (
+                <button className="flow-search-clear" onClick={() => setQuery("")} title="Clear search" aria-label="Clear search">✕</button>
+              )}
+            </div>
+          )}
         </div>
+        {originTypesPresent.length > 1 && (
+          <div className="flow-filters">
+            {originTypesPresent.map((cls) => {
+              const m = flowOriginMeta(cls);
+              return (
+                <button
+                  key={cls}
+                  className={"filter-chip" + (hidden[cls] ? " off" : "")}
+                  style={{ "--c": m.color }}
+                  onClick={() => setHidden((h) => ({ ...h, [cls]: !h[cls] }))}
+                >
+                  <span className="chip-dot" style={{ background: m.color, color: m.color }}></span>
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
       <div className="canvas flow-scroll" style={{ height: H }}>
         <div className="flow-grid flow-grid-static">
-          {flows.map((f, i) => (
+          {searched.map((f, i) => (
             <div
               key={f.id}
               ref={(el) => { cardRefs.current[i] = el; }}
@@ -2510,6 +2569,9 @@ function FlowIndexView({ graph, dims, onSelectFlow }) {
             </div>
           ))}
         </div>
+        {searched.length === 0 && flows.length > 0 && (
+          <div className="flow-empty">No flows match your search or filters.</div>
+        )}
       </div>
     </div>
   );
@@ -3310,6 +3372,14 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
     }
   }, [open, messages.length]);
 
+  // ── Auto-grow the textarea to fit its content (capped), reset on clear ──
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+  }, [input]);
+
   // ── Send wrapper: clear input, pass text ──
   const sendMsg = (text) => {
     if (!text.trim() || loading) return;
@@ -3498,13 +3568,19 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
           </div>
 
           <div className="chat-window-input">
-            <input
+            <textarea
               ref={inputRef}
-              type="text"
+              rows={1}
               placeholder={"Ask about " + (ctx.scope === "node" ? "this function" : ctx.scope === "repo" ? "this service" : ctx.scope === "entry" ? "this flow" : "the architecture") + "…"}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") sendMsg(input); }}
+              onKeyDown={(e) => {
+                // Enter sends; Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
+                if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+                  e.preventDefault();
+                  sendMsg(input);
+                }
+              }}
               disabled={loading}
             />
             <button className="chat-send" onClick={() => sendMsg(input)} disabled={!input.trim() || loading}>

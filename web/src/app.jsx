@@ -92,12 +92,6 @@ function repoDiffText(rc) {
   return parts.join(", ") + " since last scan";
 }
 
-function fmtSnapshot(ts) {
-  const n = Number(ts);
-  if (!isNaN(n) && n > 1e12) return new Date(n / 1e6).toLocaleString();
-  return String(ts);
-}
-
 const nodeKeyOf = (n) => [n && n.method, n && n.file, n && n.line].join("|");
 
 function collectNodeKeys(root) {
@@ -387,7 +381,7 @@ function ErrorScreen({ message }) {
 }
 
 /* ---------------- Header ---------------- */
-function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, comparing, compareTs, snapshots, onToggleCompare, onSelectCompareTs }) {
+function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, comparing, snapshots, onToggleCompare }) {
   const gen = graph && graph.generated_at
     ? new Date(graph.generated_at).toLocaleString()
     : "";
@@ -430,10 +424,8 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, 
           generatedAt={gen}
           diffLatest={diffLatest}
           comparing={comparing}
-          compareTs={compareTs}
           snapshots={snapshots}
           onToggleCompare={onToggleCompare}
-          onSelectCompareTs={onSelectCompareTs}
         />
       </div>
     </header>
@@ -444,7 +436,7 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, 
 // Replaces the old .meta-pill. Owns three pieces of truth: git staleness
 // (stale), graph diff (diffLatest), and compare mode (comparing). It is the
 // single compare-mode toggle/indicator — the separate CompareBar banner is gone.
-function ComparePill({ stale, generatedAt, diffLatest, comparing, compareTs, snapshots, onToggleCompare, onSelectCompareTs }) {
+function ComparePill({ stale, generatedAt, diffLatest, comparing, snapshots, onToggleCompare }) {
   const hasHistory = !!(snapshots && snapshots.length > 0);
   const hasChanges = !!diffLatest && diffHasChanges(diffLatest);
   const canCompare = hasHistory;
@@ -453,15 +445,6 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, compareTs, sna
   const diffTooltip = hasChanges && diffLatest ? diffSummaryText(diffLatest) : "";
   return (
     <div className="meta-right">
-      {comparing && snapshots.length > 1 && (
-        <select className="compare-select" value={compareTs} onChange={(e) => onSelectCompareTs(e.target.value)}
-                title="Compare against an older snapshot" aria-label="Compare against an older snapshot">
-          <option value="">{snapshots[0] ? fmtSnapshot(snapshots[0]) : "—"}</option>
-          {snapshots.slice(1).map((ts) => (
-            <option key={ts} value={ts}>{fmtSnapshot(ts)}</option>
-          ))}
-        </select>
-      )}
       <button
         type="button"
         className={"compare-pill status-" + statusCls + (comparing ? " comparing" : "") + (canCompare && !comparing ? " can-toggle" : "")}
@@ -4184,28 +4167,18 @@ function App() {
 
   // ── graph-diff / compare state ───────────────────────────────────
   const [diffInfo, setDiffInfo] = useState(null);     // latest /diff payload for the active project
-  const [compareInfo, setCompareInfo] = useState(null); // diff payload for the snapshot currently overlaid
   const [compareMode, setCompareMode] = useState(false);
-  const [compareTs, setCompareTs] = useState("");       // "" = latest; non-empty = specific snapshot
 
   // Load diff info whenever the active project changes or a rescan completes.
   useEffect(() => {
-    if (!activeId) { setDiffInfo(null); setCompareMode(false); setCompareInfo(null); setCompareTs(""); return; }
+    if (!activeId) { setDiffInfo(null); setCompareMode(false); return; }
     fetchDiff(activeId, "", false).then(setDiffInfo).catch(() => setDiffInfo(null));
     fetchProjectDiff(activeId);
     // eslint-disable-next-line
   }, [activeId, graphStatus]);  // graphStatus changes from "loading"→"ready" after rescan
 
-  // When the user picks a snapshot to compare against.
-  useEffect(() => {
-    if (!compareMode || !activeId) { setCompareInfo(null); return; }
-    if (!compareTs) { setCompareInfo(diffInfo); return; }
-    fetchDiff(activeId, compareTs, false).then(setCompareInfo).catch(() => {});
-  }, [compareMode, compareTs, activeId, diffInfo]);  // eslint-disable-line
-
   const enterCompare = () => { setCompareMode(true); };
-  const exitCompare = () => { setCompareMode(false); setCompareTs(""); };
-  const selectCompareTs = (ts) => { setCompareTs(ts); };
+  const exitCompare = () => { setCompareMode(false); };
 
   // Load the active project's scoped graph.
   useEffect(() => {
@@ -4246,7 +4219,7 @@ function App() {
   const refreshActive = () => {
     if (!activeId) { refreshProjects(); return; }
     // Reset compare state — the graph just changed.
-    setCompareMode(false); setCompareTs("");
+    setCompareMode(false);
     fetchJSON(projPath(activeId, "/graph"))
       .then((g) => { setGraph(g); setFlows(detectFlows(g)); setGraphStatus("ready"); })
       .catch(() => {});
@@ -4295,21 +4268,15 @@ function App() {
   const goSolar = (repo) => { setSelectedNode(null); setView({ name: "solar", repo }); };
   const goFlow = (flowId) => { setSelectedNode(null); setView({ name: "flow", flowId }); };
 
-  // Active compare overlay: the diff data for the snapshot being compared.
+  // Active compare overlay: the latest diff payload for the active project.
   // Only non-null when the user has explicitly entered compare mode; the
-  // compare pill reads diffInfo directly outside compare mode.
+  // compare pill reads diffInfo directly outside compare mode. (Compare mode
+  // always compares against the latest previous snapshot — no snapshot
+  // selector exists.)
   const compare = useMemo(() => {
     if (!compareMode) return null;
-    const info = compareInfo && compareInfo.diff ? compareInfo : diffInfo && diffInfo.diff ? diffInfo : null;
-    return info;
-  }, [compareMode, compareInfo, diffInfo]);
-
-  // Snapshot list for the compare-pill select, newest first (the API returns
-  // them ascending/oldest-first, so reverse before handing to the pill).
-  const compareSnapshots = useMemo(
-    () => (diffInfo ? [...(diffInfo.snapshots || [])].reverse() : []),
-    [diffInfo]
-  );
+    return diffInfo && diffInfo.diff ? diffInfo : null;
+  }, [compareMode, diffInfo]);
 
   // Single navigation trail rendered in the header (see buildCrumbs above).
   const crumbs = useMemo(
@@ -4398,10 +4365,8 @@ function App() {
         crumbs={crumbs}
         diffLatest={diffInfo}
         comparing={compareMode}
-        compareTs={compareTs}
-        snapshots={compareSnapshots}
+        snapshots={diffInfo ? (diffInfo.snapshots || []) : []}
         onToggleCompare={() => (compareMode ? exitCompare() : enterCompare())}
-        onSelectCompareTs={selectCompareTs}
       />
       <main className="stage">
         {/* ── Topology mode (existing) ── */}

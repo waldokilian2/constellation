@@ -77,7 +77,7 @@ The pill replaces `.meta-pill` and owns three pieces of truth:
 | **S0 · no history** | `diffInfo` null OR `(diffInfo.snapshots||[]).length === 0` | green dot + "Up to date" (or amber "Stale"). No diff segment. Not clickable. |
 | **S1 · clean** | snapshots exist, `!diffHasChanges(diffInfo)` | green "Up to date" + dim segment `· no changes since last scan`. Clickable → S3. |
 | **S2 · dirty** | snapshots exist, `diffHasChanges(diffInfo)` | green "Up to date" + **amber** segment `| view changes since last scan` (soft pulse). Clickable → S3. Hover tooltip = `diffSummaryText(diffInfo)`. |
-| **S3 · comparing** | `compareMode === true` | segment 1: "COMPARING" (green, `.compare-title` styling); segment 2: `✕ exit` (click → S1/S2). Snapshot `<select>` appears to the left (only when >1 snapshot). Pill border glows green. |
+| **S3 · comparing** | `compareMode === true` | segment 1: "COMPARING" (green, `.compare-title` styling); segment 2: `✕ exit` (click → S1/S2). Pill border glows green. |
 | **S4 · stale + dirty** | `stale && diffHasChanges(diffInfo)` | segment 1: amber "Stale" (existing `.status-stale` colors); diff segment unchanged from S2. |
 | **S5 · stale + comparing** | `stale && compareMode` | "Stale" + "COMPARING" + `✕ exit`. |
 
@@ -110,7 +110,7 @@ Location: define next to `Header` (`app.jsx:382`). `Header` keeps its current
 API surface; `App` passes through new props.
 
 ```jsx
-function ComparePill({ stale, generatedAt, diffLatest, comparing, compareTs, snapshots, onToggleCompare, onSelectCompareTs }) {
+function ComparePill({ stale, generatedAt, diffLatest, comparing, snapshots, onToggleCompare }) {
   const hasHistory = !!(snapshots && snapshots.length > 0);
   const hasChanges = !!diffLatest && diffHasChanges(diffLatest);
   const canCompare = hasHistory;
@@ -119,15 +119,6 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, compareTs, sna
   const diffTooltip = hasChanges && diffLatest ? diffSummaryText(diffLatest) : "";
   return (
     <div className="meta-right">
-      {comparing && snapshots.length > 1 && (
-        <select className="compare-select" value={compareTs} onChange={(e) => onSelectCompareTs(e.target.value)}
-                title="Compare against an older snapshot" aria-label="Compare against an older snapshot">
-          <option value="">{snapshots[0] ? fmtSnapshot(snapshots[0]) : "—"}</option>
-          {snapshots.slice(1).map((ts) => (
-            <option key={ts} value={ts}>{fmtSnapshot(ts)}</option>
-          ))}
-        </select>
-      )}
       <button
         type="button"
         className={"compare-pill status-" + statusCls + (comparing ? " comparing" : "") + (canCompare && !comparing ? " can-toggle" : "")}
@@ -153,17 +144,22 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, compareTs, sna
 }
 ```
 
+> **Snapshot selector removed.** Compare mode always compares against the
+> latest previous snapshot; the `compare-select` dropdown (and its
+> `compareTs`/`compareInfo` state plumbing) was deleted in a follow-up. The
+> pill is the only compare control. `snapshots` stays as a prop purely to
+> gate `canCompare` (history exists).
+
 Wiring (`App`, around `app.jsx:4375-4380`): pass
-`diffLatest={diffInfo}` `comparing={compareMode}` `compareTs={compareTs}`
+`diffLatest={diffInfo}` `comparing={compareMode}`
 `snapshots={diffInfo ? (diffInfo.snapshots || []) : []}`
-`onToggleCompare={() => (compareMode ? exitCompare() : enterCompare())}`
-`onSelectCompareTs={selectCompareTs}`.
+`onToggleCompare={() => (compareMode ? exitCompare() : enterCompare())}`.
 
 `Header` renders `<ComparePill … />` inside `<div className="meta">`.
 
 **Accessibility**: real `<button>`, `aria-pressed`, `disabled` in S0,
-`aria-label` on the select, visible focus ring (`:focus-visible` outline in
-the cyan accent, matching `.mode-btn`).
+visible focus ring (`:focus-visible` outline in the cyan accent, matching
+`.mode-btn`).
 
 **Hover behavior change**: the old pill swapped its label for the scan date
 on hover (`.pill-date` spacer + absolute overlay, `styles.css:222-230`). That
@@ -269,11 +265,12 @@ Keeps the existing `· was N entry points before` hint (`app.jsx:1869`).
 - **Stage height**: +40px recovered everywhere inside a project (banner gone).
   `GalaxyView`/`SolarSystemView`/`FlowView`/etc. re-center automatically via
   their existing `dims.h` math — no layout code changes beyond the prop swap.
-- **Header**: right side gains the pill's diff segment (max ~200px) and, only
-  while comparing, the snapshot select (~180px). `.meta` is `flex:1` with
-  `min-width:0`; the centered mode-toggle stays dead-center because `.hdr-left`
-  and `.meta` remain equal flex tracks. Breadcrumbs truncate first on narrow
-  screens (existing ellipsis). No structural change.
+- **Header**: right side gains the pill's diff segment (max ~200px).
+  `.meta` is `flex:1` with `min-width:0`; the centered mode-toggle stays
+  dead-center because `.hdr-left` and `.meta` remain equal flex tracks.
+  Breadcrumbs truncate first on narrow screens (existing ellipsis). No
+  structural change. (The snapshot select was later removed — compare mode
+  has no extra controls.)
 - **Orbs badges**: text shrinks ~60% ("+1 new" → "+1"), eliminating overlap
   with repo rings/labels; badges keep `top:-34px; right:-26px` anchor.
 - **Legend**: grows by ~6px (chips are 18px rows vs 3px lines) — it already
@@ -320,10 +317,6 @@ Tokens only: `--panel`, `--border`, `--mono`, `--text-dim`, `--cyan`,
 .compare-pill.comparing .seg-status { color: #4ade80; letter-spacing: .14em; font-weight: 700; font-size: 10px; }
 .compare-pill .seg-exit { color: var(--text-dim); font-size: 10.5px; padding: 1px 6px; border-radius: 999px; }
 .compare-pill .seg-exit:hover { color: #fca5a5; background: rgba(248,113,113,.12); }
-.compare-select {
-  background: rgba(255,255,255,.05); color: var(--text); border: 1px solid var(--border);
-  border-radius: 8px; padding: 3px 8px; font-size: 12px; max-width: 190px;
-}
 
 /* ── Legend diff chips ── */
 .legend .diff-chip { padding: 0 7px; font-size: 10px; line-height: 18px; min-width: 26px; justify-content: center; box-shadow: none; }
@@ -365,10 +358,10 @@ Keep `.diff-chip` base (`.diff-chip.added/.changed/.removed` and
 | ~138 | repo badge "+1 new" | repo badge "+1" **and** title attr contains "added since last scan" |
 | ~148 | star badge "▲" | star badge "+" |
 | ~164 | pv-diff-chip "▲ new" | pv-diff-chip "+ new" |
-| ~181 | `.compare-versions select` | `.compare-select` |
+| ~181 | `.compare-versions select` | *(removed — no snapshot selector exists; assert `.compare-select` count 0)* |
 | ~185 | `.compare-bar .compare-text` "+1" | `.repo-diff-badge .diff-chip.added` "+1" |
 | — | *(new)* | legend in compare mode shows `.legend .diff-chip.changed` with text "~" |
-| — | *(new)* | clicking `✕ exit` leaves compare mode; `.compare-select` disappears |
+| — | *(new)* | clicking `✕ exit` leaves compare mode; no `.compare-select` remains |
 | ~130 | project card "+1 new entry point" | **unchanged** (deliberate exception) |
 
 ## Acceptance Criteria
@@ -387,6 +380,6 @@ Keep `.diff-chip` base (`.diff-chip.added/.changed/.removed` and
 - **Symbol-only badges rely on the legend** — mitigate with preserved
   `title` tooltips on every badge.
 - **Header width on small screens** — breadcrumb ellipsis already handles
-  overflow; `compare-select` caps at 190px; verify at 1280px.
+  overflow; the pill is compact; verify at 1280px.
 - **e2e coupling** — the spec file is updated in the same commit as the UI
   change (never split).

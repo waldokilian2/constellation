@@ -239,23 +239,19 @@ test.describe.serial("Graph diff & compare UI", () => {
     await expect(changes.locator(".dp-changes-line.st-added").first()).toContainText("new");
   });
 
-  test("snapshot selector: dropdown lists snapshots and keeps comparing", async ({ page }) => {
-    // A second source change + rescan creates a second snapshot, which is what
-    // enables the compare-select (it only renders when there is a choice).
+  test("compare mode: no snapshot dropdown, even with multiple snapshots", async ({ page }) => {
+    // A second source change + rescan creates a second snapshot — previously
+    // this surfaced a snapshot-select dropdown next to the pill. That selector
+    // is gone: compare mode always compares against the latest previous
+    // snapshot, and the pill is the only control.
     patchOrderControllerUpdate(path.join(FIXTURE, "repos"));
     await postSSE(BASE + "/api/projects/" + project.id + "/rescan", {});
 
     await enterProjectCompare(page);
 
-    const select = page.locator(".compare-select");
-    const options = select.locator("option");
-    // The redundant "previous snapshot" prefix is gone — the first option is
-    // just the snapshot date (locale-formatted).
-    await expect(options.first()).not.toContainText("previous snapshot");
-    await expect(options.first()).toContainText(/[0-9]/);
-    expect(await options.count()).toBeGreaterThanOrEqual(2);
-    await select.selectOption({ index: 1 });
+    await expect(page.locator(".compare-select")).toHaveCount(0);
     await expect(page.locator(".compare-pill.comparing")).toHaveCount(1);
+    await expect(page.locator(".compare-pill .seg-exit")).toBeVisible();
     await expect(page.locator(".repo-diff-badge .diff-chip.added").first()).toHaveText(/^\+[0-9]+$/);
   });
 });

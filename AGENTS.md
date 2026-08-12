@@ -11,9 +11,10 @@ The **core analysis is deterministic** — every relationship is read from sourc
 ## Requirements & Dependencies
 
 - **Python 3.10+** (uses `from __future__ import annotations`).
-- Runtime deps (installed ad hoc by the startup scripts — **there is no `requirements.txt` / `pyproject.toml`**):
+- Runtime deps are listed in `requirements.txt` (installed by `start.sh` / `start.bat` / the Docker image):
   - `tree-sitter`, `tree-sitter-java` (AST parsing)
   - `fastapi`, `uvicorn` (web server)
+  - `mcp` (MCP stdio server — official SDK v2; pulls transitive deps like `anyio`/`httpx2`, used only by `engine/mcp_server.py`)
 - **Test suite: stdlib-only.** `tests/run_tests.py` discovers and runs `tests/test_*.py`
   modules (no pytest, no deps — run `python tests/run_tests.py`). `tests/repos/` holds sample
   Java repos used as analysis input (`tests/repos/{order-service,fulfillment-service,notification-service}`
@@ -55,8 +56,8 @@ engine/            # Deterministic analysis engine (Python)
   call_graph.py      # BFS call-tree builder (depth-limited)
   cross_repo.py      # queue/topic name matcher between repos
   context_builder.py # builds AI system prompts from graph data
-  graph_tools.py     # 8 pure query functions (single source of truth)
-  mcp_server.py      # MCP stdio server (JSON-RPC 2.0)
+  graph_tools.py     # 11 pure query functions (single source of truth)
+  mcp_server.py      # MCP server (official `mcp` SDK v2, low-level Server): stdio via CLI + Streamable HTTP /mcp via server.py
   models.py          # dataclasses for the graph
   paths.py           # safe, root-confined source path resolution
   project_store.py   # multi-project index, git-clone ingestion, engine-run w/ log capture
@@ -96,7 +97,7 @@ The app is **multi-project**: each project is an isolated collection of repos wi
 4. **Call trees** — `call_graph.py` builds a depth-limited (MAX_DEPTH=4, MAX_NODES=50) BFS tree per entry point, resolving each invocation to a definition and tagging confidence. The trivial-call filter (`_is_trivial`) drops get/set/is/has-prefixed names as POJO accessors ONLY at arity 0 — `getOrderStatus(id)` is a real business call and is traced (the old name-only check silently truncated such trees).
 5. **Cross-repo links (two passes)** — `cross_repo.py` pass 1 matches async producers→consumers by exact channel name, **but only broker consumer types** (`kafka`/`rabbitmq`/`jms`/`sqs-consumer`, `event-listener`, `websocket`) participate — non-broker entry kinds (REST/SOAP/GraphQL/gRPC/servlet/lifecycle/main/cloud-function/scheduled) use synthetic/semantic channels and are excluded so a GraphQL op named "orders" can't collide with a Kafka topic named "orders". Pass 2 matches `HTTP_CALL` producers (Feign/RestTemplate/WebClient/HttpClient/Apache HttpComponents/async-http-client/etc.) to REST endpoints by **normalized path template** (`/api/orders/123` ≡ `/api/orders/{id}`), cross-repo only, producing `kind:"http"` links with an HTTP `verb`. HTTP links render as solid mint edges in the galaxy view; the frontend flow detector (`detectFlows` in `web/src/app.jsx`) chains sync HTTP hops into flows too — REST endpoints are indexed as HTTP consumers, so a flow can show both async message hops (cyan) and sync request hops (mint).
 6. **Serialize** — `constellation.py` assembles a `ConstellationGraph` → the project's `graph.json` with `repo_roots` for safe path resolution. Producer entries carry `message_type` (message payload type — for `http-call` producers this is the HTTP verb) and `response_type` (the Feign client method's return type).
-7. **Serve** — `server.py` serves each project's graph via **project-scoped** REST + AI endpoints (`/api/projects/{pid}/...`); the single legacy `/api/graph` returns the first ready project. `mcp_server.py` loads a graph file directly for MCP.
+7. **Serve** — `server.py` serves each project's graph via **project-scoped** REST + AI endpoints (`/api/projects/{pid}/...`); the single legacy `/api/graph` returns the first ready project. `mcp_server.py` is **multi-project aware** (backed by `ProjectStore`): a `list_projects` tool lists every project, and each graph tool takes an optional `project` arg dispatching to that project's graph (default = most recently updated ready project). It runs two ways: **stdio** (`python -m engine.mcp_server`, the local/non-docker path) and **Streamable HTTP** at `/mcp` (mounted by `server.py` via `mount_streamable_http(app, store=PROJECT_STORE)`, so the docker container serves MCP over the same :8765 port with a URL). Both transports share the same resolver.
 
 ## Confidence Tags (important for correctness)
 
@@ -110,9 +111,9 @@ These are set in `call_graph.py` (`_resolve_call`, `_is_trivial`, `_expand_node`
 
 ## Graph Tools (single source of truth)
 
-`engine/graph_tools.py` holds the tool catalog (`TOOL_DEFINITIONS`) consumed by three interfaces: the MCP server, the REST API (`/api/projects/{pid}/tools/*`), and the web AI tool-loop. `execute_tool(graph, name, args)` is the dispatcher for the **graph-query** tools and `_filter_args` validates args against the schema.
+`engine/graph_tools.py` defines **11 pure functions** (`TOOL_DEFINITIONS`) consumed by three interfaces: the MCP server, the REST API (`/api/projects/{pid}/tools/*`), and the web AI tool-loop. `execute_tool(graph, name, args)` is the dispatcher and `_filter_args` validates args against the schema.
 
-There are two kinds of tools:
+The 11 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`, `find_orphans`, `find_cycles`, `find_dead_code`.
 
 - **Graph-query tools** (pure): `search_code`, `get_node`, `find_callers`, `trace_path`, `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`, `find_orphans`, `find_cycles`, `find_dead_code`. These are pure data-in/data-out over the graph dict — register them in `TOOL_DEFINITIONS` **and** the `execute_tool` dispatch table.
 - **Signalling / stateful tools**: `task_complete` (a passthrough the server's tool loop inspects to decide stop-vs-continue) and `render_diagram` (planner-only; drives the right-side preview panel and is persisted on the conversation). These are **not** in the `execute_tool` dispatch table — they are special-cased in the streaming layer (`server._stream_llm_events_v2`), which is the only place with the conversation id needed to persist panel diagrams via `ConversationStore`. `task_complete` is a pure echo; `render_diagram` is intentionally stateful.

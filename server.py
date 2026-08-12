@@ -92,6 +92,21 @@ CONVERSATION_STORE = ConversationStore(BASE_DIR)
 
 app = FastAPI(title="Constellation API", version="0.1.0")
 
+# ── MCP over Streamable HTTP ───────────────────────────────────────
+# The same graph tools the MCP stdio server (`python -m engine.mcp_server`)
+# exposes are also served at /mcp over Streamable HTTP, so the docker
+# container — which runs this FastAPI app — can serve MCP to clients with
+# just a URL ("type": "http", "url": "http://localhost:8765/mcp") and no
+# stdio subprocess. Backed by the ProjectStore, so one server exposes every
+# project (list_projects tool + optional `project` arg on each tool). Local
+# stdio usage via .mcp.json is unchanged. MCP is optional here — if the SDK
+# is missing, the web app keeps running.
+try:
+    from engine.mcp_server import mount_streamable_http
+    mount_streamable_http(app, store=PROJECT_STORE)
+except Exception as e:
+    sys.stderr.write(f"Constellation MCP: /mcp not mounted: {e}\n")
+
 
 # ── Graph + project endpoints ──────────────────────────────────────
 

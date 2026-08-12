@@ -155,7 +155,7 @@ constellation/
 │   ├── call_graph.py               #   BFS call tree builder (depth-limited)
 │   ├── cross_repo.py               #   Queue/topic name matcher
 │   ├── context_builder.py          #   Builds AI system prompts from graph data
-│   ├── graph_tools.py              #   8 query functions (shared by all interfaces)
+│   ├── graph_tools.py              #   11 query functions (shared by all interfaces)
 │   ├── mcp_server.py               #   MCP stdio server for coding agents
 │   ├── models.py                   #   Data classes
 │   ├── paths.py                    #   Safe, root-confined source path resolution
@@ -273,7 +273,16 @@ curl -X POST http://localhost:8765/api/projects/<pid>/repos \
 
 ### 3. MCP Server (for coding agents)
 
-Register Constellation with Claude Code, Cursor, or any MCP-compatible agent:
+Register Constellation with Claude Code, Cursor, or any MCP-compatible agent.
+Built on the official MCP Python SDK (v2); the protocol version is negotiated
+automatically (current wire version 2025-11-25). The MCP server is **multi-project
+aware**: it exposes every project the app knows about (the same projects the web
+UI shows). Call `list_projects` to discover them, then pass a `project` id to any
+graph tool to query that project (omit it to query the default — the most recently
+updated ready project). All eleven graph tools are exposed, tagged read-only, plus
+the default project's graph as the `constellation://graph` resource.
+
+**Local / non-docker (stdio):**
 
 ```json
 // .mcp.json
@@ -291,6 +300,22 @@ Register Constellation with Claude Code, Cursor, or any MCP-compatible agent:
 }
 ```
 
+**Docker / web-server hosting (Streamable HTTP):** the FastAPI web app
+(`server.py`) mounts the same MCP server at `/mcp`, so the docker container
+serves MCP with just a URL and no stdio subprocess:
+
+```json
+// .mcp.json
+{
+  "mcpServers": {
+    "constellation": {
+      "type": "http",
+      "url": "http://localhost:8765/mcp"
+    }
+  }
+}
+```
+
 The agent can then ask questions like:
 - "What service handles order-events messages?"
 - "If I change the `save` method, what entry points are affected?"
@@ -300,7 +325,7 @@ The agent can then ask questions like:
 
 ## Graph Tools
 
-Eight tools, shared across all three interfaces:
+Eleven tools, shared across all three interfaces:
 
 | Tool | Description |
 |------|-------------|
@@ -312,6 +337,9 @@ Eight tools, shared across all three interfaces:
 | `list_channels` | All inter-service message channels |
 | `get_source` | Source code with line numbers and optional highlighting |
 | `get_architecture_overview` | System-level summary (repos, types, complexity metrics) |
+| `find_orphans` | Message channels only half-wired (producer with no consumer, or vice versa) |
+| `find_cycles` | Repo-level dependency cycles via cross-repo channel edges (A → B → A) |
+| `find_dead_code` | Possible dead code: unreachable methods, thin handlers, isolated repos |
 
 ---
 

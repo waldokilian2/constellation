@@ -460,7 +460,13 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, snapshots, onT
         {canCompare && !comparing && (
           <span className={"seg seg-diff" + (hasChanges ? " st-diff" : "")}>
             <span className="seg-sep">|</span>
-            {hasChanges ? "view changes since last scan" : "no changes"}
+            {hasChanges ? (
+              <span className="seg-action">
+                View changes <span className="seg-arrow" aria-hidden="true">→</span>
+              </span>
+            ) : (
+              "no changes"
+            )}
           </span>
         )}
         {comparing && <span className="seg seg-exit">✕ exit</span>}

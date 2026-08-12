@@ -150,7 +150,7 @@ test.describe.serial("Graph diff & compare UI", () => {
     await page.locator(".project-card", { hasText: PROJECT_NAME }).click();
     const pill = page.locator(".compare-pill");
     await expect(pill).toHaveClass(/can-toggle/);
-    await expect(pill.locator(".seg-diff")).toHaveText(/view changes since last scan/);
+    await expect(pill.locator(".seg-diff")).toHaveText(/View changes/);
   });
 
   test("project card shows the change chips", async ({ page }) => {

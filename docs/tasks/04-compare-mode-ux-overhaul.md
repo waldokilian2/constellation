@@ -76,7 +76,7 @@ The pill replaces `.meta-pill` and owns three pieces of truth:
 |---|---|---|
 | **S0 · no history** | `diffInfo` null OR `(diffInfo.snapshots||[]).length === 0` | green dot + "Up to date" (or amber "Stale"). No diff segment. Not clickable. |
 | **S1 · clean** | snapshots exist, `!diffHasChanges(diffInfo)` | green "Up to date" + dim segment `· no changes since last scan`. Clickable → S3. |
-| **S2 · dirty** | snapshots exist, `diffHasChanges(diffInfo)` | green "Up to date" + **amber** segment `| view changes since last scan` (soft pulse). Clickable → S3. Hover tooltip = `diffSummaryText(diffInfo)`. |
+| **S2 · dirty** | snapshots exist, `diffHasChanges(diffInfo)` | green "Up to date" + **amber** segment `| View changes →` (soft pulse, nudge arrow). Clickable → S3. Hover tooltip = `diffSummaryText(diffInfo)`. |
 | **S3 · comparing** | `compareMode === true` | segment 1: "COMPARING" (green, `.compare-title` styling); segment 2: `✕ exit` (click → S1/S2). Pill border glows green. |
 | **S4 · stale + dirty** | `stale && diffHasChanges(diffInfo)` | segment 1: amber "Stale" (existing `.status-stale` colors); diff segment unchanged from S2. |
 | **S5 · stale + comparing** | `stale && compareMode` | "Stale" + "COMPARING" + `✕ exit`. |
@@ -134,7 +134,13 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, snapshots, onT
         {canCompare && !comparing && (
           <span className={"seg seg-diff" + (hasChanges ? " st-diff" : "")}>
             <span className="seg-sep">|</span>
-            {hasChanges ? "view changes since last scan" : "no changes"}
+            {hasChanges ? (
+              <span className="seg-action">
+                View changes <span className="seg-arrow" aria-hidden="true">→</span>
+              </span>
+            ) : (
+              "no changes"
+            )}
           </span>
         )}
         {comparing && <span className="seg seg-exit">✕ exit</span>}
@@ -351,7 +357,7 @@ Keep `.diff-chip` base (`.diff-chip.added/.changed/.removed` and
 | Line | Old assertion | New assertion |
 |---|---|---|
 | ~112 | `.compare-bar` count 0 | pill visible with text "Up to date", no `.seg-diff`, no `.compare-select` |
-| ~121 | `bar.locator(".compare-text")` "Since last scan" | `.compare-pill .seg-diff` → "view changes since last scan" |
+| ~121 | `bar.locator(".compare-text")` "Since last scan" | `.compare-pill .seg-diff` → "View changes →" |
 | ~123 | `bar.locator(".diff-chip.added")` "+1" | pill `.seg-diff` text (summary lives in pill/tooltip now) |
 | ~124 | `.compare-action` "Compare" | `.compare-pill` has class `can-toggle` |
 | `enterProjectCompare` (~66) | click `.compare-action`, expect `.compare-bar.active .compare-title` "COMPARING" | click `.compare-pill`, expect `.compare-pill.comparing` + `.seg-status` "COMPARING" |

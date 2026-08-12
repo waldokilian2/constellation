@@ -155,7 +155,7 @@ constellation/
 │   ├── call_graph.py               #   BFS call tree builder (depth-limited)
 │   ├── cross_repo.py               #   Queue/topic name matcher
 │   ├── context_builder.py          #   Builds AI system prompts from graph data
-│   ├── graph_tools.py              #   8 query functions (shared by all interfaces)
+│   ├── graph_tools.py              #   11 query functions (shared by all interfaces)
 │   ├── mcp_server.py               #   MCP stdio server for coding agents
 │   ├── models.py                   #   Data classes
 │   ├── paths.py                    #   Safe, root-confined source path resolution
@@ -300,7 +300,7 @@ The agent can then ask questions like:
 
 ## Graph Tools
 
-Eight tools, shared across all three interfaces:
+Eleven tools, shared across all three interfaces:
 
 | Tool | Description |
 |------|-------------|
@@ -312,6 +312,9 @@ Eight tools, shared across all three interfaces:
 | `list_channels` | All inter-service message channels |
 | `get_source` | Source code with line numbers and optional highlighting |
 | `get_architecture_overview` | System-level summary (repos, types, complexity metrics) |
+| `find_orphans` | Message channels only half-wired (producer with no consumer, or vice versa) |
+| `find_cycles` | Repo-level dependency cycles via cross-repo channel edges (A → B → A) |
+| `find_dead_code` | Possible dead code: unreachable methods, thin handlers, isolated repos |
 
 ---
 

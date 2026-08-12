@@ -6,6 +6,17 @@ Exposes the Constellation graph tools as an MCP (Model Context Protocol)
 server over stdio. This lets external coding agents (Claude Code, Cursor,
 etc.) query the codebase graph that Constellation extracted.
 
+Built on the official MCP Python SDK (v2, low-level ``Server``) — see
+https://py.sdk.modelcontextprotocol.io/. The protocol version is negotiated
+automatically by the SDK (current spec: 2026-07-28); we no longer hand-roll
+JSON-RPC.
+
+We use the SDK's **low-level** API on purpose: it accepts an explicit
+``input_schema`` dict per tool, so the single source of truth
+(``engine.graph_tools.TOOL_DEFINITIONS``) stays intact — the same schemas the
+REST API and the web AI tool-loop use are advertised to MCP clients verbatim.
+Tool calls dispatch through the shared ``execute_tool``.
+
 Usage:
     # Standalone — loads graph.json from the current directory
     python -m engine.mcp_server
@@ -31,10 +42,40 @@ The server reads graph.json once at startup and serves all queries from
 memory. Restart the server (or the agent) to pick up graph changes.
 """
 from __future__ import annotations
+import asyncio
 import json
 import os
 import sys
 from pathlib import Path
+
+from mcp.server import Server, ServerRequestContext
+from mcp.server.stdio import stdio_server
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListResourcesResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    ReadResourceRequestParams,
+    ReadResourceResult,
+    Resource,
+    TextContent,
+    TextResourceContents,
+    Tool,
+    ToolAnnotations,
+)
+
+from engine.graph_tools import TOOL_DEFINITIONS, execute_tool
+
+SERVER_NAME = "constellation"
+SERVER_VERSION = "0.1.0"
+GRAPH_RESOURCE_URI = "constellation://graph"
+
+# Every Constellation tool is a pure read over the in-memory graph (and
+# ``get_source`` reads source files but never mutates). Tagging them
+# read-only is accurate and lets clients (and users) skip confirmations.
+_READ_ONLY = ToolAnnotations(read_only_hint=True)
+
 
 # ── Graph loading ──────────────────────────────────────────────────
 
@@ -79,36 +120,125 @@ def _load_graph() -> dict:
         return {}
 
 
-# ── MCP Protocol (stdio JSON-RPC 2.0) ─────────────────────────────
+# ── Tool + resource metadata (from the single source of truth) ─────
 
-def _send(msg: dict):
-    """Send a JSON-RPC message to stdout."""
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+def _build_tools() -> list[Tool]:
+    """Advertise every TOOL_DEFINITIONS entry as an MCP tool.
+
+    ``parameters`` IS the MCP ``inputSchema`` (JSON Schema), passed straight
+    through so the schema the REST API and web AI use is exactly what MCP
+    clients see.
+    """
+    return [
+        Tool(
+            name=t["name"],
+            description=t["description"],
+            input_schema=t["parameters"],
+            annotations=_READ_ONLY,
+        )
+        for t in TOOL_DEFINITIONS
+    ]
 
 
-def _respond(id_val: int | str | None, result: dict):
-    """Send a successful response."""
-    _send({"jsonrpc": "2.0", "id": id_val, "result": result})
+def _graph_resource() -> Resource:
+    """Expose the full in-memory graph as a single MCP resource."""
+    return Resource(
+        uri=GRAPH_RESOURCE_URI,
+        name="Constellation Graph",
+        description="The full codebase graph extracted by Constellation",
+        mimeType="application/json",
+    )
 
 
-def _respond_error(id_val: int | str | None, code: int, message: str):
-    """Send an error response."""
-    _send({"jsonrpc": "2.0", "id": id_val, "error": {"code": code, "message": message}})
+# ── Server factory ─────────────────────────────────────────────────
+
+def build_server(graph: dict) -> Server:
+    """Build the low-level MCP server, closing its handlers over ``graph``."""
+    tools = _build_tools()
+
+    async def on_list_tools(
+        ctx: ServerRequestContext, params: PaginatedRequestParams | None
+    ) -> ListToolsResult:
+        return ListToolsResult(tools=tools)
+
+    async def on_call_tool(
+        ctx: ServerRequestContext, params: CallToolRequestParams
+    ) -> CallToolResult:
+        name = params.name
+        args = params.arguments or {}
+
+        if not graph:
+            # Surface as a model-visible tool error (not a protocol error)
+            # so the agent learns it needs to (re)generate the graph.
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text="Error: No graph.json loaded. Run the Constellation engine first "
+                         "or set the CONSTELLATION_GRAPH environment variable.",
+                )],
+                is_error=True,
+            )
+
+        # execute_tool validates args against the schema and catches internal
+        # errors, returning {"error": ...}. Wrap defensively anyway so an
+        # unexpected failure stays a model-visible tool result, not a hard
+        # protocol error.
+        try:
+            result = execute_tool(graph, name, args)
+        except Exception as e:  # pragma: no cover - execute_tool shouldn't raise
+            result = {"error": f"Tool '{name}' failed: {e}"}
+
+        text = json.dumps(result, indent=2, default=str)
+        return CallToolResult(
+            content=[TextContent(type="text", text=text)],
+            is_error=bool(isinstance(result, dict) and result.get("error")),
+        )
+
+    async def on_list_resources(
+        ctx: ServerRequestContext, params: PaginatedRequestParams | None
+    ) -> ListResourcesResult:
+        return ListResourcesResult(resources=[_graph_resource()])
+
+    async def on_read_resource(
+        ctx: ServerRequestContext, params: ReadResourceRequestParams
+    ) -> ReadResourceResult:
+        if params.uri == GRAPH_RESOURCE_URI:
+            return ReadResourceResult(contents=[TextResourceContents(
+                uri=GRAPH_RESOURCE_URI,
+                mimeType="application/json",
+                text=json.dumps(graph, indent=2, default=str),
+            )])
+        # Unknown resource → protocol error (resources have no is_error half-result).
+        raise ValueError(f"Unknown resource: {params.uri}")
+
+    return Server(
+        SERVER_NAME,
+        version=SERVER_VERSION,
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+        on_list_resources=on_list_resources,
+        on_read_resource=on_read_resource,
+    )
 
 
-def main():
-    """Main MCP server loop — reads JSON-RPC from stdin, writes to stdout."""
-    # Import tool definitions and executor
-    from engine.graph_tools import TOOL_DEFINITIONS, execute_tool
+async def _serve(server: Server) -> None:
+    """Run ``server`` over the stdio transport until the client disconnects."""
+    # stdout is the protocol wire — the SDK redirects flushed stdout to stderr
+    # during serving, so any stray prints can't corrupt the stream. Diagnostics
+    # here go to stderr explicitly.
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
+
+def main() -> None:
+    """Load the graph and serve MCP over stdio."""
     graph = _load_graph()
     if not graph:
         sys.stderr.write(
             "Constellation MCP: No graph.json found. Run the Constellation engine first "
             "or set CONSTELLATION_GRAPH.\n"
         )
-        # Still run — we'll return helpful errors on tool calls
+        # Still run — tool calls return a helpful error (see on_call_tool).
 
     sys.stderr.write(
         f"Constellation MCP: Loaded graph "
@@ -116,101 +246,8 @@ def main():
         f"{len(graph.get('entry_points', []))} entry points)\n"
     )
 
-    initialized = False
-
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        method = msg.get("method", "")
-        msg_id = msg.get("id")
-        params = msg.get("params", {})
-
-        # ── Handle requests (have an id) ────────────────────────
-        if method == "initialize":
-            _respond(msg_id, {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                },
-                "serverInfo": {
-                    "name": "constellation",
-                    "version": "0.1.0",
-                },
-            })
-            initialized = True
-            continue
-
-        if method == "initialized":
-            # Notification — no response needed
-            continue
-
-        if method == "tools/list":
-            _respond(msg_id, {"tools": TOOL_DEFINITIONS})
-            continue
-
-        if method == "tools/call":
-            tool_name = params.get("name", "")
-            tool_args = params.get("arguments", {})
-
-            if not graph:
-                _respond(msg_id, {
-                    "content": [{
-                        "type": "text",
-                        "text": "Error: No graph.json loaded. Run the Constellation engine first "
-                                "or set CONSTELLATION_GRAPH environment variable.",
-                    }],
-                    "isError": True,
-                })
-                continue
-
-            result = execute_tool(graph, tool_name, tool_args)
-
-            # Format the result as MCP content
-            text = json.dumps(result, indent=2, default=str)
-            _respond(msg_id, {
-                "content": [{"type": "text", "text": text}],
-                "isError": bool(result.get("error")),
-            })
-            continue
-
-        if method == "resources/list":
-            # Expose graph.json as a resource
-            _respond(msg_id, {
-                "resources": [
-                    {
-                        "uri": "constellation://graph",
-                        "name": "Constellation Graph",
-                        "description": "The full codebase graph extracted by Constellation",
-                        "mimeType": "application/json",
-                    }
-                ]
-            })
-            continue
-
-        if method == "resources/read":
-            uri = params.get("uri", "")
-            if uri == "constellation://graph":
-                _respond(msg_id, {
-                    "contents": [{
-                        "uri": uri,
-                        "mimeType": "application/json",
-                        "text": json.dumps(graph, indent=2, default=str),
-                    }]
-                })
-                continue
-            _respond_error(msg_id, -32602, f"Unknown resource: {uri}")
-            continue
-
-        # Unknown method
-        if msg_id is not None:
-            _respond_error(msg_id, -32601, f"Method not found: {method}")
+    server = build_server(graph)
+    asyncio.run(_serve(server))
 
 
 if __name__ == "__main__":

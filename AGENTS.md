@@ -11,9 +11,10 @@ The **core analysis is deterministic** — every relationship is read from sourc
 ## Requirements & Dependencies
 
 - **Python 3.10+** (uses `from __future__ import annotations`).
-- Runtime deps (installed ad hoc by the startup scripts — **there is no `requirements.txt` / `pyproject.toml`**):
+- Runtime deps are listed in `requirements.txt` (installed by `start.sh` / `start.bat` / the Docker image):
   - `tree-sitter`, `tree-sitter-java` (AST parsing)
   - `fastapi`, `uvicorn` (web server)
+  - `mcp` (MCP stdio server — official SDK v2; pulls transitive deps like `anyio`/`httpx2`, used only by `engine/mcp_server.py`)
 - **Test suite: stdlib-only.** `tests/run_tests.py` discovers and runs `tests/test_*.py`
   modules (no pytest, no deps — run `python tests/run_tests.py`). `tests/repos/` holds sample
   Java repos used as analysis input (`tests/repos/{order-service,fulfillment-service,notification-service}`
@@ -55,8 +56,8 @@ engine/            # Deterministic analysis engine (Python)
   call_graph.py      # BFS call-tree builder (depth-limited)
   cross_repo.py      # queue/topic name matcher between repos
   context_builder.py # builds AI system prompts from graph data
-  graph_tools.py     # 8 pure query functions (single source of truth)
-  mcp_server.py      # MCP stdio server (JSON-RPC 2.0)
+  graph_tools.py     # 11 pure query functions (single source of truth)
+  mcp_server.py      # MCP stdio server (official `mcp` SDK v2, low-level Server)
   models.py          # dataclasses for the graph
   paths.py           # safe, root-confined source path resolution
   project_store.py   # multi-project index, git-clone ingestion, engine-run w/ log capture
@@ -110,9 +111,9 @@ These are set in `call_graph.py` (`_resolve_call`, `_is_trivial`, `_expand_node`
 
 ## Graph Tools (single source of truth)
 
-`engine/graph_tools.py` defines **8 pure functions** (`TOOL_DEFINITIONS`) consumed by three interfaces: the MCP server, the REST API (`/api/projects/{pid}/tools/*`), and the web AI tool-loop. `execute_tool(graph, name, args)` is the dispatcher and `_filter_args` validates args against the schema.
+`engine/graph_tools.py` defines **11 pure functions** (`TOOL_DEFINITIONS`) consumed by three interfaces: the MCP server, the REST API (`/api/projects/{pid}/tools/*`), and the web AI tool-loop. `execute_tool(graph, name, args)` is the dispatcher and `_filter_args` validates args against the schema.
 
-The 8 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`.
+The 11 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`, `find_orphans`, `find_cycles`, `find_dead_code`.
 
 **Rule:** if you add a tool, register it in **all** of: `TOOL_DEFINITIONS`, the `execute_tool` dispatch table, `_filter_args` (implicit via schema), and `get_tool_definitions`. Keep the functions pure (no I/O, no state) — they operate only on the graph dict.
 

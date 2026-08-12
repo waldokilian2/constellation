@@ -127,7 +127,7 @@ test.describe.serial("Graph diff & compare UI", () => {
   test("project card shows the change chips", async ({ page }) => {
     await page.goto("/");
     const card = page.locator(".project-card", { hasText: PROJECT_NAME });
-    await expect(card.locator(".pc-diff .diff-chip.added")).toContainText("+1 EP");
+    await expect(card.locator(".pc-diff .diff-chip.added")).toContainText("+1 entry point");
   });
 
   test("compare mode: repo badge + edge popup in the galaxy", async ({ page }) => {

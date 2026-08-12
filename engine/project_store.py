@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterator, Optional
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -43,6 +44,19 @@ _ALLOWED_SCHEMES = ("https://", "http://")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """Write JSON to ``path`` atomically (temp file + rename).
+
+    A crash mid-write must never leave a half-written graph/diff/snapshot on
+    disk — the next load would fail with a JSONDecodeError and the UI would
+    lose the project's data. ``os.replace`` is atomic on the same filesystem.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, path)
 
 
 def _slugify(name: str, fallback: str = "project") -> str:
@@ -195,7 +209,7 @@ class ProjectStore:
         snaps = self.snapshots_dir(pid)
         snaps.mkdir(parents=True, exist_ok=True)
         ts = time.time_ns()
-        (snaps / f"{ts}.json").write_text(json.dumps(graph))
+        _atomic_write_json(snaps / f"{ts}.json", graph)
         for stale in sorted(snaps.glob("*.json"))[:-self.SNAPSHOT_LIMIT]:
             stale.unlink(missing_ok=True)
 
@@ -261,14 +275,14 @@ class ProjectStore:
             if old_graph is not None:
                 self._save_snapshot(pid, old_graph)
 
-        graph_path.write_text(json.dumps(graph_dict, indent=2))
+        _atomic_write_json(graph_path, graph_dict)
 
         diff: dict = {}
         if old_graph is not None:
             from engine.graph_tools import diff_graphs
             diff = diff_graphs(old_graph, graph_dict)
             diff["compared_at"] = _now()
-            self.last_diff_path(pid).write_text(json.dumps(diff, indent=2))
+            _atomic_write_json(self.last_diff_path(pid), diff)
         return diff
 
     # ── mutation ───────────────────────────────────────────────────

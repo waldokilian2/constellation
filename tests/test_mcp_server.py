@@ -3,7 +3,7 @@
 Run with: python tests/run_tests.py test_mcp_server
 
 These exercise the server through the official MCP Python SDK client — the
-same path real coding agents (Claude Code, Cursor) use — in two modes:
+same path real coding agents (Claude Code, Cursor) use — across three modes:
 
   * **In-memory** — ``Client(build_server(graph))``. Fast and deterministic;
     verifies tool/schema fidelity to TOOL_DEFINITIONS (the single source of
@@ -13,6 +13,9 @@ same path real coding agents (Claude Code, Cursor) use — in two modes:
     speaks the real JSON-RPC wire protocol. Verifies main(), graph load from
     disk, the stdio transport, capability advertisement, and that the
     negotiated protocol version is current (not the stale 2024-11-05).
+  * **Streamable HTTP** — mounts ``mount_streamable_http`` (the docker path:
+    ``server.py`` serves the same MCP server at ``/mcp``) on a live app and
+    connects over HTTP, verifying the container / web-server transport.
 
 Requires the ``mcp`` SDK (a runtime dep since the server was moved onto it)
 and ``output/graph.json`` (gitignored — produced by start.sh / the engine).
@@ -36,6 +39,7 @@ try:
     from engine.mcp_server import (
         GRAPH_RESOURCE_URI,
         SERVER_NAME,
+        build_project_server,
         build_server,
     )
     from engine.graph_tools import TOOL_DEFINITIONS
@@ -188,12 +192,191 @@ def test_subprocess_stdio_negotiates_current_protocol():
                 assert caps.resources is not None
 
                 tools = await session.list_tools()
-                assert len(tools.tools) == len(TOOL_DEFINITIONS)
+                tool_names = {t.name for t in tools.tools}
+                # Every graph tool from the single source of truth is advertised.
+                assert {t["name"] for t in TOOL_DEFINITIONS}.issubset(tool_names)
+                # The stdio server is project-aware when the local store has a
+                # ready project, so it also advertises list_projects.
+                assert "list_projects" in tool_names
 
                 # A real query must succeed over the wire.
                 r = await session.call_tool("list_channels", {})
                 assert not r.is_error
                 assert "channels" in json.loads(r.content[0].text)
+
+    asyncio.run(run())
+
+
+def test_streamable_http_transport():
+    """The same MCP server is served over Streamable HTTP (the docker path).
+
+    server.py mounts build_server() at /mcp via mount_streamable_http; this
+    mounts the same helper on a live app, serves it, and connects over HTTP —
+    exactly how the docker container exposes MCP to clients.
+    """
+    if not _READY:
+        print("  SKIP: mcp SDK not installed")
+        return
+    if not GRAPH_FILE.exists():
+        print("  SKIP: output/graph.json missing")
+        return
+
+    import socket
+    import threading
+
+    import uvicorn
+    from fastapi import FastAPI
+    from engine.mcp_server import mount_streamable_http
+
+    app = FastAPI()
+    assert mount_streamable_http(app) is True
+
+    # Bind an ephemeral port, then hand it to uvicorn.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    srv = uvicorn.Server(config)
+    threading.Thread(target=srv.run, daemon=True).start()
+
+    async def run():
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        url = f"http://127.0.0.1:{port}/mcp"
+        async with streamable_http_client(url) as (read, write):
+            async with ClientSession(read, write) as session:
+                init = await session.initialize()
+                assert str(init.protocol_version) > "2024-11-05", init.protocol_version
+                assert init.capabilities.tools is not None
+                assert init.capabilities.resources is not None
+
+                tools = await session.list_tools()
+                assert len(tools.tools) == len(TOOL_DEFINITIONS)
+
+                res = await session.call_tool("get_architecture_overview", {})
+                assert not res.is_error
+                assert "total_repos" in res.content[0].text
+
+    try:
+        asyncio.run(run())
+    finally:
+        srv.should_exit = True
+
+
+# ── Multi-project tests (list_projects + project-scoped dispatch) ───
+
+class _FakeStore:
+    """Minimal stand-in for ProjectStore: list_projects() + load_graph(pid)."""
+
+    def __init__(self, projects: list[dict], graphs: dict):
+        self._projects = projects
+        self._graphs = graphs
+
+    def list_projects(self) -> list[dict]:
+        return list(self._projects)
+
+    def load_graph(self, pid: str) -> dict:
+        return self._graphs[pid]
+
+
+def _fake_project_store() -> "_FakeStore":
+    # newest first (ProjectStore.list_projects sorts by updated_at desc);
+    # gamma is errored — present in the list but NOT queryable.
+    projects = [
+        {"id": "alpha", "name": "Alpha", "status": "ready",
+         "repos": [{"name": "alpha"}], "stats": {"repos": 1, "entry_points": 1},
+         "updated_at": "2026-08-12T00:00:00+00:00"},
+        {"id": "beta", "name": "Beta", "status": "ready",
+         "repos": [{"name": "beta"}], "stats": {"repos": 1, "entry_points": 1},
+         "updated_at": "2026-08-11T00:00:00+00:00"},
+        {"id": "gamma", "name": "Gamma", "status": "error",
+         "repos": [{"name": "gamma"}], "stats": {},
+         "updated_at": "2026-08-10T00:00:00+00:00"},
+    ]
+    graphs = {
+        "alpha": {"repos": ["alpha"], "entry_points": [
+            {"id": "alpha:EP.run", "repo": "alpha", "type": "rest-endpoint",
+             "channel": "/run", "method": "run", "metrics": {"total_nodes": 1}}]},
+        "beta": {"repos": ["beta"], "entry_points": [
+            {"id": "beta:EP.run", "repo": "beta", "type": "rest-endpoint",
+             "channel": "/run", "method": "run", "metrics": {"total_nodes": 1}}]},
+    }
+    return _FakeStore(projects, graphs)
+
+
+def test_project_server_lists_all_projects():
+    """list_projects shows every project (incl. errored); only ready ones are queryable."""
+    if not _READY:
+        print("  SKIP: mcp SDK not installed")
+        return
+    store = _fake_project_store()
+
+    async def run():
+        async with Client(build_project_server(store)) as c:
+            lt = await c.list_tools()
+            names = {t.name for t in lt.tools}
+            assert "list_projects" in names
+            # every graph tool carries a `project` enum of READY ids only
+            sc = next(t for t in lt.tools if t.name == "search_code")
+            assert set(sc.input_schema["properties"]["project"]["enum"]) == {"alpha", "beta"}
+
+            r = await c.call_tool("list_projects", {})
+            d = json.loads(r.content[0].text)
+            assert [p["id"] for p in d["projects"]] == ["alpha", "beta", "gamma"]
+            assert [p["id"] for p in d["projects"] if p["status"] == "ready"] == ["alpha", "beta"]
+
+    asyncio.run(run())
+
+
+def test_project_arg_dispatches_to_that_project():
+    """Passing `project` selects that project's graph; omitting uses the default."""
+    if not _READY:
+        print("  SKIP: mcp SDK not installed")
+        return
+    store = _fake_project_store()
+
+    async def run():
+        async with Client(build_project_server(store)) as c:
+            a = json.loads((await c.call_tool("get_architecture_overview", {"project": "alpha"})).content[0].text)
+            b = json.loads((await c.call_tool("get_architecture_overview", {"project": "beta"})).content[0].text)
+            assert a["repos"] == ["alpha"] and b["repos"] == ["beta"]
+            # default = alpha (most recently updated ready project)
+            d = json.loads((await c.call_tool("get_architecture_overview", {})).content[0].text)
+            assert d["repos"] == ["alpha"]
+
+    asyncio.run(run())
+
+
+def test_unknown_project_returns_is_error():
+    """An unknown project id is a model-visible error, not a protocol error."""
+    if not _READY:
+        print("  SKIP: mcp SDK not installed")
+        return
+    store = _fake_project_store()
+
+    async def run():
+        async with Client(build_project_server(store)) as c:
+            r = await c.call_tool("get_architecture_overview", {"project": "nope"})
+            assert r.is_error is True
+            assert "list_projects" in r.content[0].text
+
+    asyncio.run(run())
+
+
+def test_project_graph_resource_serves_default_project():
+    """constellation://graph serves the default project's graph."""
+    if not _READY:
+        print("  SKIP: mcp SDK not installed")
+        return
+    store = _fake_project_store()
+
+    async def run():
+        async with Client(build_project_server(store)) as c:
+            rr = await c.read_resource(GRAPH_RESOURCE_URI)
+            g = json.loads(rr.contents[0].text)
+            assert g["repos"] == ["alpha"]  # default project
 
     asyncio.run(run())
 

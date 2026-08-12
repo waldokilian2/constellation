@@ -273,7 +273,16 @@ curl -X POST http://localhost:8765/api/projects/<pid>/repos \
 
 ### 3. MCP Server (for coding agents)
 
-Register Constellation with Claude Code, Cursor, or any MCP-compatible agent:
+Register Constellation with Claude Code, Cursor, or any MCP-compatible agent.
+Built on the official MCP Python SDK (v2); the protocol version is negotiated
+automatically (current wire version 2025-11-25). The MCP server is **multi-project
+aware**: it exposes every project the app knows about (the same projects the web
+UI shows). Call `list_projects` to discover them, then pass a `project` id to any
+graph tool to query that project (omit it to query the default — the most recently
+updated ready project). All eleven graph tools are exposed, tagged read-only, plus
+the default project's graph as the `constellation://graph` resource.
+
+**Local / non-docker (stdio):**
 
 ```json
 // .mcp.json
@@ -286,6 +295,22 @@ Register Constellation with Claude Code, Cursor, or any MCP-compatible agent:
       "env": {
         "CONSTELLATION_GRAPH": "/path/to/constellation/output/graph.json"
       }
+    }
+  }
+}
+```
+
+**Docker / web-server hosting (Streamable HTTP):** the FastAPI web app
+(`server.py`) mounts the same MCP server at `/mcp`, so the docker container
+serves MCP with just a URL and no stdio subprocess:
+
+```json
+// .mcp.json
+{
+  "mcpServers": {
+    "constellation": {
+      "type": "http",
+      "url": "http://localhost:8765/mcp"
     }
   }
 }

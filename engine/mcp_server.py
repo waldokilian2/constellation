@@ -3,13 +3,12 @@
 Constellation MCP Server.
 
 Exposes the Constellation graph tools as an MCP (Model Context Protocol)
-server over stdio. This lets external coding agents (Claude Code, Cursor,
-etc.) query the codebase graph that Constellation extracted.
+server. This lets external coding agents (Claude Code, Cursor, etc.) query
+the codebase graphs that Constellation extracted.
 
 Built on the official MCP Python SDK (v2, low-level ``Server``) — see
 https://py.sdk.modelcontextprotocol.io/. The protocol version is negotiated
-automatically by the SDK (current spec: 2026-07-28); we no longer hand-roll
-JSON-RPC.
+automatically by the SDK; we no longer hand-roll JSON-RPC.
 
 We use the SDK's **low-level** API on purpose: it accepts an explicit
 ``input_schema`` dict per tool, so the single source of truth
@@ -17,12 +16,20 @@ We use the SDK's **low-level** API on purpose: it accepts an explicit
 REST API and the web AI tool-loop use are advertised to MCP clients verbatim.
 Tool calls dispatch through the shared ``execute_tool``.
 
-Usage:
-    # Standalone — loads graph.json from the current directory
-    python -m engine.mcp_server
+**Multi-project.** The server is wired to the app's ``ProjectStore``: every
+graph tool takes an optional ``project`` argument (a project id from
+``list_projects``) and dispatches to that project's graph. Omit it to query
+the default project (the most recently updated *ready* project). This matches
+what the web UI shows — one MCP server, all projects.
 
-    # With a specific graph file
-    CONSTELLATION_GRAPH=/path/to/graph.json python -m engine.mcp_server
+Transports:
+  * **stdio** — ``python -m engine.mcp_server`` (local / non-docker).
+  * **Streamable HTTP** — ``server.py`` mounts the same server at ``/mcp``,
+    so the docker container serves MCP with just a URL.
+
+Usage:
+    # Standalone — serves every project in the local ProjectStore over stdio
+    python -m engine.mcp_server
 
     # Register with Claude Code (in .mcp.json or ~/.claude/mcp.json):
     {
@@ -30,22 +37,33 @@ Usage:
         "constellation": {
           "command": "python",
           "args": ["-m", "engine.mcp_server"],
-          "cwd": "/path/to/constellation",
-          "env": {
-            "CONSTELLATION_GRAPH": "/path/to/constellation/output/graph.json"
-          }
+          "cwd": "/path/to/constellation"
         }
       }
     }
 
-The server reads graph.json once at startup and serves all queries from
-memory. Restart the server (or the agent) to pick up graph changes.
+    # Streamable HTTP (docker / web-server hosting): server.py mounts the
+    # same MCP server at /mcp, so the docker container serves MCP with just
+    # a URL and no stdio subprocess:
+    {
+      "mcpServers": {
+        "constellation": {
+          "type": "http",
+          "url": "http://localhost:8765/mcp"
+        }
+      }
+    }
+
+Project graphs are loaded lazily on first query and cached. Restart the
+server (or the agent) to pick up new/changed projects.
 """
 from __future__ import annotations
 import asyncio
+import copy
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from mcp.server import Server, ServerRequestContext
@@ -76,8 +94,16 @@ GRAPH_RESOURCE_URI = "constellation://graph"
 # read-only is accurate and lets clients (and users) skip confirmations.
 _READ_ONLY = ToolAnnotations(read_only_hint=True)
 
+# Description appended to the ``project`` selector argument added to every
+# graph tool when the server is project-aware.
+_PROJECT_ARG_DESC = (
+    "Project id to query (see the list_projects tool). "
+    "Omit to query the default project (most recently updated ready project)."
+)
+_LIST_PROJECTS = "list_projects"
 
-# ── Graph loading ──────────────────────────────────────────────────
+
+# ── Graph loading (single-graph / legacy fallback) ─────────────────
 
 def _find_graph_path() -> Path | None:
     """Find graph.json — check env var, then common locations."""
@@ -108,7 +134,7 @@ def _find_graph_path() -> Path | None:
 
 
 def _load_graph() -> dict:
-    """Load the graph, with a clear error message if not found."""
+    """Load a single graph.json (legacy fallback), or {} if not found."""
     graph_path = _find_graph_path()
     if not graph_path:
         return {}
@@ -120,15 +146,62 @@ def _load_graph() -> dict:
         return {}
 
 
-# ── Tool + resource metadata (from the single source of truth) ─────
+# ── Project graph resolver (backed by a ProjectStore) ──────────────
+
+class _ProjectGraphs:
+    """Resolve a project selector to its graph, backed by a ProjectStore.
+
+    Duck-typed: ``store`` only needs ``list_projects() -> list[meta]`` and
+    ``load_graph(pid) -> dict`` (so tests can pass a lightweight fake).
+    Only *ready* projects are queryable; the most recently updated ready
+    project is the default.
+    """
+
+    def __init__(self, store):
+        # store.list_projects() returns newest-first by updated_at.
+        self.all_projects: list[dict] = list(store.list_projects())
+        self.ready: list[dict] = [p for p in self.all_projects if p.get("status") == "ready"]
+        self.default_project: str | None = self.ready[0]["id"] if self.ready else None
+        self._store = store
+        self._cache: dict[str, dict] = {}
+
+    @property
+    def ready_ids(self) -> list[str]:
+        return [p["id"] for p in self.ready]
+
+    def graph(self, project: str | None = None) -> dict:
+        """Return the graph for ``project`` (or the default). KeyError if unknown."""
+        pid = project or self.default_project
+        if pid is None or not any(p["id"] == pid for p in self.ready):
+            raise KeyError(pid)
+        if pid not in self._cache:
+            self._cache[pid] = self._store.load_graph(pid)
+        return self._cache[pid]
+
+
+def _projects_payload(projects: list[dict]) -> dict:
+    """list_projects result: every project with id/name/status/repos/stats."""
+    return {
+        "projects": [
+            {
+                "id": p["id"],
+                "name": p.get("name", p["id"]),
+                "status": p.get("status", "ready"),
+                "repos": [
+                    (r["name"] if isinstance(r, dict) else r)
+                    for r in p.get("repos", [])
+                ],
+                "stats": p.get("stats", {}),
+            }
+            for p in projects
+        ]
+    }
+
+
+# ── Tool + resource metadata ───────────────────────────────────────
 
 def _build_tools() -> list[Tool]:
-    """Advertise every TOOL_DEFINITIONS entry as an MCP tool.
-
-    ``parameters`` IS the MCP ``inputSchema`` (JSON Schema), passed straight
-    through so the schema the REST API and web AI use is exactly what MCP
-    clients see.
-    """
+    """Single-graph tool list: TOOL_DEFINITIONS advertised verbatim."""
     return [
         Tool(
             name=t["name"],
@@ -140,21 +213,72 @@ def _build_tools() -> list[Tool]:
     ]
 
 
+def _build_project_tools(project_ids: list[str]) -> list[Tool]:
+    """Project-aware tool list: every tool gains an optional ``project``
+    argument (deep-copied schema — never mutate TOOL_DEFINITIONS), plus a
+    ``list_projects`` discovery tool.
+    """
+    tools: list[Tool] = []
+    for t in TOOL_DEFINITIONS:
+        schema = copy.deepcopy(t["parameters"])
+        props = schema.setdefault("properties", {})
+        props["project"] = {"type": "string", "enum": list(project_ids), "description": _PROJECT_ARG_DESC}
+        tools.append(Tool(
+            name=t["name"],
+            description=t["description"],
+            input_schema=schema,
+            annotations=_READ_ONLY,
+        ))
+    tools.append(Tool(
+        name=_LIST_PROJECTS,
+        description=(
+            "List every Constellation project this server can see, with id, "
+            "name, status, repos, and stats. Pass a project id to any other "
+            "tool's `project` argument to query that project. Only projects "
+            "with status 'ready' are queryable."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        annotations=_READ_ONLY,
+    ))
+    return tools
+
+
 def _graph_resource() -> Resource:
-    """Expose the full in-memory graph as a single MCP resource."""
+    """Expose the default project's graph as a single MCP resource."""
     return Resource(
         uri=GRAPH_RESOURCE_URI,
         name="Constellation Graph",
-        description="The full codebase graph extracted by Constellation",
+        description="The default project's codebase graph (use list_projects + the project arg for others)",
         mimeType="application/json",
+    )
+
+
+def _text_result(result: dict, *, is_error: bool | None = None) -> CallToolResult:
+    """Wrap a tool result dict as an MCP CallToolResult."""
+    if is_error is None:
+        is_error = bool(isinstance(result, dict) and result.get("error"))
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(result, indent=2, default=str))],
+        is_error=is_error,
     )
 
 
 # ── Server factory ─────────────────────────────────────────────────
 
-def build_server(graph: dict) -> Server:
-    """Build the low-level MCP server, closing its handlers over ``graph``."""
-    tools = _build_tools()
+def _make_server(
+    resolve,                      # callable(project: str | None) -> dict
+    projects: list[dict],         # for list_projects (may be [])
+    project_ids: list[str],       # queryable ids (ready)
+) -> Server:
+    """Build the low-level MCP server around a graph resolver.
+
+    ``resolve(project)`` returns the graph for a project (or raises KeyError
+    for an unknown/unavailable project). When ``project_ids`` is non-empty
+    the server is project-aware (tools carry a ``project`` arg + list_projects
+    is advertised); otherwise it behaves as a single-graph server.
+    """
+    project_aware = bool(project_ids)
+    tools = _build_project_tools(project_ids) if project_aware else _build_tools()
 
     async def on_list_tools(
         ctx: ServerRequestContext, params: PaginatedRequestParams | None
@@ -165,19 +289,32 @@ def build_server(graph: dict) -> Server:
         ctx: ServerRequestContext, params: CallToolRequestParams
     ) -> CallToolResult:
         name = params.name
-        args = params.arguments or {}
+        args = dict(params.arguments or {})
+
+        if name == _LIST_PROJECTS:
+            return _text_result(_projects_payload(projects))
+
+        # Pick the graph: project-aware servers honor an optional `project`
+        # arg (stripped before dispatch so execute_tool never sees it).
+        requested_project = args.pop("project", None) if project_aware else None
+        try:
+            graph = resolve(requested_project)
+        except KeyError:
+            return _text_result({
+                "error": (
+                    f"No graph for project {requested_project!r}. "
+                    "Call the list_projects tool for available ids."
+                ),
+            }, is_error=True)
 
         if not graph:
-            # Surface as a model-visible tool error (not a protocol error)
-            # so the agent learns it needs to (re)generate the graph.
-            return CallToolResult(
-                content=[TextContent(
-                    type="text",
-                    text="Error: No graph.json loaded. Run the Constellation engine first "
-                         "or set the CONSTELLATION_GRAPH environment variable.",
-                )],
-                is_error=True,
-            )
+            if project_aware:
+                msg = ("No graph loaded for that project. Re-run the Constellation "
+                       "engine for it, or pick another id from list_projects.")
+            else:
+                msg = ("No graph.json loaded. Run the Constellation engine first "
+                       "or set the CONSTELLATION_GRAPH environment variable.")
+            return _text_result({"error": msg}, is_error=True)
 
         # execute_tool validates args against the schema and catches internal
         # errors, returning {"error": ...}. Wrap defensively anyway so an
@@ -187,12 +324,7 @@ def build_server(graph: dict) -> Server:
             result = execute_tool(graph, name, args)
         except Exception as e:  # pragma: no cover - execute_tool shouldn't raise
             result = {"error": f"Tool '{name}' failed: {e}"}
-
-        text = json.dumps(result, indent=2, default=str)
-        return CallToolResult(
-            content=[TextContent(type="text", text=text)],
-            is_error=bool(isinstance(result, dict) and result.get("error")),
-        )
+        return _text_result(result)
 
     async def on_list_resources(
         ctx: ServerRequestContext, params: PaginatedRequestParams | None
@@ -203,6 +335,10 @@ def build_server(graph: dict) -> Server:
         ctx: ServerRequestContext, params: ReadResourceRequestParams
     ) -> ReadResourceResult:
         if params.uri == GRAPH_RESOURCE_URI:
+            try:
+                graph = resolve(None)   # default project's graph
+            except KeyError:
+                graph = {}
             return ReadResourceResult(contents=[TextResourceContents(
                 uri=GRAPH_RESOURCE_URI,
                 mimeType="application/json",
@@ -221,6 +357,84 @@ def build_server(graph: dict) -> Server:
     )
 
 
+def build_server(graph: dict) -> Server:
+    """Single-graph server: every tool runs against this one ``graph``."""
+    def resolve(_project: str | None = None) -> dict:
+        return graph
+    return _make_server(resolve, [], [])
+
+
+def build_project_server(store) -> Server:
+    """Project-aware server backed by a ProjectStore (list_projects + load_graph)."""
+    pg = _ProjectGraphs(store)
+    return _make_server(pg.graph, pg.all_projects, pg.ready_ids)
+
+
+def mount_streamable_http(app, graph: dict | None = None, store=None) -> bool:
+    """Expose the graph tools over Streamable HTTP at ``app``/mcp.
+
+    Mounts an MCP Streamable HTTP endpoint at ``/mcp`` on an existing ASGI
+    app — the FastAPI web app in ``server.py``. This is how the docker
+    container (which runs that web app) serves MCP to clients with just a
+    URL and no stdio subprocess::
+
+        "constellation": { "type": "http", "url": "http://localhost:8765/mcp" }
+
+    If ``store`` is given the server is project-aware (one server, all
+    projects). Otherwise it falls back to a single ``graph`` (or the legacy
+    graph.json). The app's existing lifespan (if any) is preserved and
+    wrapped so the MCP session manager's lifecycle runs for the app's
+    lifetime (the SDK's Streamable HTTP transport requires a running task
+    group).
+
+    Returns True when mounted; False when the ``mcp`` SDK is unavailable —
+    the web app keeps running either way, and local stdio MCP is unaffected.
+    """
+    try:
+        from mcp.server.streamable_http_manager import (
+            StreamableHTTPSessionManager,
+            StreamableHTTPASGIApp,
+        )
+    except Exception as e:
+        sys.stderr.write(f"Constellation MCP: /mcp not mounted (mcp SDK unavailable: {e})\n")
+        return False
+
+    if store is not None:
+        server = build_project_server(store)
+        pg = _ProjectGraphs(store)
+        label = f"{len(pg.ready)} ready project(s) (default: {pg.default_project})"
+    else:
+        if graph is None:
+            graph = _load_graph()
+        server = build_server(graph)
+        label = f"single graph: {len(graph.get('repos', []))} repos, {len(graph.get('entry_points', []))} entry points"
+
+    manager = StreamableHTTPSessionManager(server)
+
+    # Wrap the app's existing lifespan (Starlette runs this at startup) so
+    # the session manager's task group lives for the app's lifetime. Starlette
+    # does `async with lifespan_context(app)`, so the lifespan must be a
+    # proper async context manager, not a bare async generator.
+    prev = getattr(app.router, "lifespan_context", None)
+    if prev is None:
+        @asynccontextmanager
+        async def lifespan(app):
+            async with manager.run():
+                yield
+        app.router.lifespan_context = lifespan
+    else:
+        @asynccontextmanager
+        async def lifespan(app):
+            async with prev(app):
+                async with manager.run():
+                    yield
+        app.router.lifespan_context = lifespan
+
+    app.mount("/mcp", StreamableHTTPASGIApp(manager))
+    sys.stderr.write(f"Constellation MCP: Streamable HTTP mounted at /mcp ({label})\n")
+    return True
+
+
 async def _serve(server: Server) -> None:
     """Run ``server`` over the stdio transport until the client disconnects."""
     # stdout is the protocol wire — the SDK redirects flushed stdout to stderr
@@ -231,22 +445,33 @@ async def _serve(server: Server) -> None:
 
 
 def main() -> None:
-    """Load the graph and serve MCP over stdio."""
-    graph = _load_graph()
-    if not graph:
+    """Serve MCP over stdio — project-aware when a ProjectStore has projects."""
+    repo_root = Path(__file__).resolve().parent.parent
+
+    store = None
+    pg = None
+    try:
+        from engine.project_store import ProjectStore
+        store = ProjectStore(repo_root)
+        pg = _ProjectGraphs(store)
+    except Exception as e:  # pragma: no cover - store is stdlib-free, unlikely
+        sys.stderr.write(f"Constellation MCP: project store unavailable ({e}); falling back to single graph\n")
+
+    if pg and pg.ready:
         sys.stderr.write(
-            "Constellation MCP: No graph.json found. Run the Constellation engine first "
-            "or set CONSTELLATION_GRAPH.\n"
+            f"Constellation MCP: serving {len(pg.ready)} project(s) "
+            f"(default: {pg.default_project}) over stdio\n"
         )
-        # Still run — tool calls return a helpful error (see on_call_tool).
+        server = build_project_server(store)
+    else:
+        graph = _load_graph()
+        sys.stderr.write(
+            f"Constellation MCP: no ready projects in store; serving single graph "
+            f"({len(graph.get('repos', []))} repos, "
+            f"{len(graph.get('entry_points', []))} entry points)\n"
+        )
+        server = build_server(graph)
 
-    sys.stderr.write(
-        f"Constellation MCP: Loaded graph "
-        f"({len(graph.get('repos', []))} repos, "
-        f"{len(graph.get('entry_points', []))} entry points)\n"
-    )
-
-    server = build_server(graph)
     asyncio.run(_serve(server))
 
 

@@ -2756,6 +2756,29 @@ function DetailPanel({ node, entryPoint, onClose, pid, compare }) {
 
   const conf = confMeta(node.confidence);
 
+  // ── Changes since last scan (compare mode) ────────────────────
+  const changes = useMemo(() => {
+    if (!compare || !compare.old_graph) return null;
+    const oldEp = oldEntryPoint(compare, entryPoint.id);
+    const nodeKey = nodeKeyOf(node);
+    const oldKeys = oldEp ? collectNodeKeys(oldEp.call_tree) : new Set();
+    const nodeStatus = oldEp
+      ? (oldKeys.has(nodeKey) ? "same" : "added")
+      : "added";
+    const om = oldEp ? (oldEp.metrics || {}) : null;
+    const nm = entryPoint.metrics || {};
+    const hasOldMetrics = om && (om.depth != null || om.total_nodes != null);
+    return {
+      epAdded: !oldEp,
+      nodeStatus,
+      metrics: hasOldMetrics ? {
+        depth: [om.depth, nm.depth],
+        total_nodes: [om.total_nodes, nm.total_nodes],
+        unique_files: [om.unique_files, nm.unique_files],
+      } : null,
+    };
+  }, [compare, entryPoint, node]);
+
   return (
     <aside className="detail-panel glass">
       <header className="dp-head">
@@ -2769,6 +2792,30 @@ function DetailPanel({ node, entryPoint, onClose, pid, compare }) {
       <div className="dp-body">
         {node.confidence && (
           <span className="conf-badge" style={{ "--c": conf.color }}>{node.confidence}</span>
+        )}
+
+        {changes && (
+          <div className="dp-changes">
+            <div className="dp-changes-title">Changes since last scan</div>
+            {changes.epAdded && <div className="dp-changes-line st-added">▲ entry point is new</div>}
+            {!changes.epAdded && changes.nodeStatus === "added" && (
+              <div className="dp-changes-line st-added">▲ this call node is new</div>
+            )}
+            {changes.metrics && (
+              <div className="dp-changes-metrics">
+                {Object.entries(changes.metrics).map(([k, [o, n]]) => (
+                  o !== n ? (
+                    <div className="dp-changes-line st-changed" key={k}>
+                      <span className="mono">{k}</span> {o} → {n}
+                    </div>
+                  ) : null
+                ))}
+              </div>
+            )}
+            {!changes.epAdded && changes.nodeStatus === "same" && !changes.metrics && (
+              <div className="dp-changes-line quiet">no changes</div>
+            )}
+          </div>
         )}
 
         {rels.parent && (
@@ -2820,6 +2867,7 @@ function DetailPanel({ node, entryPoint, onClose, pid, compare }) {
 // with many flows the shrink-to-fit + zoom model became unusable.
 function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
   const flows = useMemo(() => detectFlows(graph), [graph]);
+  const cmp = useMemo(() => diffStatus(compare), [compare]);
   const H = dims.h;
 
   // Type filter chips (mirrors the Solar view): toggle a flow's origin type
@@ -2912,15 +2960,36 @@ function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
       </div>
       <div className="canvas flow-scroll" style={{ height: H }}>
         <div className="flow-grid flow-grid-static">
-          {searched.map((f, i) => (
+          {searched.map((f, i) => {
+            const fStatus = cmp ? (() => {
+              const chs = new Set();
+              (function walk(s) {
+                if (!s) return;
+                (s.children || []).forEach((c) => chs.add(c.channel));
+                walk(s.step);
+              })(f.step);
+              if (f.originChannel) chs.add(f.originChannel);
+              const sts = [];
+              chs.forEach((ch) => {
+                const st = cmp.chStatus[ch];
+                if (st && st !== "same") sts.push(st);
+              });
+              return sts.includes("added") ? "added" : sts.includes("removed") ? "removed" : sts.includes("changed") ? "changed" : null;
+            })() : null;
+            return (
             <div
               key={f.id}
               ref={(el) => { cardRefs.current[i] = el; }}
-              className={"flow-card" + (f.hasCrossRepo ? " cross-repo" : "")}
+              className={"flow-card" + (f.hasCrossRepo ? " cross-repo" : "") + (fStatus ? " st-" + fStatus : "")}
               style={{ height: uniformH || undefined, animationDelay: (i * 45) + "ms" }}
               onClick={(e) => onSelectFlow(f, e)}
             >
               <div className="flow-card-glow" />
+              {fStatus && (
+                <span className={"flow-card-diff-chip st-" + fStatus}>
+                  {fStatus === "added" ? "▲ channels added" : fStatus === "removed" ? "▼ channels removed" : "~ channels changed"}
+                </span>
+              )}
               <div className="flow-card-origin">
                 <span className={"flow-origin-tag " + (f.originClass || "external")}>
                   {f.originTag || "EXTERNAL"}
@@ -2958,8 +3027,9 @@ function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
                   </span>
                 ))}
               </div>
-            </div>
-          ))}
+              </div>
+            );
+          })}
         </div>
         {searched.length === 0 && flows.length > 0 && (
           <div className="flow-empty">No flows match your search or filters.</div>
@@ -2973,6 +3043,7 @@ function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
 // Solar equivalent — shows repos in a single flow as a DAG with channel edges
 function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
   const W = dims.w, H = dims.h;
+  const cmp = useMemo(() => diffStatus(compare), [compare]);
   const pz = usePanZoom(".flow-repo-node, .flow-external-node");
 
   // Build a DAG of repo-level nodes + edges from the flow step tree
@@ -3211,20 +3282,27 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
             const g = edgeGeom(a, b, idx, total, isSkip);
             const isSync = e.kind === "http";
             const isResp = e.kind === "http-response";
-            // Request edge: verb + path. Response edge: what comes back.
+            const st = cmp ? (cmp.chStatus[e.channel] || "same") : null;
+            const stroke = st && st !== "same" ? DIFF_COLORS[st] : (isSync || isResp ? "#00e0a8" : "#00d4ff");
+            const dash = st === "removed" ? "7 5" : (isResp ? "5 4" : undefined);
             const label = isResp
               ? "← " + (e.responseType || "response")
               : isSync
                 ? (e.verb ? e.verb + " " : "") + e.channel
                 : e.channel;
-            const pillW = label.length * 6.5 + 22;
+            const pillW = label.length * 6.5 + 22 + (st && st !== "same" ? 18 : 0);
             return (
               <g key={"fe-" + i}>
-                <path d={g.path} fill="none" stroke={isSync || isResp ? "#00e0a8" : "#00d4ff"} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={isResp ? "5 4" : undefined} opacity={isSkip ? "0.4" : "0.55"} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
+                <path d={g.path} fill="none" stroke={stroke} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={dash} opacity={st === "same" && cmp ? "0.3" : (isSkip ? "0.4" : "0.55")} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
                 <g className={"edge-label-pill" + (isSync || isResp ? " sync" : "")} transform={`translate(${g.mid.x}, ${g.mid.y})`}>
-                  <rect className="edge-label-glow" x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
-                  <rect className="edge-label-bg" x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />
-                  <text className={"edge-label" + (isSync || isResp ? " sync" : "")} x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
+                  <rect className={"edge-label-glow" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
+                  <rect className={"edge-label-bg" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />
+                  <text className={"edge-label" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={st && st !== "same" ? -9 : 0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
+                  {st && st !== "same" && (
+                    <text className="edge-diff-mark" x={pillW / 2 - 12} y={0} dominantBaseline="central" textAnchor="middle">
+                      {st === "added" ? "▲" : st === "removed" ? "▼" : "~"}
+                    </text>
+                  )}
                 </g>
               </g>
             );
@@ -3245,14 +3323,25 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
         ))}
 
         {/* Repo nodes */}
-        {layout.positions.map((p) => (
+        {layout.positions.map((p) => {
+          const rc = cmp ? (cmp.repoCounts[p.repo] || null) : null;
+          const repoHasDiff = rc && (rc.added + rc.removed + rc.changed) > 0;
+          const repoSt = repoHasDiff ? (rc.added > 0 ? "added" : rc.removed > 0 ? "removed" : "changed") : null;
+          return (
           <div
             key={p.repo}
-            className="flow-repo-node"
+            className={"flow-repo-node" + (repoSt ? " st-" + repoSt : "")}
             style={{ left: p.x - 85, top: p.y - 55, width: 170 }}
             onClick={(e) => onSelectRepoInFlow(p.repo, p.entryIds[0], e)}
           >
             <div className="flow-repo-glow" />
+            {repoHasDiff && (
+              <span className="flow-repo-diff-badge">
+                {rc.added > 0 && <span className="diff-chip added">+{rc.added}</span>}
+                {rc.changed > 0 && <span className="diff-chip changed">~{rc.changed}</span>}
+                {rc.removed > 0 && <span className="diff-chip removed">−{rc.removed}</span>}
+              </span>
+            )}
             <div className="flow-repo-name">{p.repo}</div>
             <div className="flow-repo-methods">
               {p.methods.map((m, mi) => (
@@ -3260,7 +3349,8 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
               ))}
             </div>
           </div>
-        ))}
+          );
+        })}
         </div>
       </div>
       {pz.zoomControls}
@@ -4353,6 +4443,7 @@ function App() {
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
                 chatOpen={chatOpen}
+                compare={compare}
               />
             </div>
           );
@@ -4370,6 +4461,7 @@ function App() {
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
                 chatOpen={chatOpen}
+                compare={compare}
               />
             </div>
           );
@@ -4396,6 +4488,7 @@ function App() {
                 const [x, y] = centerOf(e && e.currentTarget);
                 drill(x, y, () => { setSelectedNode(null); setView({ name: "flow", flowId: f.id }); });
               }}
+              compare={compare}
             />
           </div>
         )}
@@ -4412,6 +4505,7 @@ function App() {
                   const [x, y] = centerOf(e && e.currentTarget);
                   drill(x, y, () => { setSelectedNode(null); setView({ name: "flowTrace", flowId: flow.id, repo }); });
                 }}
+                compare={compare}
               />
             </div>
           );
@@ -4457,6 +4551,7 @@ function App() {
                 entryPoint={flowEp}
                 onClose={() => setSelectedNode(null)}
                 pid={activeId}
+                compare={compare}
               />
             );
           }
@@ -4468,6 +4563,7 @@ function App() {
             entryPoint={ep}
             onClose={() => setSelectedNode(null)}
             pid={activeId}
+            compare={compare}
           />
         );
       })()}

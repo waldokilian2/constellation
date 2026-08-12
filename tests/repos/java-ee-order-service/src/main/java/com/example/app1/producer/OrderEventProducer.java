@@ -34,4 +34,8 @@ public class OrderEventProducer {
     public void emitOrderCancelled(String orderId) {
         kafkaTemplate.send("${app.topic.orders}", orderId);
     }
+
+    public void emitFulfillmentCommand(String orderId) {
+        kafkaTemplate.send("fulfillment-commands", orderId);
+    }
 }

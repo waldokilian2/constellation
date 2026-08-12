@@ -9,7 +9,7 @@
    GlobalChat for message rendering.
    ============================================================ */
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useConversationChat } from "./useConversationChat.js";
 import ConversationMenu from "./ConversationMenu.jsx";
 import MarkdownContent, { sanitizeHTML } from "./Markdown.jsx";
@@ -158,6 +158,13 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
           placeholder="Describe a change to plan…"
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
+            if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+              e.preventDefault();
+              sendMsg(input);
+            }
+          }}
           disabled={loading}
           rows={3}
         />
@@ -175,6 +182,62 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
       </div>
     </div>
   );
+}
+
+/* ── Diagram export helpers ──────────────────────────────────── */
+// Rasterize a rendered mermaid <svg> into a PNG download. The SVG is
+// cloned with an explicit pixel size + xmlns (so re-serialized
+// foreignObject labels keep the XHTML namespace), loaded as an image,
+// drawn onto a dark canvas at 2x for crispness, and exported.
+function downloadSvgAsPng(svg, filename) {
+  const clone = svg.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  clone.querySelectorAll("foreignObject > *").forEach((el) => {
+    if (!el.getAttribute("xmlns")) el.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+  });
+
+  const vb = svg.viewBox ? svg.viewBox.baseVal : null;
+  const width = (vb && vb.width) || svg.getBoundingClientRect().width || 320;
+  const height = (vb && vb.height) || svg.getBoundingClientRect().height || 180;
+  const scale = 2;
+  clone.setAttribute("width", width * scale);
+  clone.setAttribute("height", height * scale);
+
+  const svgString = new XMLSerializer().serializeToString(clone);
+  const url = URL.createObjectURL(new Blob([svgString], { type: "image/svg+xml;charset=utf-8" }));
+
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#0a0e1a"; // match app --bg so exports aren't transparent
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+    const a = document.createElement("a");
+    a.href = canvas.toDataURL("image/png");
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  img.onerror = () => URL.revokeObjectURL(url);
+  img.src = url;
+}
+
+// Trigger a plain text/html file download from a string.
+function downloadTextFile(text, filename, type = "text/plain;charset=utf-8") {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /* ── PlanPreviewPane (right side, tool/state-driven) ─────────── */
@@ -222,6 +285,21 @@ function PlanPreviewPane({ pid, cid, diagrams, setDiagrams }) {
 
   const count = diagrams.length;
 
+  // Per-card body refs so the download action can grab the rendered
+  // <svg> out of the DOM for rasterization.
+  const bodyRefs = useRef({});
+
+  const downloadDiagram = useCallback((d) => {
+    const isHtml = (d.kind || "mermaid") === "html";
+    const base = (d.header || "diagram").replace(/[^\w.-]+/g, "_").slice(0, 60) || "diagram";
+    if (isHtml) {
+      downloadTextFile(d.code || "", `${base}.html`, "text/html;charset=utf-8");
+      return;
+    }
+    const svg = bodyRefs.current[d.id] && bodyRefs.current[d.id].querySelector(".mermaid-render svg");
+    if (svg) downloadSvgAsPng(svg, `${base}.png`);
+  }, []);
+
   return (
     <div className="planner-right">
       <div className="preview-pane-header">
@@ -234,26 +312,29 @@ function PlanPreviewPane({ pid, cid, diagrams, setDiagrams }) {
         )}
       </div>
       <div className="preview-pane-body">
-        {count === 0 ? (
-          <div className="preview-pane-empty">
-            The planner renders diagrams here via its <code>render_diagram</code> tool — ask it to add a flow or visual.
-          </div>
-        ) : (
-          diagrams.map((d) => (
-            <div className="diagram-card" key={d.id}>
-              <div className="diagram-card-header">
-                <span className="diagram-card-title" title={d.header}>{d.header || "Diagram"}</span>
-                <span className={"diagram-card-kind kind-" + (d.kind || "mermaid")}>{d.kind || "mermaid"}</span>
-                <button className="diagram-card-remove" onClick={() => removeDiagram(d.id)} title="Remove diagram" aria-label="Remove diagram">✕</button>
-              </div>
-              <div className="diagram-card-body">
-                {(d.kind || "mermaid") === "html"
-                  ? <div className="html-preview" dangerouslySetInnerHTML={{ __html: sanitizeHTML(d.code || "") }} />
-                  : <MermaidDiagram code={d.code || ""} />}
-              </div>
+        {count > 0 && diagrams.map((d) => (
+          <div className="diagram-card" key={d.id}>
+            <div className="diagram-card-header">
+              <span className="diagram-card-title" title={d.header}>{d.header || "Diagram"}</span>
+              <span className={"diagram-card-kind kind-" + (d.kind || "mermaid")}>{d.kind || "mermaid"}</span>
+              <button className="diagram-card-download" onClick={() => downloadDiagram(d)}
+                title={"Download " + ((d.kind || "mermaid") === "html" ? "HTML" : "PNG")}
+                aria-label="Download diagram">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+              </button>
+              <button className="diagram-card-remove" onClick={() => removeDiagram(d.id)} title="Remove diagram" aria-label="Remove diagram">✕</button>
             </div>
-          ))
-        )}
+            <div className="diagram-card-body" ref={(el) => { bodyRefs.current[d.id] = el; }}>
+              {(d.kind || "mermaid") === "html"
+                ? <div className="html-preview" dangerouslySetInnerHTML={{ __html: sanitizeHTML(d.code || "") }} />
+                : <MermaidDiagram code={d.code || ""} />}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

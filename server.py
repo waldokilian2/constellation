@@ -478,6 +478,9 @@ class ConversationCreateRequest(BaseModel):
     """Create a new conversation."""
     title: str = ""
     is_default: bool = False
+    # Which surface owns this conversation: "chat" (per-page assistant) or
+    # "planner" (AI Change Planner). Defaults to "chat" for back-compat.
+    kind: str = "chat"
 
 
 class ConversationChatRequest(BaseModel):
@@ -1361,24 +1364,35 @@ async def ai_chat_stream(pid: str, req: ChatRequest):
 
 @app.post("/api/projects/{pid}/conversations")
 async def create_conversation(pid: str, req: ConversationCreateRequest = ConversationCreateRequest()):
-    """Create a new conversation. Body: {title?, is_default?}."""
+    """Create a new conversation. Body: {title?, is_default?, kind?}.
+
+    ``kind`` ("chat" | "planner") scopes the conversation to a surface so the
+    page chat and the planner keep separate histories.
+    """
     _load_project(pid)
-    conv = CONVERSATION_STORE.create(pid, title=req.title or "")
+    conv = CONVERSATION_STORE.create(pid, title=req.title or "", kind=req.kind or "chat")
     return conv.meta()
 
 
 @app.get("/api/projects/{pid}/conversations")
-async def list_conversations(pid: str):
-    """List all conversations for a project (metadata only)."""
+async def list_conversations(pid: str, kind: str = ""):
+    """List conversations for a project (metadata only).
+
+    ``?kind=chat|planner`` restricts the list to one surface so each chat's
+    history menu only shows its own conversations.
+    """
     _load_project(pid)
-    return {"conversations": CONVERSATION_STORE.list(pid)}
+    return {"conversations": CONVERSATION_STORE.list(pid, kind=kind or "")}
 
 
 @app.get("/api/projects/{pid}/conversations/default")
-async def get_default_conversation(pid: str):
-    """Return (or create) the project's default conversation, with messages."""
+async def get_default_conversation(pid: str, kind: str = "chat"):
+    """Return (or create) the default conversation for a surface, with messages.
+
+    ``?kind=chat|planner`` selects the surface; each gets its own default.
+    """
     _load_project(pid)
-    conv = CONVERSATION_STORE.get_or_create_default(pid)
+    conv = CONVERSATION_STORE.get_or_create_default(pid, kind=kind or "chat")
     return conv.to_dict()
 
 

@@ -57,6 +57,11 @@ function normalizeMessages(raw) {
 }
 
 export function useConversationChat({ pid, ctxPayload, planner = false, onToolResult = null }) {
+  // The conversation surface: the per-page assistant ("chat") and the AI
+  // Change Planner ("planner") keep SEPARATE histories with different system
+  // prompts. The kind is derived 1:1 from the planner flag so callers don't
+  // need a second knob, and it scopes list/create/default on the server.
+  const kind = planner ? "planner" : "chat";
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [model, setModel] = useState("");
@@ -73,16 +78,16 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
 
   const refreshConvList = useCallback(async () => {
     try {
-      const list = await fetchJSON(projPath(pid, "/conversations"));
-      const convs = list.conversations || [];
+      const list = await fetchJSON(projPath(pid, "/conversations?kind=" + encodeURIComponent(kind)));
+      const convs = (list.conversations || []).filter((c) => (c.kind || "chat") === kind);
       setConvList(convs);
       return convs;
     } catch (e) {
       return [];
     }
-  }, [pid]);
+  }, [pid, kind]);
 
-  // ── Load/create default conversation on mount + pid change ──
+  // ── Load/create default conversation on mount + pid/kind change ──
   useEffect(() => {
     let alive = true;
     async function init() {
@@ -92,11 +97,11 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
         if (convs.length > 0) {
           cid = convs[0].id;
         } else {
-          // Auto-create default conversation
+          // Auto-create default conversation for this surface.
           const created = await fetchJSON(projPath(pid, "/conversations"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: "Default conversation" }),
+            body: JSON.stringify({ title: "Default conversation", kind }),
           });
           cid = created.id;
           await refreshConvList();
@@ -112,7 +117,7 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
     }
     init();
     return () => { alive = false; };
-  }, [pid]);
+  }, [pid, kind, refreshConvList]);
 
   // ── Load models on mount ──
   useEffect(() => {
@@ -248,7 +253,7 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
       const res = await fetchJSON(projPath(pid, "/conversations"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "" }),
+        body: JSON.stringify({ title: "", kind }),
       });
       setConversationId(res.id);
       setMessages([]);
@@ -257,7 +262,7 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
     } catch (e) {
       // ignore
     }
-  }, [pid, refreshConvList]);
+  }, [pid, kind, refreshConvList]);
 
   // ── Load (switch to) an existing conversation ──
   const loadConversation = useCallback(async (cid) => {

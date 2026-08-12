@@ -28,6 +28,11 @@ class Conversation:
     # entry: ``{id, header, kind, code, updated_at}`` where kind is
     # ``"mermaid"`` or ``"html"``.
     diagrams: list[dict] = field(default_factory=list)
+    # Which chat surface owns this conversation: ``"chat"`` (the per-page
+    # assistant) or ``"planner"`` (the AI Change Planner). The two surfaces
+    # must NOT share history — they have different system prompts — so
+    # create/list/default are scoped by kind.
+    kind: str = "chat"
     created_at: str = ""             # ISO 8601
     updated_at: str = ""             # ISO 8601
 
@@ -39,6 +44,7 @@ class Conversation:
             "title": self.title,
             "messages": self.messages,
             "diagrams": self.diagrams,
+            "kind": self.kind,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -49,6 +55,7 @@ class Conversation:
             "id": self.id,
             "project_id": self.project_id,
             "title": self.title,
+            "kind": self.kind,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "message_count": len(self.messages),
@@ -57,6 +64,11 @@ class Conversation:
 
 class ConversationStore:
     """Create, load, save, and delete conversation JSON files per project."""
+
+    # Valid chat surfaces that own a conversation. Drives kind-scoping in
+    # create/list/get_or_create_default so the page chat and the planner keep
+    # independent histories and system prompts.
+    _CONVERSATION_KINDS = ("chat", "planner")
 
     def __init__(self, base_dir: Path):
         self._base_dir = base_dir
@@ -76,8 +88,13 @@ class ConversationStore:
 
     # ── CRUD ────────────────────────────────────────────────────────
 
-    def create(self, project_id: str, title: str = "") -> Conversation:
-        """Create a new conversation and persist it. Returns the new conv."""
+    def create(self, project_id: str, title: str = "", kind: str = "chat") -> Conversation:
+        """Create a new conversation and persist it. Returns the new conv.
+
+        ``kind`` separates the two chat surfaces (``"chat"`` vs
+        ``"planner"``) so they keep independent histories and system prompts.
+        Unknown values fall back to ``"chat"``.
+        """
         conv_id = str(uuid.uuid4())
         now = self._now()
         conv = Conversation(
@@ -85,6 +102,7 @@ class ConversationStore:
             project_id=project_id,
             title=title or "New conversation",
             messages=[],
+            kind=kind if kind in self._CONVERSATION_KINDS else "chat",
             created_at=now,
             updated_at=now,
         )
@@ -103,28 +121,40 @@ class ConversationStore:
             title=data.get("title", ""),
             messages=data.get("messages", []),
             diagrams=data.get("diagrams", []),
+            # Legacy files predate the kind field → treat as "chat".
+            kind=data.get("kind", "chat") or "chat",
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
         )
 
-    def list(self, project_id: str) -> list[dict]:
-        """List all conversations for a project (metadata only, newest first)."""
+    def list(self, project_id: str, kind: str = "") -> list[dict]:
+        """List conversations for a project (metadata only, newest first).
+
+        When ``kind`` is given (``"chat"`` / ``"planner"``), only that
+        surface's conversations are returned — so the page chat and the
+        planner never see each other's history. Empty/unknown → all kinds
+        (back-compat for unscoped callers).
+        """
         conv_dir = self._conv_dir(project_id)
         if not conv_dir.exists():
             return []
+        scoped = kind if kind in self._CONVERSATION_KINDS else ""
         results = []
         for path in conv_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text(errors="replace"))
-                results.append({
-                    "id": data["id"],
-                    "title": data.get("title", ""),
-                    "updated_at": data.get("updated_at", ""),
-                    "created_at": data.get("created_at", ""),
-                    "message_count": len(data.get("messages", [])),
-                })
             except (json.JSONDecodeError, KeyError):
                 continue
+            if scoped and (data.get("kind", "chat") or "chat") != scoped:
+                continue
+            results.append({
+                "id": data["id"],
+                "title": data.get("title", ""),
+                "kind": data.get("kind", "chat") or "chat",
+                "updated_at": data.get("updated_at", ""),
+                "created_at": data.get("created_at", ""),
+                "message_count": len(data.get("messages", [])),
+            })
         # Newest first by updated_at (the hook loads list[0] as the active chat,
         # so this must be the most-recently-touched conversation, not an
         # arbitrary one ordered by UUID filename).
@@ -144,6 +174,7 @@ class ConversationStore:
             "title": conv.title,
             "messages": conv.messages,
             "diagrams": conv.diagrams,
+            "kind": conv.kind,
             "created_at": conv.created_at,
             "updated_at": conv.updated_at,
         }
@@ -158,15 +189,19 @@ class ConversationStore:
             return True
         return False
 
-    def get_or_create_default(self, project_id: str) -> Conversation:
-        """Return the single default conversation for a project; create if absent."""
-        convs = self.list(project_id)
+    def get_or_create_default(self, project_id: str, kind: str = "chat") -> Conversation:
+        """Return the default conversation for a surface; create if absent.
+
+        Scoped by ``kind`` (``"chat"`` / ``"planner"``): each surface gets
+        its own most-recently-touched conversation, never the other's.
+        """
+        convs = self.list(project_id, kind=kind)
         if convs:
             cid = convs[0]["id"]
             conv = self.get(project_id, cid)
             if conv:
                 return conv
-        return self.create(project_id, title="Default conversation")
+        return self.create(project_id, title="Default conversation", kind=kind)
 
     def replace_messages(
         self, project_id: str, conv_id: str, messages: list[dict]
@@ -181,7 +216,11 @@ class ConversationStore:
         if not conv:
             return None
         conv.messages = messages
-        if (not conv.title or conv.title == "New conversation") and messages:
+        # Auto-title: once a real message lands, replace any placeholder title
+        # with a truncated version of the first user message. Covers every
+        # placeholder the UI/seed creates so the chat list shows meaningful
+        # names instead of "Default conversation" forever.
+        if conv.title in _PLACEHOLDER_TITLES and messages:
             for m in messages:
                 if m.get("role") == "user":
                     conv.title = _title_from_text(m.get("content", ""))
@@ -323,6 +362,12 @@ class ConversationStore:
             "diagram_id": resolved_id,
             "diagrams": diagrams,
         }
+
+
+# Placeholder titles that ``replace_messages`` overwrites with a real,
+# first-message-derived title. Every UI entry point + the seed create
+# conversations with one of these, so they all auto-rename on first message.
+_PLACEHOLDER_TITLES = {"", "New conversation", "Default conversation"}
 
 
 def _title_from_text(text: str) -> str:

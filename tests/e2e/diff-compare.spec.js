@@ -55,14 +55,32 @@ function patchOrderController(reposDir) {
   fs.writeFileSync(file, code.slice(0, last) + insert + code.slice(last));
 }
 
+// Second, distinct change so a further rescan creates a second snapshot and
+// keeps the diff "dirty" (both endpoints then count as added vs snapshot 1).
+function patchOrderControllerUpdate(reposDir) {
+  const file = path.join(
+    reposDir, "order-service", "src", "main", "java", "com", "example", "orders", "OrderController.java"
+  );
+  let code = fs.readFileSync(file, "utf8");
+  if (code.includes("updateOrder")) return;
+  const insert = '\n    @PutMapping("/{id}")\n' +
+    '    public void updateOrder(@PathVariable("id") String id) {\n' +
+    "        orderService.getOrder(id);\n" +
+    "    }\n";
+  const last = code.lastIndexOf("}");
+  if (last < 0) throw new Error("No closing brace in OrderController.java");
+  fs.writeFileSync(file, code.slice(0, last) + insert + code.slice(last));
+}
+
 let project = null;
 
 // Open the project from the landing page and switch compare mode on.
 async function enterProjectCompare(page) {
   await page.goto("/");
   await page.locator(".project-card", { hasText: PROJECT_NAME }).click();
-  await page.locator(".compare-bar .compare-action").click();
-  await expect(page.locator(".compare-bar.active .compare-title")).toHaveText("COMPARING");
+  await page.locator(".compare-pill").click();
+  await expect(page.locator(".compare-pill.comparing")).toHaveCount(1);
+  await expect(page.locator(".compare-pill .seg-status")).toHaveText("COMPARING");
 }
 
 // Drill from the galaxy into the order-service solar system (compare mode on).
@@ -107,21 +125,23 @@ test.describe.serial("Graph diff & compare UI", () => {
   test("fresh project shows no compare UI (no previous version)", async ({ page }) => {
     await page.goto("/");
     await page.locator(".project-card", { hasText: PROJECT_NAME }).click();
-    await expect(page.locator(".compare-bar")).toHaveCount(0);
+    const pill = page.locator(".compare-pill");
+    await expect(pill).toBeVisible();
+    await expect(pill.locator(".seg-status")).toHaveText("Up to date");
+    await expect(pill.locator(".seg-diff")).toHaveCount(0);
+    await expect(page.locator(".compare-select")).toHaveCount(0);
     await expect(page.locator(".repo-node").first()).toBeVisible();
   });
 
-  test("source change + rescan produces the diff banner with chips", async ({ page }) => {
+  test("source change + rescan produces the diff pill with changes", async ({ page }) => {
     patchOrderController(path.join(FIXTURE, "repos"));
     await postSSE(BASE + "/api/projects/" + project.id + "/rescan", {});
 
     await page.goto("/");
     await page.locator(".project-card", { hasText: PROJECT_NAME }).click();
-    const bar = page.locator(".compare-bar");
-    await expect(bar).toHaveCount(1);
-    await expect(bar.locator(".compare-text")).toContainText("Since last scan");
-    await expect(bar.locator(".diff-chip.added").first()).toContainText("+1");
-    await expect(bar.locator(".compare-action")).toHaveText("Compare");
+    const pill = page.locator(".compare-pill");
+    await expect(pill).toHaveClass(/can-toggle/);
+    await expect(pill.locator(".seg-diff")).toHaveText(/changes since last scan/);
   });
 
   test("project card shows the change chips", async ({ page }) => {
@@ -135,7 +155,9 @@ test.describe.serial("Graph diff & compare UI", () => {
 
     // The changed repo carries the added-endpoint badge and ring.
     const repo = page.locator(".repo-wrap", { has: page.locator(".repo-label", { hasText: "order-service" }) });
-    await expect(repo.locator(".repo-diff-badge .diff-chip.added")).toContainText("+1");
+    const badge = repo.locator(".repo-diff-badge");
+    await expect(badge.locator(".diff-chip.added")).toHaveText("+1");
+    await expect(badge).toHaveAttribute("title", /added since last scan/);
     await expect(repo.locator(".repo-node")).toHaveClass(/st-added/);
 
     // Edge hover popup still works in compare mode.
@@ -144,13 +166,28 @@ test.describe.serial("Graph diff & compare UI", () => {
     await expect(page.locator(".legend")).toContainText("Since last scan");
   });
 
+  test("compare mode: legend shows the diff symbol chips", async ({ page }) => {
+    await enterProjectCompare(page);
+    await expect(page.locator(".legend .diff-chip.added")).toHaveText("+");
+    await expect(page.locator(".legend .diff-chip.changed")).toHaveText("~");
+    await expect(page.locator(".legend .diff-chip.removed")).toHaveText("−");
+  });
+
+  test("compare mode: exit pill leaves compare mode", async ({ page }) => {
+    await enterProjectCompare(page);
+    await page.locator(".compare-pill .seg-exit").click();
+    await expect(page.locator(".compare-pill.comparing")).toHaveCount(0);
+    await expect(page.locator(".compare-select")).toHaveCount(0);
+    await expect(page.locator(".compare-pill")).toHaveClass(/can-toggle/);
+  });
+
   test("solar system: added star is diff-marked", async ({ page }) => {
     await enterProjectCompare(page);
     await drillToOrderService(page);
 
     const addedStar = page.locator(".star.st-added");
     await expect(addedStar).toHaveCount(1);
-    await expect(addedStar.locator(".star-badge")).toHaveText("▲");
+    await expect(addedStar.locator(".star-badge")).toHaveText("+");
     await expect(page.locator(".view-hint")).toContainText(/was \d+ entry points before/);
   });
 
@@ -161,7 +198,7 @@ test.describe.serial("Graph diff & compare UI", () => {
     await page.locator(".star.st-added").click();
     await expect(page.locator(".pv-node").first()).toBeVisible();
     await expect(page.locator(".view-hint")).toContainText("new since last scan");
-    await expect(page.locator(".pv-node.st-added .pv-diff-chip").first()).toHaveText("▲ new");
+    await expect(page.locator(".pv-node.st-added .pv-diff-chip").first()).toHaveText("+ new");
   });
 
   test("detail panel: changes section on a selected node", async ({ page }) => {
@@ -177,15 +214,19 @@ test.describe.serial("Graph diff & compare UI", () => {
   });
 
   test("snapshot selector: dropdown lists snapshots and keeps comparing", async ({ page }) => {
+    // A second source change + rescan creates a second snapshot, which is what
+    // enables the compare-select (it only renders when there is a choice).
+    patchOrderControllerUpdate(path.join(FIXTURE, "repos"));
+    await postSSE(BASE + "/api/projects/" + project.id + "/rescan", {});
+
     await enterProjectCompare(page);
 
-    const select = page.locator(".compare-versions select");
+    const select = page.locator(".compare-select");
     const options = select.locator("option");
     await expect(options.first()).toContainText("previous snapshot");
-    const count = await options.count();
-    if (count > 1) {
-      await select.selectOption({ index: 1 });
-      await expect(page.locator(".compare-bar .compare-text")).toContainText("+1");
-    }
+    expect(await options.count()).toBeGreaterThanOrEqual(2);
+    await select.selectOption({ index: 1 });
+    await expect(page.locator(".compare-pill.comparing")).toHaveCount(1);
+    await expect(page.locator(".repo-diff-badge .diff-chip.added").first()).toHaveText(/^\+[0-9]+$/);
   });
 });

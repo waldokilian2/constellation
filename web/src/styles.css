@@ -1478,6 +1478,35 @@ code { font-family: var(--mono); color: var(--cyan); }
 /* ================================================================
    FLOW INDEX VIEW (galaxy equivalent)
    ================================================================ */
+/* Standard scroll layout — no pan/zoom. The canvas is a plain scroll
+   container and cards flow into a responsive CSS grid (scrolls when
+   there are more flows than fit on screen). */
+.flow-scroll {
+  overflow: auto;
+  position: relative;
+  cursor: default;
+}
+.flow-grid-static {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, 240px);
+  justify-content: center;
+  align-items: start;
+  gap: 24px 28px;
+  /* Page padding lives on the inner grid (not the scroll container): a scroll
+     container's own padding-bottom isn't reliably part of the scrollable area,
+     which clipped the last row. As inner content, it always scrolls into view. */
+  padding: 64px 28px 48px;
+  /* Cap at 4 cards per row: 4 × 240px + 3 × 28px gaps = 1044px of content, plus
+     the 2 × 28px side paddings (border-box) = 1100px box. auto-fit still drops
+     to fewer columns on narrower viewports. */
+  max-width: 1100px;
+  /* Keep the grid centered in the viewport instead of left-aligned. */
+  margin: 0 auto;
+}
+.flow-grid-static .flow-card {
+  position: relative; /* base .flow-card is absolute; grid items flow normally */
+  height: auto;
+}
 .flow-card {
   position: absolute;
   background: rgba(10, 18, 34, .75);

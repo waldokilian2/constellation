@@ -154,7 +154,7 @@ async function fetchJSON(path, opts) {
 
 function fmtFile(path) {
   if (!path) return "";
-  const p = path.split("/");
+  const p = path.split(/[\\/]/);
   return p.slice(-2).join("/");
 }
 

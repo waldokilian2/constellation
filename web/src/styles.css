@@ -2657,23 +2657,36 @@ code { font-family: var(--mono); color: var(--cyan); }
   border: 1px dashed rgba(248,113,113,.55);
   border-radius: 10px; padding: 10px 12px;
   background: rgba(40,16,16,.55);
-  max-height: 200px; overflow-y: auto;
+  display: flex; flex-direction: column;
+  overflow: hidden; max-height: 200px;
 }
 .pv-removed-title {
   display: flex; align-items: center; gap: 6px;
   background: none; border: none; color: #f87171;
   font-size: 11px; font-weight: 700; letter-spacing: .04em;
   cursor: pointer; padding: 2px 0; text-transform: none;
+  flex: none;
 }
-.pv-removed-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.pv-removed-list {
+  display: flex; flex-direction: column; gap: 4px; margin-top: 6px;
+  overflow-y: auto; overflow-x: hidden; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.25) transparent;
+}
+.pv-removed-list::-webkit-scrollbar { width: 8px; }
+.pv-removed-list::-webkit-scrollbar-track { background: transparent; }
+.pv-removed-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,.25); border-radius: 4px; }
+.pv-removed-list::-webkit-scrollbar-corner { background: transparent; }
 .pv-removed-node {
-  display: flex; justify-content: space-between; gap: 12px;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
   font-size: 11px; padding: 3px 8px; border-radius: 6px;
   background: rgba(248,113,113,.06);
   text-decoration: line-through; text-decoration-color: rgba(248,113,113,.55);
 }
-.pv-removed-method { color: #fca5a5; overflow-wrap: break-word; flex: 1 1 auto; min-width: 0; }
-.pv-removed-loc { color: var(--text-faint); white-space: nowrap; flex: none; }
+.pv-removed-method { color: #fca5a5; flex: 1 0 auto; min-width: 0; overflow-wrap: break-word; }
+.pv-removed-loc {
+  color: var(--text-faint); white-space: nowrap;
+  flex: 0 1 auto; min-width: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis;
+}
 .exit-point-flow.st-added   .exit-point-channel { color: #4ade80; }
 .exit-point-flow.st-changed .exit-point-channel { color: #fbbf24; }
 .exit-point-flow.st-removed .exit-point-channel { color: #f87171; text-decoration: line-through; }

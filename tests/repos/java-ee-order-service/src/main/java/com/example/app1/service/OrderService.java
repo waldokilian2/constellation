@@ -21,6 +21,7 @@ public class OrderService {
 
     public void placeOrder(String orderId) {
         orderEventProducer.emitOrderPlaced(orderId);
+        orderEventProducer.emitFulfillmentCommand(orderId);
     }
 
     public int countOrders() {

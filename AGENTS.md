@@ -72,8 +72,14 @@ web/                 # React 18 + Vite frontend
   dist/              # Vite build output (gitignored, created by npm run build)
   mock_server.py     # static in-memory backend for frontend dev
 tests/repos/         # sample Java microservices (input data, not tests)
-  order-service / fulfillment-service / notification-service
-                     #   Spring Boot demo repos (seeded as the "Spring Boot" project)
+  order-service / fulfillment-service / notification-service / analytics-service
+                     #   Spring Boot demo repos (seeded as the "Spring Boot" project).
+                     #   analytics-service is the Tier 1/2 + gaps/dead-code fixture: it
+                     #   exercises GraphQL, gRPC, SOAP, Servlet, Cloud Function, lifecycle,
+                     #   main, SQS, WebSocket, JMS/event/Pulsar/NATS/StreamBridge producers,
+                     #   Camel routes, WebClient/Apache/async HTTP clients, a deliberate
+                     #   order<->analytics cycle, orphan channels, and LegacyReportFormatter
+                     #   dead code + a thin /ping handler.
   java-ee-order-service / java-ee-fulfillment-service / java-ee-notification-service
                      #   Java EE / Jakarta annotations demo (JAX-RS, MDB, CDI, EJB,
                      #   WebSocket, @Scheduled, @MessageMapping) across THREE repos
@@ -141,6 +147,7 @@ The 11 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chan
 - The MCP server loads `graph.json` once at startup; restart to pick up graph changes.
 - Call resolution is import-aware for single types plus interface→impl and local-variable/parameter receivers (see `engine/java_index.py`), and resolves methods up a **multi-level supertype chain** via `find_methods_in_hierarchy` (used as a fallback in `resolve_call`). It still can produce false positives when a simple name maps to multiple unimported classes across repos — see the "Limitations" section of `README.md`. Do not silently change the `EXTRACTED`/`INFERRED`/`AMBIGUOUS` semantics that the tests and UI depend on.
 - Chat persistence: `_stream_llm_events_v2` previously streamed the model's **final text-only reply** (no tool calls) without appending it to the conversation history, so prose answers vanished after refresh. **Fixed**: the no-tools branch now appends `content_acc` to `full_messages` before yielding done. Keep this: every assistant turn must land in `full_messages` (persisted by `replace_messages`), not just tool-call turns.
+- **Seed repos are one-time copies.** `ensure_legacy_seed` copies `tests/repos/*` into `output/projects/<pid>/repos/` once at import. If a fixture under `tests/repos/` is later edited, the project's clones are NOT re-synced — a `rescan` re-analyses the **stale clone**, so call-tree/dead-code results silently reflect old source. Symptom: entry points show as thin/no-op or unreachable even after editing the fixtures. Fix: copy the updated files into `output/projects/<pid>/repos/` (or delete + re-import the project) before rescanning. `rescan?pull=true` only re-fetches git-remote repos, not local seeds.
 - **Conversations are kind-scoped** (`engine/conversation_store.py`): each `Conversation` carries a `kind` of `"chat"` (the per-page assistant, `GlobalChat`/`useConversationChat({planner:false})`) or `"planner"` (the AI Change Planner, `changePlanner.jsx`/`useConversationChat({planner:true})`). The two surfaces have **different system prompts** (`_build_chat_prompt` → `build_planner_prompt` vs `_build_ai_context`) and must **not share history**. `create`/`list`/`get_or_create_default` are scoped by `kind`; the hook derives `kind` 1:1 from its `planner` flag and passes `?kind=` / `{kind}` on list + create. The planner-only `render_diagram` state lives on planner conversations only. Legacy conversation files without a `kind` field load as `"chat"`.
 
 ## Roadmap Context (README)

@@ -25,8 +25,9 @@ class NodeContext:
 class ContextBuilder:
     """Builds structured system prompts from graph data."""
 
-    def __init__(self, graph: dict):
+    def __init__(self, graph: dict, boards: list | None = None):
         self.graph = graph
+        self.boards = boards or []  # connected boards (per project) for chat context
 
     def build_system_prompt(
         self,
@@ -142,6 +143,11 @@ class ContextBuilder:
         )
         sections.append("\n".join(focus_lines))
 
+        # ── Section 9: Connected boards ─────────────────────────
+        boards = self._boards_section()
+        if boards:
+            sections.append(boards)
+
         return "\n\n".join(sections)
 
     def build_global_prompt(self) -> str:
@@ -230,6 +236,11 @@ class ContextBuilder:
             )
         sections.append("\n".join(repo_lines))
 
+        # ── Connected boards ─────────────────────────────────────
+        boards = self._boards_section()
+        if boards:
+            sections.append(boards)
+
         # ── Hint to use tools ────────────────────────────────────
         sections.append(
             "You have tools available to explore the codebase in detail: "
@@ -241,6 +252,40 @@ class ContextBuilder:
             "diagrams and ```html fenced blocks for custom visuals."
         )
 
+        return "\n\n".join(sections)
+
+    def build_boards_prompt(self) -> str:
+        """Board-focused system prompt for the Boards view chat.
+
+        When the user is on the Boards view, the assistant's job is the boards —
+        not the whole system. It gets the connected boards, their columns, and
+        their items, and is steered to answer board questions (triage, status
+        moves, summaries). Architecture context is still available to answer
+        'which service does this item touch?' when a board item links to code.
+        """
+        sections = [
+            "You are a project/task assistant for Constellation's Boards view. "
+            "The user is working with GitHub Project / Issues boards synced via "
+            "the GitHub MCP server. Help them understand, triage, and manage the "
+            "boards: summarize what is in each column, answer questions about "
+            "specific items, suggest status moves, and explain what work is "
+            "tracked. The data below is the current synced state — trust it as "
+            "fact.\n\n"
+            "Keep your answers focused on the boards and their items. You may "
+            "reference the architecture when relevant (e.g. which service a "
+            "linked item touches), but unless the user asks about code, the "
+            "boards are the subject."
+        ]
+        boards = self._boards_section()
+        sections.append(boards if boards else "No boards are connected in this project yet — suggest connecting one.")
+        sections.append(
+            "You have board tools you can call to inspect and change the board: "
+            "``list_boards``, ``list_board_items``, ``move_board_item`` (move a "
+            "card to a different status column — this writes to GitHub), and "
+            "``add_board_comment`` (comment on an item's issue). Use them to act "
+            "on the board when the user asks (e.g. move an item, add a comment), "
+            "not just to describe it. After a move/comment, confirm what you did."
+        )
         return "\n\n".join(sections)
 
     def build_planner_prompt(self, repo: str = "") -> str:
@@ -407,6 +452,11 @@ class ContextBuilder:
                 f"Start by scoping changes from that service outward."
             )
 
+        # ── Connected boards ─────────────────────────────────────
+        boards = self._boards_section()
+        if boards:
+            sections.append(boards)
+
         # ── Tool hint ────────────────────────────────────────────
         sections.append(
             "You have tools available to explore the codebase in detail: "
@@ -425,6 +475,38 @@ class ContextBuilder:
         return "\n\n".join(sections)
 
     # ── Private helpers ──────────────────────────────────────────
+
+    def _boards_section(self) -> str:
+        """A CONNECTED BOARDS block for the AI, or '' if none are connected.
+
+        Gives the assistant visibility into the project's synced external boards
+        (e.g. a GitHub Project) so it can answer questions like 'how many items
+        are in Backlog?' or 'what does issue #49 reference?'.
+        """
+        if not self.boards:
+            return ""
+        lines = ["CONNECTED BOARDS (synced via the GitHub MCP server):"]
+        for b in self.boards:
+            items = b.get("items") or []
+            lines.append(
+                f"  {b.get('name') or b.get('id', '?')} "
+                f"[{b.get('provider', '?')} / {b.get('kind', '?')}] — {len(items)} items"
+            )
+            statuses: dict[str, int] = {}
+            for it in items:
+                s = it.get("status") or "no status"
+                statuses[s] = statuses.get(s, 0) + 1
+            if statuses:
+                cols = ", ".join(f"{s}: {n}" for s, n in sorted(statuses.items()))
+                lines.append(f"    columns: {cols}")
+            if items:
+                lines.append("    items:")
+                for it in items[:10]:
+                    lines.append(
+                        f"      #{it.get('number', '')} [{it.get('status') or '?'}] "
+                        f"{it.get('title', '')[:90]}"
+                    )
+        return "\n".join(lines)
 
     def _format_call_tree(self, node: dict, indent: str = "", depth: int = 0) -> str:
         """Recursively format a call tree as indented text."""

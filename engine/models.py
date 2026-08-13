@@ -186,3 +186,62 @@ class ConstellationGraph:
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
+
+
+# ── Boards (external issue-board sync — NOT engine output) ──────────
+# These describe boards synced from an external source (GitHub via the
+# official MCP server; Jira later) and their items. They live in a separate
+# per-project boards.json (see project_store), not in the static graph.
+# BoardLink (graph node ↔ item) is added in Phase 3 of the boards feature.
+
+
+@dataclass
+class BoardItem:
+    """A single work item on an external board (e.g. a GitHub issue)."""
+    id: str             # provider-scoped id, e.g. "github:owner/repo#49"
+    number: str = ""    # human-facing number, e.g. "49"
+    title: str = ""
+    status: str = ""    # normalized: "open" | "closed" | a project column name
+    assignee: str = ""
+    labels: list = field(default_factory=list)   # label names
+    url: str = ""
+    updated_at: str = ""
+    raw: dict = field(default_factory=dict)      # provider payload (detail panel)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "number": self.number,
+            "title": self.title,
+            "status": self.status,
+            "assignee": self.assignee,
+            "labels": list(self.labels),
+            "url": self.url,
+            "updated_at": self.updated_at,
+            "raw": self.raw,
+        }
+
+
+@dataclass
+class Board:
+    """A connected external board and its cached items."""
+    id: str
+    provider: str              # e.g. "github-mcp"
+    name: str
+    kind: str = "issues"       # "issues" | "project"
+    source_url: str = ""
+    config: dict = field(default_factory=dict)   # provider-specific, e.g. {owner, repo}
+    items: list = field(default_factory=list)    # list of BoardItem.to_dict()
+    synced_at: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "provider": self.provider,
+            "name": self.name,
+            "kind": self.kind,
+            "source_url": self.source_url,
+            "config": dict(self.config),
+            "items": list(self.items),
+            "synced_at": self.synced_at,
+        }

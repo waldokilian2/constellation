@@ -156,6 +156,24 @@ async function fetchJSON(path, opts) {
   return res.json();
 }
 
+// fetchJSON with a client-side timeout (AbortController) so long-running board
+// operations (connect/sync/write) can't leave the UI stuck on "pending" if the
+// server or GitHub is slow or unreachable.
+async function fetchJSONTimeout(path, opts, ms = 25000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(path, { ...(opts || {}), signal: ctrl.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status + " " + res.statusText);
+    return await res.json();
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("Timed out after " + Math.round(ms / 1000) + "s waiting for GitHub");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function fmtFile(path) {
   if (!path) return "";
   const p = path.split(/[\\/]/);
@@ -409,13 +427,17 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, 
             onClick={() => onModeChange("flows")}
           >Flows</button>
           <button
-          className={"mode-btn" + (mode === "dead" ? " active" : "")}
-          onClick={() => onModeChange("dead")}
-        >Dead code</button>
-        <button
-          className={"mode-btn" + (mode === "planner" ? " active" : "")}
-          onClick={() => onModeChange("planner")}
-        >Planner</button>
+            className={"mode-btn" + (mode === "dead" ? " active" : "")}
+            onClick={() => onModeChange("dead")}
+          >Dead code</button>
+          <button
+            className={"mode-btn" + (mode === "planner" ? " active" : "")}
+            onClick={() => onModeChange("planner")}
+          >Planner</button>
+          <button
+            className={"mode-btn" + (mode === "boards" ? " active" : "")}
+            onClick={() => onModeChange("boards")}
+          >Boards</button>
         </div>
       )}
       <div className="meta">
@@ -604,6 +626,10 @@ function buildCrumbs(view, mode, graph, flows, projectName, nav) {
         { label: flow ? flow.name : "Flow", onClick: flow ? () => nav.goFlow(flow.id) : undefined },
         { label: view.repo, current: true },
       ];
+    }
+  } else if (mode === "boards") {
+    if (view.name === "boards") {
+      return [...root, { label: "Boards", current: true }];
     }
   }
   if (mode === "planner") {
@@ -1785,6 +1811,363 @@ function SolarDiffLegend({ cmp }) {
       <div className="legend-item">
         <span className="diff-chip removed">−</span>
         <span>removed</span>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Boards View ---------------- */
+// Lane color ramp: red (first column / backlog) → purple → amber (app accent)
+// → blue → green (done). Colors are mapped by column position so any number of
+// lanes gets a sensible red→green progression.
+const LANE_COLORS = ["#f87171", "#a78bfa", "#f5a524", "#60a5fa", "#34d399"];
+const laneColor = (i, n) => LANE_COLORS[
+  Math.min(LANE_COLORS.length - 1, Math.round((i * (LANE_COLORS.length - 1)) / Math.max(1, n - 1)))
+];
+// A top-level mode (next to Topology / Flows / Dead code). Syncs an external
+// issue board (GitHub via the official GitHub MCP server) into Constellation
+// and renders it as Open/Closed columns. Two-way write-back (Phase 2) and
+// graph linking (Phase 3) extend this view.
+function BoardsView({ pid }) {
+  const [data, setData] = useState(null);          // { boards: [...] } from the server
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [owner, setOwner] = useState("");
+  const [projectNum, setProjectNum] = useState("");
+  const [repo, setRepo] = useState("");
+  const [adding, setAdding] = useState(false);  // show the connect form alongside existing boards
+  const [collapsed, setCollapsed] = useState({});  // board id -> collapsed (only header shown)
+  const [connecting, setConnecting] = useState(false);  // connect form in-flight
+  const [syncing, setSyncing] = useState({});  // boardId -> true while that board syncs
+  // Per-item write feedback: itemId -> { action: "move"|"comment", error, message }
+  const [busy, setBusy] = useState({});
+
+  const reload = (quiet = false) => {
+    if (!quiet) setLoading(true);
+    setError("");
+    fetchJSON(projPath(pid, "/boards"))
+      .then((d) => {
+        if (d) setData(d);
+        // Self-heal: boards connected before status_options/capabilities existed
+        // get them via a sync so empty swim lanes still render.
+        ((d && d.boards) || []).forEach((b) => {
+          if (b.kind === "project" && (!b.status_options || !b.capabilities)) sync(b.id);
+          // Boards connected before the title feature carry an auto-generated
+          // name like "owner project #2" — sync to refresh the real GitHub title.
+          else if (b.kind === "project" && / project #\d+$/.test(b.name || "")) sync(b.id);
+        });
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => { if (!quiet) setLoading(false); });
+  };
+
+  useEffect(() => { reload(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [pid]);
+
+  // Poll the cached board so updates made elsewhere — the AI chat moving a card,
+  // changes on github.com, another session — show up without a manual sync.
+  // Skips while a write is in flight so it doesn't clobber an optimistic move.
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (Object.keys(busyRef.current).length === 0) reload(true);
+    }, 8000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pid]);
+
+  const connect = (e) => {
+    e.preventDefault();
+    setConnecting(true);
+    setError("");
+    // A GitHub Project (Projects v2 board) when a project number is given,
+    // else a repo's Issues.
+    const config = projectNum.trim()
+      ? { owner: owner.trim(), project_number: projectNum.trim() }
+      : { owner: owner.trim(), repo: repo.trim() };
+    fetchJSONTimeout(projPath(pid, "/boards"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "github-mcp", config }),
+    }, 120000)
+      .then((res) => {
+        if (res && res.board) {
+          // merge (don't replace) so adding a 2nd board keeps the first
+          setData((d) => {
+            const existing = ((d && d.boards) || []).filter((b) => b.id !== res.board.id);
+            return { boards: [...existing, res.board] };
+          });
+        }
+        setOwner(""); setProjectNum(""); setRepo(""); setAdding(false);
+      })
+      .catch((e2) => setError(e2.message))
+      .finally(() => setConnecting(false));
+  };
+
+  const sync = (bid) => {
+    setSyncing((s) => ({ ...s, [bid]: true }));
+    setError("");
+    fetchJSON(projPath(pid, "/boards/" + encodeURIComponent(bid) + "/sync"), { method: "POST" })
+      .then((res) => {
+        setData((d) => ({ boards: ((d && d.boards) || []).map((b) => (b.id === bid && res.board) ? res.board : b) }));
+      })
+      .catch((e2) => setError(e2.message))
+      .finally(() => setSyncing((s) => { const n = { ...s }; delete n[bid]; return n; }));
+  };
+
+  const disconnect = (bid) => {
+    fetchJSON(projPath(pid, "/boards/" + encodeURIComponent(bid)), { method: "DELETE" })
+      .then(() => setData((d) => ({ boards: ((d && d.boards) || []).filter((b) => b.id !== bid) })))
+      .catch((e2) => setError(e2.message));
+  };
+
+  // Two-way write: move a card (change Status) — immediate push, optimistic UI
+  // with a per-item "moving… / failed" indicator so it's clear the write is in
+  // flight and whether it succeeded.
+  const moveItem = (bid, itemId, status) => {
+    if (!status) return;
+    setBusy((b) => ({ ...b, [itemId]: { action: "move", error: false, message: "" } }));
+    // optimistic: update local state first
+    setData((d) => ({
+      boards: ((d && d.boards) || []).map((b) => b.id === bid
+        ? { ...b, items: (b.items || []).map((it) => it.id === itemId ? { ...it, status } : it) }
+        : b),
+    }));
+    fetchJSONTimeout(projPath(pid, "/boards/" + encodeURIComponent(bid) + "/items"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id: itemId, status }),
+    }, 120000)
+      .then((res) => {
+        if (res && res.item) {
+          // reconcile with the canonical server state
+          setData((d) => ({
+            boards: ((d && d.boards) || []).map((b) => b.id === bid
+              ? { ...b, items: (b.items || []).map((it) => it.id === res.item.id ? res.item : it) }
+              : b),
+          }));
+        }
+        setBusy((b) => { const n = { ...b }; delete n[itemId]; return n; });  // done, no error
+      })
+      .catch((e2) => {
+        setBusy((b) => ({ ...b, [itemId]: { action: "move", error: true, message: e2.message } }));
+        setError(e2.message);
+        // The write may have actually landed on GitHub even though the response
+        // failed/timed out ("cancelled but succeeded") — reconcile with the real
+        // state via a sync instead of reloading the possibly-stale cache.
+        sync(bid);
+        setTimeout(() => setBusy((b) => { const n = { ...b }; delete n[itemId]; return n; }), 4000);
+      });
+  };
+
+  const comment = (bid, itemId, body) => {
+    if (!body.trim()) return;
+    setBusy((b) => ({ ...b, [itemId]: { action: "comment", error: false, message: "" } }));
+    fetchJSONTimeout(projPath(pid, "/boards/" + encodeURIComponent(bid) + "/items/comment"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id: itemId, body }),
+    }, 60000)
+      .then(() => setBusy((b) => { const n = { ...b }; delete n[itemId]; return n; }))
+      .catch((e2) => {
+        setBusy((b) => ({ ...b, [itemId]: { action: "comment", error: true, message: e2.message } }));
+        setError(e2.message);
+      });
+  };
+
+  const boards = (data && data.boards) || [];
+
+  return (
+    <div className="gaps boards">
+      <div className="view-top">
+        <div className="view-hint">
+          {boards.length + " board" + (boards.length === 1 ? "" : "s") +
+           " · synced via the GitHub MCP server"}
+        </div>
+        <div className="view-top-actions">
+          {boards.length > 1 && (
+            <button
+              className="gaps-action"
+              disabled={Object.keys(syncing).length > 0}
+              onClick={() => boards.forEach((b) => sync(b.id))}
+              title="Pull the latest items and columns from GitHub for every board"
+            >{Object.keys(syncing).length > 0 ? <><span className="spinner" /> Syncing…</> : "⟳ Sync all"}</button>
+          )}
+          {boards.length > 0 && (
+            <button className="gaps-action" onClick={() => setAdding((a) => !a)}>
+              {adding ? "✕ Cancel" : "＋ Add board"}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="gaps-scroll">
+      {error && <div className="gaps-empty board-error">{error}</div>}
+
+      {(boards.length === 0 || adding) && (
+        <div className="boards-empty">
+          <p className="gaps-empty">
+            {boards.length === 0
+              ? "No boards connected yet. Connect a GitHub Project (project number) or a repo's issues."
+              : "Connect another GitHub Project or a repo's issues."}
+          </p>
+          <form className="boards-connect" onSubmit={connect}>
+            <input className="boards-input" placeholder="owner (e.g. waldokilian2)"
+              value={owner} onChange={(e) => setOwner(e.target.value)} required disabled={connecting} />
+            <input className="boards-input" placeholder="project # (e.g. 2) for a GitHub Project"
+              value={projectNum} onChange={(e) => setProjectNum(e.target.value)} disabled={connecting} />
+            <input className="boards-input" placeholder="repo (optional — issues board)"
+              value={repo} onChange={(e) => setRepo(e.target.value)} disabled={connecting} />
+            <button type="submit" className="gaps-action" disabled={connecting || !owner || (!projectNum.trim() && !repo.trim())}>
+              {connecting ? <><span className="spinner" /> Connecting…</> : "Connect GitHub"}
+            </button>
+            {connecting && (
+              <div className="board-loading-hint">
+                Pulling items and columns from GitHub via MCP… this can take a moment.
+              </div>
+            )}
+          </form>
+        </div>
+      )}
+
+      {boards.map((b) => {
+        const items = b.items || [];
+        const caps = b.capabilities || {};
+        // Swim lanes come from the board's defined Status options (status_options)
+        // so empty columns still show. Items whose status isn't a defined option,
+        // or has no status, get their own buckets.
+        const optNames = (b.status_options || [])
+          .map((o) => (typeof o === "string" ? o : (o.name || o.raw || ""))).filter(Boolean);
+        // Preserve the board's own column order; fall back to a sensible default
+        // for issues boards (Open/Closed) or when options aren't provided.
+        const order = optNames.length ? optNames
+          : ["Backlog", "Todo", "Ready", "In progress", "In Progress", "In review", "In Review", "Done", "Open", "Closed"];
+        const present = Array.from(new Set(items.map((i) => i.status || "").filter(Boolean)));
+        const allStatuses = Array.from(new Set([...optNames, ...present]))
+          .sort((a, z) => {
+            const ia = order.indexOf(a), iz = order.indexOf(z);
+            return (ia === -1 ? 999 : ia) - (iz === -1 ? 999 : iz) || a.localeCompare(z);
+          });
+        const noStatus = items.filter((i) => !i.status);
+        const columns = allStatuses.map((s) => ({ label: s, items: items.filter((i) => i.status === s) }));
+        if (noStatus.length) columns.unshift({ label: "No status", items: noStatus });
+        return (
+          <div className="board" key={b.id}>
+            <div className="board-head">
+              <button
+                className="board-collapse"
+                onClick={() => setCollapsed((c) => ({ ...c, [b.id]: !c[b.id] }))}
+                title={collapsed[b.id] ? "Expand board" : "Collapse board"}
+              >{collapsed[b.id] ? "▸" : "▾"}</button>
+              <span
+                className="board-name board-name-toggle"
+                onClick={() => setCollapsed((c) => ({ ...c, [b.id]: !c[b.id] }))}
+                title="Click to collapse/expand"
+              >{b.name}</span>
+              <span className="gaps-repo">{b.provider} · {b.kind}</span>
+              {caps.move === false && (
+                <span className="board-cap" title="Token lacks the GitHub 'project' scope">
+                  move disabled
+                </span>
+              )}
+              {caps.comment === false && (
+                <span className="board-cap" title="Token lacks the GitHub 'repo' scope — commenting needs it">
+                  commenting disabled (needs repo scope)
+                </span>
+              )}
+              <span className="board-sync">
+                {b.synced_at ? "synced " + new Date(b.synced_at).toLocaleString() : "not synced"}
+              </span>
+              <button
+                className="gaps-action"
+                disabled={!!syncing[b.id]}
+                onClick={() => sync(b.id)}
+                title="Pull the latest items and columns from GitHub via MCP"
+              >{syncing[b.id] ? <><span className="spinner" /> Syncing…</> : "⟳ Sync from GitHub"}</button>
+              <button className="gaps-action danger" onClick={() => disconnect(b.id)}>✕ Disconnect</button>
+            </div>
+            {collapsed[b.id] ? (
+              <div className="board-summary">
+                {items.length} item{items.length === 1 ? "" : "s"} ·{" "}
+                {columns.map((c) => `${c.label} ${c.items.length}`).join(" · ")}
+              </div>
+            ) : (
+            <div className="board-cols">
+              {columns.map((col, ci) => {
+                const color = col.label === "No status" ? "#94a3b8" : laneColor(ci, columns.length);
+                return (
+                  <div className="board-col" key={col.label} style={{ "--lane": color }}>
+                    <div className="board-col-head">{col.label} · {col.items.length}</div>
+                    <div className="board-col-body">
+                    {col.items.length === 0 ? (
+                      <div className="gaps-empty">—</div>
+                    ) : (
+                      col.items.map((it) => {
+                        const bz = busy[it.id];
+                        const moving = bz && bz.action === "move" && !bz.error;
+                        const commenting = bz && bz.action === "comment" && !bz.error;
+                        const failed = bz && bz.error;
+                        return (
+                          <div className={"gaps-card board-card" + (failed ? " board-card-failed" : "")} key={it.id}>
+                            <div className="gaps-card-top">
+                              <span className="gaps-channel mono">
+                                {it.number ? "#" + it.number + " " : ""}{it.title}
+                              </span>
+                              <span className="gaps-repo">{it.assignee || ""}</span>
+                            </div>
+                            {!!(it.labels || []).length && (
+                              <div className="gaps-card-sub mono">{(it.labels || []).join(", ")}</div>
+                            )}
+                            {(moving || commenting || failed) && (
+                              <div className={"board-pending" + (failed ? " error" : "")}
+                                title={failed ? (bz && bz.message) || "" : ""}>
+                                {failed ? "✕ " + (bz.action) + " failed — reconciling…" : (moving ? "moving…" : "sending…")}
+                              </div>
+                            )}
+                            <div className="board-card-actions">
+                              <select
+                                className="board-status"
+                                value={it.status || ""}
+                                onChange={(e) => moveItem(b.id, it.id, e.target.value)}
+                                disabled={caps.move === false || moving}
+                                title={caps.move === false ? "Token lacks the 'project' scope" : "Move card (change Status)"}
+                              >
+                                <option value="" disabled>No status</option>
+                                {allStatuses.map((s) => <option key={s} value={s}>{s}</option>)}
+                              </select>
+                              {it.url && (
+                                <a className="board-link" href={it.url} target="_blank" rel="noreferrer" title="Open on GitHub">↗</a>
+                              )}
+                            </div>
+                            <form
+                              className="board-comment"
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                const v = e.target.body.value;
+                                e.target.body.value = "";
+                                comment(b.id, it.id, v);
+                              }}
+                            >
+                              <input
+                                className="boards-input board-comment-input"
+                                name="body"
+                                placeholder={caps.comment === false ? "commenting disabled (token needs repo scope)" : "comment…"}
+                                disabled={caps.comment === false || commenting}
+                              />
+                              <button type="submit" className="gaps-action" disabled={loading || caps.comment === false || commenting}>Send</button>
+                            </form>
+                          </div>
+                        );
+                      })
+                    )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            )}
+          </div>
+        );
+      })}
       </div>
     </div>
   );
@@ -3751,6 +4134,7 @@ function FlowTraceView({ flow, repo, graph, dims, onSelectNode, selectedNode, ch
 /* ---------------- Global Chat Widget (unified, context-aware) ---------------- */
 function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePanel, flows, pid, open, onOpenChange }) {
   const [input, setInput] = useState("");
+  const [chatBoards, setChatBoards] = useState([]);  // boards data when chat is in Boards context
 
   // ── Context: translate the current view + selection into (a) API context and (b) a readable label ──
   const ctx = useMemo(() => {
@@ -3841,8 +4225,28 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
       };
     }
 
+    // ── Boards mode ──
+    if (level === "boards") {
+      return {
+        payload: { entry_point_id: "", node: {}, boards: true },
+        label: "Boards",
+        scope: "boards",
+      };
+    }
+
     return { payload: { entry_point_id: "", node: {} }, label: "Whole system", scope: "system" };
   }, [view, selectedNode, flows, entryPoint]);
+
+  // When the chat is in Boards context, fetch the boards so suggestions can
+  // reference the real board and its items.
+  useEffect(() => {
+    if (ctx.scope === "boards" && pid) {
+      fetchJSON(projPath(pid, "/boards"))
+        .then((d) => setChatBoards((d && d.boards) || []))
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx.scope, pid]);
 
   // ── Unified conversation chat hook ──
   const {
@@ -3934,6 +4338,21 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
       out.push("How complex is " + repo + " compared to the others?");
       return out;
     }
+    if (ctx.scope === "boards") {
+      const board = chatBoards[0] || null;
+      const bname = board ? board.name : "this board";
+      const items = (board && board.items) || [];
+      out.push("Summarize " + bname + " — what's in each column?");
+      out.push("Which items are still in Backlog / not started?");
+      if (items.length) {
+        const first = items[0];
+        const t = (first.title || "").length > 44 ? first.title.slice(0, 44) + "…" : (first.title || "");
+        out.push("What is #" + first.number + " (" + t + ") about?");
+        out.push("Where should #" + first.number + " move next, and why?");
+      }
+      out.push("What should I work on next? Suggest the highest-priority item.");
+      return out;
+    }
     // system scope default
     out.push("What services are in this system?");
     if (channels.length > 0) out.push("Show me all message flows between services.");
@@ -3945,7 +4364,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
       if (topRepo) out.push("What happens if " + topRepo[0] + " goes down?");
     }
     return out;
-  }, [ctx, graph, view.entryId, view.flowId, entryPoint, flows]);
+  }, [ctx, graph, view.entryId, view.flowId, entryPoint, flows, chatBoards]);
 
   return (
     <div className={"global-chat" + (open ? " open" : "") + (detailOpen ? " detail-open" : "") + (sidePanel ? " side-panel" : "")}>
@@ -4268,6 +4687,7 @@ function App() {
   const goFlowIndex = () => { setSelectedNode(null); setView({ name: "flowIndex" }); };
   const goGaps = () => { setSelectedNode(null); setView({ name: "gaps" }); };
   const goDead = () => { setSelectedNode(null); setView({ name: "dead" }); };
+  const goBoards = () => { setSelectedNode(null); setView({ name: "boards" }); };
   const goSolar = (repo) => { setSelectedNode(null); setView({ name: "solar", repo }); };
   const goFlow = (flowId) => { setSelectedNode(null); setView({ name: "flow", flowId }); };
 
@@ -4285,7 +4705,7 @@ function App() {
   const crumbs = useMemo(
     () => buildCrumbs(view, mode, graph, flows, (activeMeta && activeMeta.name) || "", {
       goProjects: backToProjects,
-      goGalaxy, goGaps, goDead, goSolar, goFlowIndex, goFlow,
+      goGalaxy, goGaps, goDead, goBoards, goSolar, goFlowIndex, goFlow,
     }),
     [view, mode, graph, flows, activeMeta] // eslint-disable-line
   );
@@ -4296,6 +4716,7 @@ function App() {
     if (m === "topology") setView({ name: "galaxy" });
     else if (m === "dead") setView({ name: "dead" });
     else if (m === "planner") setView({ name: "planner" });
+    else if (m === "boards") setView({ name: "boards" });
     else setView({ name: "flowIndex" });
   };
 
@@ -4460,6 +4881,11 @@ function App() {
               onOpenEntry={(id) => { setSelectedNode(null); setView({ name: "path", entryId: id }); }}
               onOpenSource={(file, line) => setSourceModal({ file, line })}
             />
+          </div>
+        )}
+        {mode === "boards" && view.name === "boards" && (
+          <div className="view" key="boards">
+            <BoardsView pid={activeId} />
           </div>
         )}
 

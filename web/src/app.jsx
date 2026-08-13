@@ -462,10 +462,13 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, 
 function ComparePill({ stale, generatedAt, diffLatest, comparing, snapshots, onToggleCompare }) {
   const hasHistory = !!(snapshots && snapshots.length > 0);
   const hasChanges = !!diffLatest && diffHasChanges(diffLatest);
-  const canCompare = hasHistory;
+  const canCompare = hasHistory && hasChanges;
   const statusCls = stale ? "stale" : "ok";
   const statusLabel = stale ? "Stale" : "Up to date";
-  const diffTooltip = hasChanges && diffLatest ? diffSummaryText(diffLatest) : "";
+  const title = comparing ? "" :
+    !hasHistory ? "No previous scan to compare against" :
+    hasChanges ? (generatedAt ? "Last scanned: " + generatedAt + "\n" : "") + diffSummaryText(diffLatest) :
+    "No changes since last scan";
   return (
     <div className="meta-right">
       <button
@@ -474,13 +477,13 @@ function ComparePill({ stale, generatedAt, diffLatest, comparing, snapshots, onT
         onClick={canCompare || comparing ? onToggleCompare : undefined}
         disabled={!canCompare && !comparing}
         aria-pressed={comparing}
-        title={(comparing ? "" : generatedAt ? "Last scanned: " + generatedAt + (diffTooltip ? "\n" + diffTooltip : "") : diffTooltip)}
+        title={title}
       >
         <span className="seg seg-status">
           <span className="status-dot" />
           <span className="status-label">{comparing ? "COMPARING" : statusLabel}</span>
         </span>
-        {canCompare && !comparing && (
+        {hasHistory && !comparing && (
           <span className={"seg seg-diff" + (hasChanges ? " st-diff" : "")}>
             <span className="seg-sep">|</span>
             {hasChanges ? (
@@ -4758,7 +4761,10 @@ function App() {
     // eslint-disable-next-line
   }, [activeId, graphStatus]);  // graphStatus changes from "loading"→"ready" after rescan
 
-  const enterCompare = () => { setCompareMode(true); };
+  const enterCompare = () => {
+    if (!diffInfo || !diffInfo.diff || !(diffInfo.snapshots || []).length || !diffHasChanges(diffInfo)) return;
+    setCompareMode(true);
+  };
   const exitCompare = () => { setCompareMode(false); };
 
   // Load the active project's scoped graph.

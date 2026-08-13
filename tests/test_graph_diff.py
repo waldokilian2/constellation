@@ -102,22 +102,24 @@ def test_producer_and_link_changes():
     assert d["summary"]["producers_removed"] == 1
     assert d["summary"]["links_removed"] == 1
 
-def test_store_persists_snapshot_and_diff():
+def test_store_persists_snapshot_chain():
     from engine.project_store import ProjectStore
     with tempfile.TemporaryDirectory() as td:
         store = ProjectStore(Path(td))
         pid = "t-1"
         store.project_dir(pid).mkdir(parents=True)
-        store._persist_graph(pid, _graph(eps=[_ep(id="a")]))
+        first = _graph(eps=[_ep(id="a")])
+        store._persist_graph(pid, first)
+        assert store.latest_snapshot(pid) is None
+        assert store.list_snapshots(pid) == []
+        assert not (store.project_dir(pid) / "last_diff.json").exists()
         store._persist_graph(pid, _graph(eps=[_ep(id="b")]))
-        last = json.loads(store.last_diff_path(pid).read_text())
-        assert last["entry_points"]["removed"] == ["a"]
-        assert last["entry_points"]["added"] == ["b"]
         snaps = sorted(store.snapshots_dir(pid).glob("*.json"))
         assert len(snaps) == 1, "exactly one snapshot after two persists"
         assert json.loads(snaps[0].read_text())["entry_points"][0]["id"] == "a"
         assert store.latest_snapshot(pid)["entry_points"][0]["id"] == "a"
-        assert store.load_last_diff(pid)["summary"]["entry_points_added"] == 1
+        assert not hasattr(ProjectStore, "load_last_diff")
+        assert not hasattr(ProjectStore, "last_diff_path")
 
 def test_snapshot_pruning_keeps_last_ten():
     from engine.project_store import ProjectStore

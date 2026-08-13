@@ -167,9 +167,6 @@ class ProjectStore:
     def snapshots_dir(self, pid: str) -> Path:
         return self.project_dir(pid) / "snapshots"
 
-    def last_diff_path(self, pid: str) -> Path:
-        return self.project_dir(pid) / "last_diff.json"
-
     # ── index I/O ──────────────────────────────────────────────────
 
     def _read_index(self) -> list[dict]:
@@ -247,30 +244,15 @@ class ProjectStore:
         except (json.JSONDecodeError, OSError):
             return None
 
-    def load_last_diff(self, pid: str) -> dict:
-        """Return the stored last_diff.json, or an empty diff dict."""
-        path = self.last_diff_path(pid)
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text())
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
+    def _persist_graph(self, pid: str, graph) -> None:
+        """Snapshot the previous graph, then persist the new one.
 
-    def _persist_graph(self, pid: str, graph) -> dict:
-        """Snapshot the previous graph, persist the new one, and store the diff.
-
-        Returns the computed diff dict (empty ``{}`` when no previous graph
-        existed, i.e. the first analysis of the project). The diff is also
-        written to ``last_diff.json`` so the UI can show change counts without
-        recomputing.
+        The diff itself is computed on demand by the /diff endpoint against the
+        latest snapshot — no persisted diff file.
         """
         graph_dict = graph.to_dict() if hasattr(graph, "to_dict") else graph
         graph_path = self.graph_path(pid)
         graph_path.parent.mkdir(parents=True, exist_ok=True)
-
-        old_graph = None
         if graph_path.exists():
             try:
                 old_graph = json.loads(graph_path.read_text())
@@ -278,16 +260,7 @@ class ProjectStore:
                 old_graph = None
             if old_graph is not None:
                 self._save_snapshot(pid, old_graph)
-
         _atomic_write_json(graph_path, graph_dict)
-
-        diff: dict = {}
-        if old_graph is not None:
-            from engine.graph_tools import diff_graphs
-            diff = diff_graphs(old_graph, graph_dict)
-            diff["compared_at"] = _now()
-            _atomic_write_json(self.last_diff_path(pid), diff)
-        return diff
 
     # ── boards (external board sync) ───────────────────────────────
 

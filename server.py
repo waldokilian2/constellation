@@ -1591,7 +1591,9 @@ async def tool_diff(pid: str):
     """Graph diff: what changed since the last analysis (vs the latest snapshot)."""
     graph = _load_graph(pid)
     old = PROJECT_STORE.latest_snapshot(pid)
-    return execute_tool(graph, "diff_graphs", {"old_graph": old or {}})
+    if old is None:
+        return {"diff": None, "no_baseline": True}
+    return execute_tool(graph, "diff_graphs", {"old_graph": old})
 
 
 @app.get("/api/projects/{pid}/diff")
@@ -1613,11 +1615,20 @@ async def project_diff(pid: str, at: str = "", light: bool = False):
     else:
         old = PROJECT_STORE.latest_snapshot(pid)
 
-    result = execute_tool(graph, "diff_graphs", {"old_graph": old or {}})
+    if old is None:
+        return {
+            "diff": None,
+            "snapshots": PROJECT_STORE.list_snapshots(pid),
+            "compared_at": "",
+            "no_baseline": True,
+        }
+
+    result = execute_tool(graph, "diff_graphs", {"old_graph": old})
     payload = {
         "diff": result,
         "snapshots": PROJECT_STORE.list_snapshots(pid),
-        "compared_at": (old or {}).get("generated_at", "") or "",
+        "compared_at": old.get("generated_at", "") or "",
+        "no_baseline": False,
     }
     if not light:
         payload["old_graph"] = old

@@ -16,14 +16,19 @@
       into the viewport (scale ≤ 1 — never enlarges orbs).
    4. A post-fit collision resolver greedily separates any
       remaining overlaps: circle-circle, label-rect vs circle,
-      pill-rect vs circle, pill-rect vs pill-rect, pill-rect
-      vs repo label, and isolated-repo orb/label vs the bare
-      edge curve between pill and orb.  Islands take the whole
-      push on the last one — they have no edges pulling them
+      pill-rect vs circle, pill-rect vs repo label, and
+      isolated-repo orb/label vs the bare edge curve between
+      pill and orb.  Pill rects come from a coordinated placement
+      (placeEdgePills) shared with the renderer: pills are placed
+      widest-first and slide to the first spot clear of every orb,
+      label, and previously placed pill, so pills never fight each
+      other through endpoint pushes.  Islands take the whole push
+      on the curve constraint — they have no edges pulling them
       back — so no edge ever renders under a lone star.  Labels
       and pills are fixed pixel sizes that do not scale with the
-      fit pass, so they are resolved on the final positions.
-      The layout is re-centered afterwards.
+      fit pass, so they are resolved on the final positions.  The
+      layout resolves, re-centers + rounds, re-resolves on the
+      integer state, and re-centers once more by pure translation.
 
    Linked pairs are spaced with per-pair clearance (label pill
    width + EDGE_BREATHING) so each edge has room for its pill
@@ -74,6 +79,18 @@ export const EDGE_PILL = { H: 20, PAD: 4 };
 const CURVE_CLEAR = 10;
 const LABEL_CURVE_M = 5;
 
+// Repo label geometry — fixed px, does not scale with the fit pass.
+// A LABEL_HALF_W*2 × LABEL_H rect, LABEL_GAP below the orb edge,
+// centered on the orb.  Shared by the fit bounds and the resolver so
+// the label metrics can't drift apart.
+export const LABEL_HALF_W = 90;
+export const LABEL_GAP = 26;
+export const LABEL_H = 16;
+
+// Post-fit resolver pass cap and edge-curve sampling density.
+const RESOLVER_PASSES = 200;
+const CURVE_SEGS = 12;
+
 // ── Edge curve geometry (shared with app.jsx) ──
 
 // Sign of (point - chord midpoint) projected onto the +bend perpendicular.
@@ -92,7 +109,7 @@ const sideSign = (px, py, ax, ay, bx, by) => {
 // app.jsx applies the same rule on the final positions, so render and
 // layout always agree.
 export function edgeBendSide(a, b, others, flip) {
-  if (!others || !others.length) return 1;
+  if (!others || !others.length) return flip ? -1 : 1;
   let sx = 0, sy = 0;
   others.forEach((p) => { sx += p.x; sy += p.y; });
   sx /= others.length; sy /= others.length;
@@ -130,35 +147,77 @@ export function curvePoint(curve, t) {
   };
 }
 
-// Deterministic pill placement: slide along the curve from the midpoint
-// toward either endpoint and take the first spot whose pill rect clears
-// every orb (endpoints included) and every repo label.  Falls back to the
-// midpoint when no spot works — the post-fit resolver then pushes orbs
-// instead.  Shared by the layout resolver and the renderer, so the pill
-// always renders where the layout placed it.
-export function edgePillT(a, b, positions, pw, ph, side) {
-  const curve = edgeCurve(a, b, side);
-  const candidates = [0.5, 0.35, 0.65, 0.2, 0.8, 0.08, 0.92];
-  const rectAt = (t) => {
-    const p = curvePoint(curve, t);
-    return { x: p.x - pw / 2, y: p.y - ph / 2, w: pw, h: ph };
-  };
-  const rectClear = (rect) => {
-    for (const o of positions) {
-      const cxp = Math.max(rect.x, Math.min(o.x, rect.x + rect.w));
-      const cyp = Math.max(rect.y, Math.min(o.y, rect.y + rect.h));
-      if (Math.hypot(o.x - cxp, o.y - cyp) < o.r + 2) return false;
-      const labTop = o.y + o.r + 26;
-      const ox = Math.min(rect.x + rect.w, o.x + 90) - Math.max(rect.x, o.x - 90);
-      const oy = Math.min(rect.y + rect.h, labTop + 16) - Math.max(rect.y, labTop);
-      if (ox > 0 && oy > 0) return false;
-    }
-    return true;
-  };
-  for (const t of candidates) {
-    if (rectClear(rectAt(t))) return t;
+// Coordinated pill placement — the single source of truth for WHERE a
+// pill renders.  Pills are placed in a fixed order (widest first, then
+// lexicographic by repo name) and each one slides along its curve to the
+// first spot whose rect clears every orb, every repo label, and every
+// previously placed pill.  A pill with no fully clear spot takes the
+// least-bad candidate (deterministic tie-break); the resolver's endpoint
+// pushes then open a spot on the next pass.  Both the resolver and the
+// renderer call this, so a pill always renders exactly where the layout
+// placed it.  Returns [{ from, to, i, j, side, t, cx, cy, hw, hh }].
+export function placeEdgePills(edges, positions, pillWFor) {
+  const n = positions.length;
+  const repos = positions.map((p) => p.name);
+  const pairBoth = new Set();
+  {
+    const seen = new Set();
+    edges.forEach((e) => {
+      const i = repos.indexOf(e.from), j = repos.indexOf(e.to);
+      if (i < 0 || j < 0 || i === j) return;
+      const key = i < j ? i + "|" + j : j + "|" + i;
+      if (seen.has(key)) pairBoth.add(key);
+      seen.add(key);
+    });
   }
-  return 0.5;
+  const pillH = EDGE_PILL.H + 2 * EDGE_PILL.PAD;
+  const order = [];
+  edges.forEach((e) => {
+    const i = repos.indexOf(e.from), j = repos.indexOf(e.to);
+    const pw = (pillWFor && pillWFor[e.from + ">>" + e.to]) || 0;
+    if (i < 0 || j < 0 || i === j || !pw) return;
+    order.push({ from: e.from, to: e.to, i, j, pw });
+  });
+  order.sort((A, B) => (B.pw - A.pw) ||
+    (A.from < B.from ? -1 : A.from > B.from ? 1 : A.to < B.to ? -1 : 1));
+
+  const candidates = [0.5, 0.35, 0.65, 0.2, 0.8, 0.08, 0.92, 0.28, 0.72, 0.15, 0.85];
+  const placed = [];
+  for (const o of order) {
+    const a = positions[o.i], b = positions[o.j];
+    const others = positions.filter((_, k) => k !== o.i && k !== o.j);
+    const pairKey = a.name < b.name ? a.name + "|" + b.name : b.name + "|" + a.name;
+    const side = edgeBendSide(a, b, others, pairBoth.has(pairKey) && a.name > b.name);
+    const curve = edgeCurve(a, b, side);
+    let best = null;
+    for (const t of candidates) {
+      const p = curvePoint(curve, t);
+      const rect = { x: p.x - o.pw / 2, y: p.y - pillH / 2, w: o.pw, h: pillH };
+      let v = 0;
+      for (const q of positions) {
+        const cxp = Math.max(rect.x, Math.min(q.x, rect.x + rect.w));
+        const cyp = Math.max(rect.y, Math.min(q.y, rect.y + rect.h));
+        const d = Math.hypot(q.x - cxp, q.y - cyp);
+        if (d < q.r + 2) v += q.r + 2 - d;
+        const labTop = q.y + q.r + LABEL_GAP;
+        const ix = Math.min(rect.x + rect.w, q.x + LABEL_HALF_W) - Math.max(rect.x, q.x - LABEL_HALF_W);
+        const iy = Math.min(rect.y + rect.h, labTop + LABEL_H) - Math.max(rect.y, labTop);
+        if (ix > 0 && iy > 0) v += Math.min(ix, iy);
+      }
+      for (const pl of placed) {
+        const ix = Math.min(rect.x + rect.w, pl.cx + pl.hw) - Math.max(rect.x, pl.cx - pl.hw);
+        const iy = Math.min(rect.y + rect.h, pl.cy + pl.hh) - Math.max(rect.y, pl.cy - pl.hh);
+        if (ix > 0 && iy > 0) v += Math.min(ix, iy);
+      }
+      if (v === 0) { best = { t, p, v }; break; }
+      if (!best || v < best.v) best = { t, p, v };
+    }
+    placed.push({
+      from: o.from, to: o.to, i: o.i, j: o.j,
+      side, t: best.t, cx: best.p.x, cy: best.p.y, hw: o.pw / 2, hh: pillH / 2,
+    });
+  }
+  return placed;
 }
 
 export function orbitRadius(count) {
@@ -384,7 +443,7 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (let i = 0; i < n; i++) {
     const ex = r[i] + 24; // orbit dots extend r+18
-    const ey = r[i] + 42; // repo label hangs r+42 below center
+    const ey = r[i] + LABEL_GAP + LABEL_H; // repo label hangs below center
     minX = Math.min(minX, x[i] - ex); maxX = Math.max(maxX, x[i] + ex);
     minY = Math.min(minY, y[i] - ex); maxY = Math.max(maxY, y[i] + ey);
   }
@@ -463,19 +522,6 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
     return side;
   };
 
-  const pillExtents = (i, j) => {
-    const pw = pairPill.get(i < j ? i + "|" + j : j + "|" + i);
-    if (!pw) return null;
-    const pa = { x: positions[i].x, y: positions[i].y, r: postR[i] };
-    const pb = { x: positions[j].x, y: positions[j].y, r: postR[j] };
-    const side = pairSide(i, j);
-    // Slide along the curve to the first clear spot (same rule the
-    // renderer uses); fall back to the midpoint.
-    const t = edgePillT(pa, pb, positions, pw, pillH, side);
-    const curve = edgeCurve(pa, pb, side);
-    const p = curvePoint(curve, t);
-    return { cx: p.x, cy: p.y, hw: pw / 2, hh: pillH / 2 };
-  };
   // Depth of the orb circle (px,py,r) inside the pill rect (0 when outside).
   const rectCircleOverlap = (pl, px, py, r) => {
     const cxp = Math.max(pl.cx - pl.hw, Math.min(px, pl.cx + pl.hw));
@@ -491,8 +537,28 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
     const qx = sx + t * dx, qy = sy + t * dy;
     return { d: Math.hypot(px - qx, py - qy), qx, qy };
   };
-  for (let pass = 0; pass < 200; pass++) {
-    let moved = false;
+  // True when the segment crosses the rect: an endpoint lies inside, or
+  // the segment intersects one of the rect's four edges.  Point-sampling
+  // alone misses crossings between samples (the rect is 180px wide — a
+  // segment can pass straight through the middle between two samples).
+  const segHitsRect = (sx, sy, ex, ey, x0, y0, x1, y1) => {
+    if ((sx > x0 && sx < x1 && sy > y0 && sy < y1) || (ex > x0 && ex < x1 && ey > y0 && ey < y1)) return true;
+    const cross = (ax, ay, bx, by, cx, cy, dx, dy) => {
+      const d1 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
+      const d2 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
+      const d3 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+      const d4 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+      return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    };
+    return cross(sx, sy, ex, ey, x0, y0, x1, y0)
+      || cross(sx, sy, ex, ey, x1, y0, x1, y1)
+      || cross(sx, sy, ex, ey, x1, y1, x0, y1)
+      || cross(sx, sy, ex, ey, x0, y1, x0, y0);
+  };
+  let moved = false;
+  const resolvePasses = () => {
+    for (let pass = 0; pass < RESOLVER_PASSES; pass++) {
+      moved = false;
 
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
@@ -519,63 +585,76 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
           continue;
         }
 
-        // Label of a vs circle of b
-        const labTopA = a.y + postR[i] + 26, labBotA = labTopA + 16;
-        const labHalfW = 90;
-        const cxb = Math.max(a.x - labHalfW, Math.min(b.x, a.x + labHalfW));
+        // Label of a vs circle of b.  Move the pair apart vertically in the
+        // direction that actually separates them — b's orb can sit ABOVE a's
+        // label (a large orb close above), where the old unconditional
+        // "a up, b down" pushed the two together.
+        const labTopA = a.y + postR[i] + LABEL_GAP, labBotA = labTopA + LABEL_H;
+        const cxb = Math.max(a.x - LABEL_HALF_W, Math.min(b.x, a.x + LABEL_HALF_W));
         const cyb = Math.max(labTopA, Math.min(b.y, labBotA));
         const dAB = Math.hypot(b.x - cxb, b.y - cyb);
         if (dAB < postR[j] - 0.5) {
           const gap = postR[j] - dAB + 6;
+          const sgn = a.y < b.y ? 1 : -1;
           if (isolated[i] && !isolated[j]) {
-            a.y -= gap;
+            a.y -= sgn * gap;
           } else if (isolated[j] && !isolated[i]) {
-            b.y += gap;
+            b.y += sgn * gap;
           } else {
             const push = gap * 0.6;
-            a.y -= push; b.y += push;
+            a.y -= sgn * push; b.y += sgn * push;
           }
           moved = true;
           continue;
         }
 
-        // Label of b vs circle of a
-        const labTopB = b.y + postR[j] + 26, labBotB = labTopB + 16;
-        const cxa = Math.max(b.x - labHalfW, Math.min(a.x, b.x + labHalfW));
+        // Label of b vs circle of a (mirror of the block above)
+        const labTopB = b.y + postR[j] + LABEL_GAP, labBotB = labTopB + LABEL_H;
+        const cxa = Math.max(b.x - LABEL_HALF_W, Math.min(a.x, b.x + LABEL_HALF_W));
         const cya = Math.max(labTopB, Math.min(a.y, labBotB));
         const dBA = Math.hypot(a.x - cxa, a.y - cya);
         if (dBA < postR[i] - 0.5) {
           const gap = postR[i] - dBA + 6;
+          const sgn = b.y < a.y ? 1 : -1;
           if (isolated[j] && !isolated[i]) {
-            b.y += gap;
+            b.y -= sgn * gap;
           } else if (isolated[i] && !isolated[j]) {
-            a.y -= gap;
+            a.y += sgn * gap;
           } else {
             const push = gap * 0.6;
-            a.y -= push; b.y += push;
+            b.y -= sgn * push; a.y += sgn * push;
           }
           moved = true;
         }
       }
     }
 
-    // Pill constraints: recompute pill extents each pass — they move with
-    // their endpoint pair.  Built per DIRECTED edge: a bidirectional pair
-    // renders two pills (one per bend side) and both must be resolved.
-    const pills = [];
-    for (const e of dirEdgeIdx) {
-      const ext = pillExtents(e.a, e.b);
-      if (ext) pills.push({ ext, a: e.a, b: e.b });
-    }
+    // Pill constraints: recompute the coordinated placement each pass —
+    // pills move with their endpoint pair and clear each other by
+    // construction (see placeEdgePills).  The remaining pushes resolve
+    // pill-vs-orb and pill-vs-label overlaps the slide could not avoid.
+    const pills = placeEdgePills(edges, positions, pillWFor);
 
     for (const pl of pills) {
-      // Pill vs every non-endpoint orb.  An isolated orb takes the whole
-      // push; connected orbs split it with the pill's endpoints.
+      // Pill vs every orb.  An isolated orb takes the whole push; a
+      // connected orb splits it with the pill's endpoints.  An ENDPOINT
+      // orb (placement fallback) lengthens the chord so the pill clears
+      // both ends.
       for (let k = 0; k < n; k++) {
-        if (k === pl.a || k === pl.b) continue;
-        const ov = rectCircleOverlap(pl.ext, positions[k].x, positions[k].y, postR[k]);
+        const ov = rectCircleOverlap(pl, positions[k].x, positions[k].y, postR[k]);
         if (ov < 0.5) continue;
-        const dxk = positions[k].x - pl.ext.cx, dyk = positions[k].y - pl.ext.cy;
+        if (k === pl.i || k === pl.j) {
+          const pa = positions[pl.i], pb = positions[pl.j];
+          const dxc = pb.x - pa.x, dyc = pb.y - pa.y;
+          const dc = Math.hypot(dxc, dyc) || 1e-3;
+          const ux = dxc / dc, uy = dyc / dc;
+          const push = Math.max(0.5, ov * 0.6);
+          pa.x -= ux * push; pa.y -= uy * push;
+          pb.x += ux * push; pb.y += uy * push;
+          moved = true;
+          continue;
+        }
+        const dxk = positions[k].x - pl.cx, dyk = positions[k].y - pl.cy;
         const dk = Math.hypot(dxk, dyk) || 1e-3;
         const ux = dxk / dk, uy = dyk / dk;
         if (isolated[k]) {
@@ -584,44 +663,43 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
         } else {
           const push = Math.max(0.5, ov * 0.6);
           positions[k].x += ux * push; positions[k].y += uy * push;
-          positions[pl.a].x -= ux * push; positions[pl.a].y -= uy * push;
-          positions[pl.b].x -= ux * push; positions[pl.b].y -= uy * push;
+          positions[pl.i].x -= ux * push; positions[pl.i].y -= uy * push;
+          positions[pl.j].x -= ux * push; positions[pl.j].y -= uy * push;
         }
         moved = true;
       }
-      // Pill vs every repo label (the 180×16 rect below each orb)
+      // Pill vs every repo label (the label rect below each orb)
       for (let k = 0; k < n; k++) {
-        const labTop = positions[k].y + postR[k] + 26;
-        const ox = Math.min(pl.ext.cx + pl.ext.hw, positions[k].x + 90) - Math.max(pl.ext.cx - pl.ext.hw, positions[k].x - 90);
-        const oy = Math.min(pl.ext.cy + pl.ext.hh, labTop + 16) - Math.max(pl.ext.cy - pl.ext.hh, labTop);
+        const labTop = positions[k].y + postR[k] + LABEL_GAP;
+        const ox = Math.min(pl.cx + pl.hw, positions[k].x + LABEL_HALF_W) - Math.max(pl.cx - pl.hw, positions[k].x - LABEL_HALF_W);
+        const oy = Math.min(pl.cy + pl.hh, labTop + LABEL_H) - Math.max(pl.cy - pl.hh, labTop);
         if (ox <= 0 || oy < 0.5) continue;
         // Push the label's orb away from the pill vertically and the
         // pill's endpoints the other way, so the pill clears the label.
         // An isolated repo takes the whole push.
-        const dir = pl.ext.cy < labTop ? 1 : -1;
+        const dir = pl.cy < labTop ? 1 : -1;
         if (isolated[k]) {
           positions[k].y += Math.max(0.5, oy) * dir;
         } else {
           const push = Math.max(0.5, oy * 0.6);
           positions[k].y += push * dir;
-          positions[pl.a].y -= push * dir; positions[pl.b].y -= push * dir;
+          positions[pl.i].y -= push * dir; positions[pl.j].y -= push * dir;
         }
         moved = true;
       }
     }
-    // Pill vs pill: separate along the axis of larger overlap
+    // Residual pill-pill overlaps from placement fallbacks (no fully clear
+    // spot existed): push the endpoint pairs apart so the next placement
+    // pass finds room.  Same-pair pills lengthen their chord instead —
+    // pushing shared endpoints would cancel out.
     for (let pi = 0; pi < pills.length; pi++) {
       for (let pj = pi + 1; pj < pills.length; pj++) {
         const A = pills[pi], B = pills[pj];
-        const ox = A.ext.hw + B.ext.hw - Math.abs(A.ext.cx - B.ext.cx);
-        const oy = A.ext.hh + B.ext.hh - Math.abs(A.ext.cy - B.ext.cy);
+        const ox = A.hw + B.hw - Math.abs(A.cx - B.cx);
+        const oy = A.hh + B.hh - Math.abs(A.cy - B.cy);
         if (ox <= 0 || oy <= 0) continue;
-        // Two pills of the SAME pair share endpoints — pushing them apart
-        // cancels out (each endpoint moves twice, once per pill).  Instead
-        // lengthen the chord: both curves bend proportionally, so the two
-        // midpoints (one per side) separate with it.
-        if ((A.a === B.a && A.b === B.b) || (A.a === B.b && A.b === B.a)) {
-          const pa = positions[A.a], pb = positions[A.b];
+        if ((A.i === B.i && A.j === B.j) || (A.i === B.j && A.j === B.i)) {
+          const pa = positions[A.i], pb = positions[A.j];
           const dxc = pb.x - pa.x, dyc = pb.y - pa.y;
           const dc = Math.hypot(dxc, dyc) || 1e-3;
           const ux = dxc / dc, uy = dyc / dc;
@@ -634,15 +712,15 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
         let push, ux = 0, uy = 0;
         if (ox >= oy) {
           push = Math.max(0.5, ox * 0.6);
-          ux = A.ext.cx < B.ext.cx ? 1 : -1;
+          ux = A.cx < B.cx ? 1 : -1;
         } else {
           push = Math.max(0.5, oy * 0.6);
-          uy = A.ext.cy < B.ext.cy ? 1 : -1;
+          uy = A.cy < B.cy ? 1 : -1;
         }
-        positions[A.a].x -= ux * push; positions[A.a].y -= uy * push;
-        positions[A.b].x -= ux * push; positions[A.b].y -= uy * push;
-        positions[B.a].x += ux * push; positions[B.a].y += uy * push;
-        positions[B.b].x += ux * push; positions[B.b].y += uy * push;
+        positions[A.i].x -= ux * push; positions[A.i].y -= uy * push;
+        positions[A.j].x -= ux * push; positions[A.j].y -= uy * push;
+        positions[B.i].x += ux * push; positions[B.i].y += uy * push;
+        positions[B.j].x += ux * push; positions[B.j].y += uy * push;
         moved = true;
       }
     }
@@ -652,9 +730,31 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
     // on it and obscure the edge.  Sample each directed edge's curve and
     // push every island's orb and label clear of it.  Islands have no
     // edges pulling them back, so they take the entire push and the
-    // endpoints stay put.
+    // endpoints stay put.  Bounding-box early-outs keep this O(edges ×
+    // islands) in the common case instead of O(edges × islands × segments):
+    // an island whose inflated box misses the curve's control-point hull
+    // (a valid bound on the whole Bezier) cannot touch any segment.
     if (islands.length) {
-      const T = 12;
+      const islandBoxes = new Map();
+      const boxFor = (k) => {
+        const m = postR[k] + CURVE_CLEAR;
+        const p = positions[k];
+        // Horizontal margin must cover BOTH the orb (m) and the label corners
+        // (LABEL_HALF_W + LABEL_CURVE_M) — a corner sits on the boundary of
+        // the label, so without the extra margin a curve hugging the box edge
+        // would be skipped by the early-out and never pushed clear.
+        const hm = Math.max(LABEL_HALF_W + LABEL_CURVE_M, m);
+        const box = {
+          x0: p.x - hm,
+          x1: p.x + hm,
+          y0: p.y - m - LABEL_CURVE_M,
+          y1: p.y + postR[k] + LABEL_GAP + LABEL_H + LABEL_CURVE_M,
+        };
+        islandBoxes.set(k, box);
+        return box;
+      };
+      islands.forEach(boxFor);
+
       for (const e of dirEdgeIdx) {
         const side = pairSide(e.a, e.b);
         const curve = edgeCurve(
@@ -662,78 +762,122 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
           { x: positions[e.b].x, y: positions[e.b].y, r: postR[e.b] },
           side
         );
-        const pts = [];
-        for (let s = 0; s <= T; s++) pts.push(curvePoint(curve, s / T));
+        const cbx0 = Math.min(curve.start.x, curve.c.x, curve.end.x);
+        const cbx1 = Math.max(curve.start.x, curve.c.x, curve.end.x);
+        const cby0 = Math.min(curve.start.y, curve.c.y, curve.end.y);
+        const cby1 = Math.max(curve.start.y, curve.c.y, curve.end.y);
+        let pts = null;
         for (const k of islands) {
+          const ib = islandBoxes.get(k);
+          if (ib.x1 < cbx0 || ib.x0 > cbx1 || ib.y1 < cby0 || ib.y0 > cby1) continue;
+          if (!pts) {
+            pts = [];
+            for (let s = 0; s <= CURVE_SEGS; s++) pts.push(curvePoint(curve, s / CURVE_SEGS));
+          }
           const p = positions[k];
           // Orb vs corridor: nearest sampled segment point to the orb center.
-          let nd = Infinity, nqx = 0, nqy = 0;
-          for (let s = 0; s < T; s++) {
+          let nd = Infinity, nqx = 0, nqy = 0, nsx = 0, nsy = 0, nex = 1, ney = 0;
+          for (let s = 0; s < CURVE_SEGS; s++) {
             const seg = segNearest(pts[s].x, pts[s].y, pts[s + 1].x, pts[s + 1].y, p.x, p.y);
-            if (seg.d < nd) { nd = seg.d; nqx = seg.qx; nqy = seg.qy; }
+            if (seg.d < nd) {
+              nd = seg.d; nqx = seg.qx; nqy = seg.qy;
+              nsx = pts[s].x; nsy = pts[s].y; nex = pts[s + 1].x; ney = pts[s + 1].y;
+            }
           }
           const mdCurve = postR[k] + CURVE_CLEAR;
           if (nd < mdCurve - 0.5) {
-            const push = Math.max(0.5, (mdCurve - nd) * 0.8);
-            const ux = (p.x - nqx) / nd, uy = (p.y - nqy) / nd;
-            p.x += ux * push; p.y += uy * push;
+            if (nd < 1e-3) {
+              // Center exactly on a segment — push along the segment normal
+              // (a zero-length radial would never move the island).
+              const lx = nex - nsx, ly = ney - nsy;
+              const len = Math.hypot(lx, ly) || 1e-3;
+              p.x += (-ly / len) * mdCurve;
+              p.y += (lx / len) * mdCurve;
+            } else {
+              const push = Math.max(0.5, (mdCurve - nd) * 0.8);
+              const ux = (p.x - nqx) / nd, uy = (p.y - nqy) / nd;
+              p.x += ux * push; p.y += uy * push;
+            }
             moved = true;
           }
-          // Label: corners must clear every segment, and no sampled point
-          // may sit inside the label rect.
-          const labTop = p.y + postR[k] + 26, labBot = labTop + 16;
+          // Label: corners must clear every segment, and no segment may
+          // cross the label rect (endpoint-inside or edge intersection —
+          // point-sampling alone misses crossings between samples).
+          const labTop = p.y + postR[k] + LABEL_GAP, labBot = labTop + LABEL_H;
           const corners = [
-            [p.x - 90, labTop], [p.x + 90, labTop],
-            [p.x - 90, labBot], [p.x + 90, labBot],
+            [p.x - LABEL_HALF_W, labTop], [p.x + LABEL_HALF_W, labTop],
+            [p.x - LABEL_HALF_W, labBot], [p.x + LABEL_HALF_W, labBot],
           ];
           for (const [cx0, cy0] of corners) {
             let nd2 = Infinity, qx2 = 0, qy2 = 0;
-            for (let s = 0; s < T; s++) {
+            for (let s = 0; s < CURVE_SEGS; s++) {
               const seg = segNearest(pts[s].x, pts[s].y, pts[s + 1].x, pts[s + 1].y, cx0, cy0);
               if (seg.d < nd2) { nd2 = seg.d; qx2 = seg.qx; qy2 = seg.qy; }
             }
             if (nd2 < LABEL_CURVE_M) {
               const push = Math.max(0.5, (LABEL_CURVE_M + 2 - nd2) * 0.8);
               const dx0 = cx0 - qx2, dy0 = cy0 - qy2;
-              const dd = Math.hypot(dx0, dy0) || 1e-3;
-              p.x += (dx0 / dd) * push; p.y += (dy0 / dd) * push;
+              const dd = Math.hypot(dx0, dy0);
+              if (dd < 1e-3) {
+                p.y -= push;
+              } else {
+                p.x += (dx0 / dd) * push; p.y += (dy0 / dd) * push;
+              }
               moved = true;
             }
           }
-          const labCx = p.x, labCy = p.y + postR[k] + 34;
-          for (const pt of pts) {
-            if (pt.x <= p.x - 90 || pt.x >= p.x + 90 || pt.y <= labTop || pt.y >= labBot) continue;
-            let dx0 = labCx - pt.x, dy0 = labCy - pt.y;
+          const labCx = p.x, labCy = p.y + postR[k] + LABEL_GAP + LABEL_H / 2;
+          for (let s = 0; s < CURVE_SEGS; s++) {
+            const sx0 = pts[s].x, sy0 = pts[s].y, ex0 = pts[s + 1].x, ey0 = pts[s + 1].y;
+            if (!segHitsRect(sx0, sy0, ex0, ey0, p.x - LABEL_HALF_W, labTop, p.x + LABEL_HALF_W, labBot)) continue;
+            const q = segNearest(sx0, sy0, ex0, ey0, labCx, labCy);
+            let dx0 = labCx - q.qx, dy0 = labCy - q.qy;
             const dd = Math.hypot(dx0, dy0);
             if (dd < 1e-3) { dx0 = 0; dy0 = -1; } else { dx0 /= dd; dy0 /= dd; }
-            // Distance along the direction until the point exits the rect.
+            // Distance along the direction until the rect clears the
+            // segment's nearest point.
             let ex = Infinity;
             if (Math.abs(dx0) > 1e-6) {
-              const tx = dx0 > 0 ? (p.x + 90 - pt.x) / dx0 : (p.x - 90 - pt.x) / dx0;
+              const tx = dx0 > 0 ? (p.x + LABEL_HALF_W - q.qx) / dx0 : (p.x - LABEL_HALF_W - q.qx) / dx0;
               if (tx >= 0) ex = Math.min(ex, tx);
             }
             if (Math.abs(dy0) > 1e-6) {
-              const ty = dy0 > 0 ? (labBot - pt.y) / dy0 : (labTop - pt.y) / dy0;
+              const ty = dy0 > 0 ? (labBot - q.qy) / dy0 : (labTop - q.qy) / dy0;
               if (ty >= 0) ex = Math.min(ex, ty);
             }
             const push = Math.max(0.5, (ex === Infinity ? 8 : ex + 4) * 0.8);
             p.x += dx0 * push; p.y += dy0 * push;
             moved = true;
           }
+          boxFor(k);
         }
       }
     }
-    if (!moved) break;
-  }
-
-  // ── Re-center after the resolver ──
-  // The pushes above can drift the cluster away from the viewport center.
-  // Translate it back — a pure translation preserves every clearance.
-  let sumX = 0, sumY = 0;
-  positions.forEach((p) => { sumX += p.x; sumY += p.y; });
-  const meanX = sumX / n, meanY = sumY / n;
-  const tx = cx - meanX, ty = cy + 12 - meanY;
-  positions.forEach((p) => { p.x = Math.round(p.x + tx); p.y = Math.round(p.y + ty); });
+      if (!moved) break;
+    }
+  };
+  resolvePasses();
+  // ── Re-center + round, then re-converge on the integer state ──
+  // The resolver converges on fractional positions, but the final
+  // rounding (±0.5px per axis) can flip a bend side or change a pill's
+  // slide candidate — both move pills by several px — so the
+  // guarantee must be re-established ON the rounded positions.  A pure
+  // translation afterwards preserves every clearance exactly, so the
+  // sequence is: resolve → re-center+round → resolve → re-center.
+  const recenter = (round) => {
+    let sumX = 0, sumY = 0;
+    positions.forEach((p) => { sumX += p.x; sumY += p.y; });
+    const tx = cx - sumX / n, ty = cy + 12 - sumY / n;
+    positions.forEach((p) => {
+      const nx = p.x + tx, ny = p.y + ty;
+      p.x = round ? Math.round(nx) : nx;
+      p.y = round ? Math.round(ny) : ny;
+    });
+  };
+  resolvePasses();
+  recenter(true);
+  resolvePasses();
+  recenter(false);
 
   return positions;
 }

@@ -11,7 +11,7 @@ import MarkdownContent from "./Markdown.jsx";
 import ReasoningBlock from "./ReasoningBlock.jsx";
 import ToolSteps from "./ToolSteps.jsx";
 import { useConversationChat } from "./useConversationChat.js";
-import { layoutGalaxy, edgeCurve, edgeBendSide, edgePillT, curvePoint, EDGE_PILL } from "./galaxyLayout.js";
+import { layoutGalaxy, edgeCurve, edgeBendSide, placeEdgePills, curvePoint, EDGE_PILL } from "./galaxyLayout.js";
 import satImg from "./assets/broken-satellite.png";
 import "./styles.css";
 
@@ -1255,6 +1255,14 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
     // eslint-disable-next-line
     [repos, epCount, edges, W, H, pillWFor]);
 
+  // Coordinated pill placement — the same function the layout resolver
+  // used, so every pill renders exactly where the layout placed it.
+  const pillPlacement = useMemo(() => {
+    const m = {};
+    placeEdgePills(edges, positions, pillWFor).forEach((pl) => { m[pl.from + ">>" + pl.to] = pl; });
+    return m;
+  }, [edges, positions, pillWFor]);
+
   const posMap = useMemo(() => {
     const m = {};
     positions.forEach((p) => (m[p.name] = p));
@@ -1364,11 +1372,10 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
             const bgW = label.length * 6.5 + 22;
             const pillW = edgePillWidth(label);
             const pillH = EDGE_PILL.H;
-            // Pill slides along the curve to the first clear spot — the same
-            // deterministic rule the layout resolver used (edgePillT).
-            const t = edgePillT(a, b, positions, pillW, pillH + 2 * EDGE_PILL.PAD,
-              edgeSides[e.from + ">>" + e.to]);
-            const pillPos = curvePoint(g, t);
+            // Pill position comes from the shared coordinated placement
+            // (placeEdgePills) — the exact spot the layout resolver chose.
+            const pl = pillPlacement[e.from + ">>" + e.to];
+            const pillPos = pl ? { x: pl.cx, y: pl.cy } : curvePoint(g, 0.5);
             return (
               <g
                 className={"edge edge-" + kind}

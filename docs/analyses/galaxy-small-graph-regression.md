@@ -154,12 +154,59 @@ via the ingest API):
 The project graph now has 11 repos, 51 entry points, 27 producers, and 12
 cross-repo link objects (19 directed pairs).
 
+## Deep review follow-up (2026-08-13, second pass)
+
+A scalability review against synthetic 60/120-repo projects (up to 127
+directed pill edges, 40 islands) found four defects — all fixed and
+re-verified:
+
+1. **Final-rounding perturbation.** The resolver converged on fractional
+   positions, then the re-center rounded to integers (±0.5px/axis). That
+   rounding could flip a bend side or change a pill's slide candidate —
+   both move pills by several px — leaving real pill overlaps after a
+   "converged" solve. Fixed by the sequence resolve → re-center+round →
+   resolve → re-center (pure translation), so the guarantee holds on the
+   integer state.
+2. **Force-based pill-pill resolution oscillates.** At 120 repos the
+   greedy endpoint pushes cycle against orb constraints and every pass
+   hits the 200-pass cap (verified by instrumentation). Replaced with a
+   **coordinated placement** (`placeEdgePills`, shared by resolver and
+   renderer): pills are placed widest-first and each slides along its
+   curve (11 candidates) to the first spot clear of every orb, every
+   label, and every previously placed pill. Pills can no longer fight
+   each other through the orbs. Placement fallbacks (no fully clear
+   spot) get a residual endpoint push to open room; endpoint-orb
+   overlaps lengthen the chord.
+3. **Island-label corridor under-sampling.** Point-sampling missed
+   segments that crossed the 180×16 label rect between samples (the
+   `payment→shipping` curve cut `reporting-service`'s label at t=0.70
+   with 12 samples). Now a proper segment-vs-rect intersection test
+   (endpoint-inside or edge-crossing) catches every crossing. Also
+   fixed the island bounding-box horizontal inflation (label corners sat
+   exactly on the box boundary, letting curves hug the edge undetected).
+4. **Direction bug in label-orb pushes.** "Label of a vs circle of b"
+   pushed both repos apart unconditionally — when b's orb sat ABOVE a's
+   label the push moved them together. Now direction-aware.
+
+Cleanups: label geometry constants (`LABEL_HALF_W`/`LABEL_GAP`/`LABEL_H`)
+exported as the single source, named `RESOLVER_PASSES`/`CURVE_SEGS`,
+zero-distance guards in corridor pushes (segment-normal fallback),
+island bounding-box early-outs keep the corridor O(edges × islands) in
+the common case.
+
+**Precision floor.** Pushes fire at ≥0.5px of overlap, so the guarantee
+is "no violation exceeds 0.5px" (sub-pixel; invisible). The harnesses
+count violations only above that floor. Measured at 60 and 120 repos:
+every class (orb-orb, label-orb, pill-orb, pill-label, pill-pill,
+island-curve) is at or below the floor; layout+verify runs in ~0.4–0.6s.
+
 ## Known limitation
 
 Pill-bearing graphs render at scale 1 and overflow the viewport on small
 screens (pan/zoom covers it — "scroll is fine"). Extremely dense single
 components could still require the resolver to push orbs when no slide
-candidate clears; every measured case (up to 12 connected repos) converges
-to zero. If denser graphs become a priority, the clean next step is a
-labeling redesign (transit-map style labels at vertices, or aggregated labels
-with the hover popup carrying details) rather than more force tuning.
+candidate clears; every measured case (up to 12 connected repos)
+converges to zero. If denser graphs become a priority, the clean next
+step is a labeling redesign (transit-map style labels at vertices, or
+aggregated labels with the hover popup carrying details) rather than
+more force tuning.

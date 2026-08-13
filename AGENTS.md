@@ -68,11 +68,22 @@ web/                 # React 18 + Vite frontend
   src/
     main.jsx         # entry point: createRoot(<App />)
     app.jsx          # Projects → Galaxy → Solar System → Path → Detail (~3600 lines)
+    galaxyLayout.js  # deterministic Galaxy layout (components + force relaxation, no deps)
     styles.css       # SVG + CSS visualization styles
   dist/              # Vite build output (gitignored, created by npm run build)
   mock_server.py     # static in-memory backend for frontend dev
 tests/repos/         # sample Java microservices (input data, not tests)
   order-service / fulfillment-service / notification-service / analytics-service
+  payment-service / inventory-service / shipping-service / user-service /
+  recommendation-service / reporting-service / legacy-monolith
+                     #   Spring Boot demo repos (seeded as the "Spring Boot" project).
+                     #   The 8 services beyond the original three form a 9-repo
+                     #   connected constellation (order-events hub, payment/shipping
+                     #   chains, user<->recommendation + order<->analytics +
+                     #   order<->inventory cycles, Feign/RestTemplate HTTP links)
+                     #   plus 2 isolated islands: reporting-service (scheduled +
+                     #   REST, no channels) and legacy-monolith (orphan "legacy-jobs"
+                     #   JMS producer, dead LegacyReport).
                      #   Spring Boot demo repos (seeded as the "Spring Boot" project).
                      #   analytics-service is the Tier 1/2 + gaps/dead-code fixture: it
                      #   exercises GraphQL, gRPC, SOAP, Servlet, Cloud Function, lifecycle,

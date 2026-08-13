@@ -398,6 +398,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 .repo-label {
   position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis;
   font-weight: 700; font-size: 13px; letter-spacing: .03em;
   color: #4ade80;
   padding: 2px 8px;

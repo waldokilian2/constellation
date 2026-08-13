@@ -11,11 +11,31 @@ import MarkdownContent from "./Markdown.jsx";
 import ReasoningBlock from "./ReasoningBlock.jsx";
 import ToolSteps from "./ToolSteps.jsx";
 import { useConversationChat } from "./useConversationChat.js";
+import { layoutGalaxy, edgeCurve, edgeBendSide, edgePillT, curvePoint, EDGE_PILL } from "./galaxyLayout.js";
 import satImg from "./assets/broken-satellite.png";
 import "./styles.css";
 
 /* ---------------- helpers ---------------- */
 const repoFromId = (id) => (typeof id === "string" ? id.split(":")[0] : "");
+
+// Edge-label text for a bundled direction edge: single channel → its name
+// (HTTP links prefixed with the verb), multiple channels → counts.
+const edgeLabelText = (items) => {
+  const httpItems = items.filter((it) => it.kind === "http");
+  const messages = items.filter((it) => it.kind !== "http");
+  if (items.length === 1) {
+    const it = items[0];
+    return it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel;
+  }
+  return [
+    messages.length ? messages.length + " msg" + (messages.length > 1 ? "s" : "") : "",
+    httpItems.length ? httpItems.length + " HTTP" : "",
+  ].filter(Boolean).join(" · ");
+};
+
+// Rendered pill width incl. glow padding — the layout uses this exact
+// width for per-pair clearance, so the pill always clears both orbs.
+const edgePillWidth = (label) => label.length * 6.5 + 22 + 2 * EDGE_PILL.PAD;
 
 const DIFF_COLORS = { added: "#4ade80", changed: "#fbbf24", removed: "#f87171", same: "#64748b" };
 const DIFF_LABELS = { added: "new", changed: "changed", removed: "removed", same: "unchanged" };
@@ -1195,29 +1215,6 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
 
   const W = dims.w;
   const H = dims.h;
-  const cx = W / 2, cy = H / 2;
-  const radius = Math.max(120, Math.min(W, H) * 0.34);
-
-  const positions = useMemo(() => {
-    const n = repos.length;
-    return repos.map((name, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(n, 1) - Math.PI / 2;
-      const count = epCount[name] || 0;
-      const r = Math.max(40, Math.min(82, 36 + count * 7));
-      return {
-        name, count, r,
-        x: cx + radius * Math.cos(angle),
-        y: cy + radius * Math.sin(angle),
-      };
-    });
-    // eslint-disable-next-line
-  }, [graph, W, H]);
-
-  const posMap = useMemo(() => {
-    const m = {};
-    positions.forEach((p) => (m[p.name] = p));
-    return m;
-  }, [positions]);
 
   // Group links by direction (from-repo → to-repo): ONE line per direction, bundling
   // all of that direction's channels / HTTP calls (details shown in a hover popup).
@@ -1243,6 +1240,27 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
     return Object.values(map);
   }, [graph]);
 
+  // Constellation layout: connected repos cluster, isolated repos spiral
+  // outward, everything is collision-free and fit to the viewport
+  // (web/src/galaxyLayout.js — deterministic, no randomness).
+  // pillWFor hands the layout the rendered edge-label widths so linked
+  // pairs keep enough clearance for their label pills.
+  const pillWFor = useMemo(() => {
+    const m = {};
+    edges.forEach((e) => { m[e.from + ">>" + e.to] = edgePillWidth(edgeLabelText(e.items)); });
+    return m;
+  }, [edges]);
+
+  const positions = useMemo(() => layoutGalaxy(repos, epCount, edges, W, H, pillWFor),
+    // eslint-disable-next-line
+    [repos, epCount, edges, W, H, pillWFor]);
+
+  const posMap = useMemo(() => {
+    const m = {};
+    positions.forEach((p) => (m[p.name] = p));
+    return m;
+  }, [positions]);
+
   // Ghost edges for channels that were removed since the last analysis.
   const ghostEdges = useMemo(() => {
     if (!cmp) return [];
@@ -1262,25 +1280,36 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
     return out;
   }, [cmp, edges]);
 
-  // One curved line per direction pair. Opposite directions bend to opposite sides
-  // automatically (the control point offsets along the perpendicular, which flips
-  // when a→b becomes b→a), so the two directions stay visually separate.
-  const edgeGeom = (a, b) => {
-    const GAP = 3; // uniform clearance at both orb edges
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const d = Math.hypot(dx, dy) || 1;
-    const ux = dx / d, uy = dy / d;
-    const start = { x: a.x + ux * (a.r + GAP), y: a.y + uy * (a.r + GAP) };
-    const end = { x: b.x - ux * (b.r + GAP), y: b.y - uy * (b.r + GAP) };
-    const bend = Math.min(130, d * 0.26);
-    const c = { x: (start.x + end.x) / 2 - uy * bend, y: (start.y + end.y) / 2 + ux * bend };
-    const mid = {
-      x: 0.25 * start.x + 0.5 * c.x + 0.25 * end.x,
-      y: 0.25 * start.y + 0.5 * c.y + 0.25 * end.y,
+  // Bend side per directed edge, derived once from the final positions
+  // (away from the centroid of the other repos — the same rule the layout
+  // used, so the rendered pill sits where the layout reserved space).
+  // The reverse direction of a bidirectional pair flips to the opposite
+  // physical side, so the pair's two pills never share a midpoint.
+  const edgeSides = useMemo(() => {
+    const m = {};
+    const bidir = new Set();
+    const seen = new Set();
+    edges.forEach((e) => {
+      const key = e.from < e.to ? e.from + "|" + e.to : e.to + "|" + e.from;
+      if (seen.has(key)) bidir.add(key);
+      seen.add(key);
+    });
+    const side = (from, to) => {
+      const a = posMap[from], b = posMap[to];
+      if (!a || !b) return 1;
+      const key = from + ">>" + to;
+      if (!(key in m)) {
+        const pairKey = from < to ? from + "|" + to : to + "|" + from;
+        const flip = bidir.has(pairKey) && from > to;
+        m[key] = edgeBendSide(a, b,
+          positions.filter((p) => p.name !== a.name && p.name !== b.name), flip);
+      }
+      return m[key];
     };
-    const path = "M " + start.x + " " + start.y + " Q " + c.x + " " + c.y + " " + end.x + " " + end.y;
-    return { mid, path };
-  };
+    edges.forEach((e) => side(e.from, e.to));
+    ghostEdges.forEach((ge) => side(ge.from, ge.to));
+    return m;
+  }, [positions, posMap, edges, ghostEdges]);
 
   return (
     <div className="galaxy">
@@ -1323,7 +1352,7 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
           {edges.map((e) => {
             const a = posMap[e.from], b = posMap[e.to];
             if (!a || !b) return null;
-            const g = edgeGeom(a, b);
+            const g = edgeCurve(a, b, edgeSides[e.from + ">>" + e.to]);
             const httpItems = e.items.filter((it) => it.kind === "http");
             const messages = e.items.filter((it) => it.kind !== "http");
             // Three line colors: sync (HTTP-only), async (message-only), both (mixed)
@@ -1331,31 +1360,28 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
               : (httpItems.length > 0 ? "sync" : "async");
             const km = EDGE_KINDS[kind];
             const prominent = kind !== "async"; // sync/both lines are bolder
-            let label;
-            if (e.items.length === 1) {
-              const it = e.items[0];
-              label = (it.kind === "http" && it.verb) ? (it.verb + " " + it.channel) : it.channel;
-            } else {
-              label = [
-                messages.length ? messages.length + " msg" + (messages.length > 1 ? "s" : "") : "",
-                httpItems.length ? httpItems.length + " HTTP" : "",
-              ].filter(Boolean).join(" · ");
-            }
-            const pillW = label.length * 6.5 + 22;
-            const pillH = 20;
+            const label = edgeLabelText(e.items);
+            const bgW = label.length * 6.5 + 22;
+            const pillW = edgePillWidth(label);
+            const pillH = EDGE_PILL.H;
+            // Pill slides along the curve to the first clear spot — the same
+            // deterministic rule the layout resolver used (edgePillT).
+            const t = edgePillT(a, b, positions, pillW, pillH + 2 * EDGE_PILL.PAD,
+              edgeSides[e.from + ">>" + e.to]);
+            const pillPos = curvePoint(g, t);
             return (
               <g
                 className={"edge edge-" + kind}
                 key={e.from + ">>" + e.to}
-                onMouseEnter={() => setHoverEdge({ items: e.items, from: e.from, to: e.to, mid: g.mid })}
+                onMouseEnter={() => setHoverEdge({ items: e.items, from: e.from, to: e.to, mid: pillPos })}
                 onMouseLeave={() => setHoverEdge(null)}
               >
                 <path d={g.path} fill="none" stroke={km.color}
                       strokeWidth={prominent ? 2.2 : 1.6}
                       opacity={prominent ? 0.95 : 0.5} markerEnd={"url(#arrow-" + kind + ")"}></path>
-                <g className="edge-label-pill" transform={"translate(" + g.mid.x + "," + g.mid.y + ")"}>
-                  <rect className={"edge-label-glow " + kind} x={-pillW / 2 - 4} y={-pillH / 2 - 4} width={pillW + 8} height={pillH + 8} rx={(pillH + 8) / 2}></rect>
-                  <rect className={"edge-label-bg " + kind} x={-pillW / 2} y={-pillH / 2} width={pillW} height={pillH} rx={pillH / 2}></rect>
+                <g className="edge-label-pill" transform={"translate(" + pillPos.x + "," + pillPos.y + ")"}>
+                  <rect className={"edge-label-glow " + kind} x={-pillW / 2} y={-pillH / 2 - EDGE_PILL.PAD} width={pillW} height={pillH + 2 * EDGE_PILL.PAD} rx={(pillH + 2 * EDGE_PILL.PAD) / 2}></rect>
+                  <rect className={"edge-label-bg " + kind} x={-bgW / 2} y={-pillH / 2} width={bgW} height={pillH} rx={pillH / 2}></rect>
                   <text className={"edge-label " + kind} x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
@@ -1364,14 +1390,14 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
           {ghostEdges.map((ge, i) => {
             const a = posMap[ge.from], b = posMap[ge.to];
             if (!a || !b) return null;
-            const g = edgeGeom(a, b);
+            const g = edgeCurve(a, b, edgeSides[ge.from + ">>" + ge.to]);
             const label = (ge.kind === "http" && ge.verb) ? (ge.verb + " " + ge.channel) : ge.channel;
-            const pillW = label.length * 6.5 + 22;
+            const bgW = label.length * 6.5 + 22;
             return (
               <g className="edge ghost-removed" key={"ghost-" + i}>
                 <path d={g.path} fill="none" stroke="#f87171" strokeWidth="2" strokeDasharray="7 5" opacity="0.25" />
                 <g className="edge-label-pill" transform={"translate(" + g.mid.x + "," + g.mid.y + ")"}>
-                  <rect className="edge-label-bg ghost-removed" x={-pillW/2} y={-10} width={pillW} height={20} rx={10} />
+                  <rect className="edge-label-bg ghost-removed" x={-bgW/2} y={-EDGE_PILL.H / 2} width={bgW} height={EDGE_PILL.H} rx={EDGE_PILL.H / 2} />
                   <text className="edge-label ghost-removed" x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
@@ -1428,7 +1454,7 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
                   </div>
                 );
               })}
-              <div className="repo-label" style={{ top: p.r + 26 }}>{p.name}</div>
+              <div className="repo-label" style={{ top: p.r + 26 }} title={p.name}>{p.name}</div>
               {repoHasDiff && (
                 <span className="repo-diff-badge" title={repoDiffText(rc)}>
                   {rc.added > 0 && <span className="diff-chip added">+{rc.added}</span>}

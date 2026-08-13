@@ -23,7 +23,7 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
 
   const {
     messages, loading, model, models, error,
-    send, newConversation, loadConversation, deleteConversation,
+    send, stop, newConversation, loadConversation, deleteConversation,
     setModel, setError,
     scrollRef, inputRef,
     conversationId, convList, refreshConvList,
@@ -175,17 +175,30 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
           disabled={loading}
           rows={3}
         />
-        <button
-          className={"planner-chat-send" + (input.trim() && !loading ? " active" : "")}
-          onClick={() => sendMsg(input)}
-          disabled={!input.trim() || loading}
-          aria-label="Send message"
-          title="Send"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
-            <path d="M3.4 20.4l17.45-7.48c.81-.35.81-1.49 0-1.84L3.4 3.6c-.66-.29-1.39.2-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
-          </svg>
-        </button>
+        {loading ? (
+          <button
+            className="planner-chat-stop"
+            onClick={stop}
+            aria-label="Stop generation"
+            title="Stop"
+          >
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2.5" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            className={"planner-chat-send" + (input.trim() ? " active" : "")}
+            onClick={() => sendMsg(input)}
+            disabled={!input.trim()}
+            aria-label="Send message"
+            title="Send"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path d="M3.4 20.4l17.45-7.48c.81-.35.81-1.49 0-1.84L3.4 3.6c-.66-.29-1.39.2-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
+            </svg>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -247,6 +260,48 @@ function downloadTextFile(text, filename, type = "text/plain;charset=utf-8") {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/* Standalone theme injected into downloaded HTML plans so the file looks
+   like the in-app .html-preview. Mirrors the panel theme in styles.css —
+   keep the two in sync. The planner writes semantic HTML + these status
+   classes (risk / remove / revived / ok·done / channel); no <style>. */
+const PLAN_THEME = `
+body { font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; background: #0a0e1a; color: #cbd5e1; margin: 0; padding: 28px 32px; font-size: 14px; line-height: 1.6; }
+* { max-width: 100%; box-sizing: border-box; }
+h1, h2, h3 { color: #e8eefc; line-height: 1.3; margin: 18px 0 10px; }
+h1 { font-size: 22px; border-bottom: 1px solid rgba(255,255,255,.12); padding-bottom: 8px; }
+h2 { font-size: 17px; color: #7dd3fc; }
+h3 { font-size: 14px; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em; }
+p { margin: 8px 0; }
+ul, ol { margin: 8px 0; padding-left: 22px; }
+li { margin: 4px 0; }
+strong { color: #e8eefc; }
+code { font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; color: #93c5fd; background: rgba(147,197,253,.12); padding: 1px 6px; border-radius: 4px; }
+pre { background: #06080f; border: 1px solid rgba(255,255,255,.07); border-radius: 8px; padding: 12px; overflow-x: auto; margin: 10px 0; }
+pre code { background: none; color: #cbd5e1; padding: 0; }
+table { border-collapse: collapse; margin: 10px 0; width: 100%; }
+th, td { border: 1px solid rgba(148,163,184,.25); padding: 7px 10px; font-size: 13px; text-align: left; vertical-align: top; }
+th { color: #7dd3fc; font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; background: rgba(125,211,252,.08); }
+tr:nth-child(even) td { background: rgba(255,255,255,.025); }
+.risk { color: #fbbf24; }
+.remove, .orphan { color: #f87171; }
+.revived { color: #34d399; }
+.ok, .done { color: #34d399; }
+.channel { color: #22d3ee; font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+`;
+
+// Wrap semantic plan HTML into a standalone, themed .html document for
+// download. If the model already emitted a full document, inject the theme
+// into its <head> instead of double-wrapping.
+function wrapPlanHtml(code) {
+  const doc = (code || "").trim();
+  const style = `<style>${PLAN_THEME}</style>`;
+  if (/<html[\s>]/i.test(doc) || /^<!doctype/i.test(doc)) {
+    if (/<head[\s>]/i.test(doc)) return doc.replace(/<head[^>]*>/i, (m) => m + style);
+    return doc.replace(/<body[^>]*>/i, (m) => m + style);
+  }
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${doc}</body></html>`;
+}
+
 /* ── PlanPreviewPane (right side, tool/state-driven) ─────────── */
 function PlanPreviewPane({ pid, cid, diagrams, setDiagrams }) {
   // (Re)load the authoritative panel state when the conversation changes.
@@ -300,7 +355,7 @@ function PlanPreviewPane({ pid, cid, diagrams, setDiagrams }) {
     const isHtml = (d.kind || "mermaid") === "html";
     const base = (d.header || "diagram").replace(/[^\w.-]+/g, "_").slice(0, 60) || "diagram";
     if (isHtml) {
-      downloadTextFile(d.code || "", `${base}.html`, "text/html;charset=utf-8");
+      downloadTextFile(wrapPlanHtml(d.code || ""), `${base}.html`, "text/html;charset=utf-8");
       return;
     }
     const svg = bodyRefs.current[d.id] && bodyRefs.current[d.id].querySelector(".mermaid-render svg");

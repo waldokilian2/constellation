@@ -363,10 +363,11 @@ Eleven tools, shared across all three interfaces:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/projects/{pid}/ai/chat` | Conversational chat with tool-use (structured context) |
-| `POST` | `/api/projects/{pid}/ai/chat/stream` | Streaming SSE variant (token + tool-call events) |
-| `POST` | `/api/projects/{pid}/ai/explain` | Legacy single-call endpoint |
 | `GET` | `/api/ai/models` | Available LLM models |
+
+Conversations are the only AI surface — each message streams via
+`POST /api/projects/{pid}/conversations/{cid}/chat/stream`
+(SSE: `token`, `reasoning`, `tool_start`, `tool_result`, `task_complete`, `done`, `error`).
 
 ### Tool Endpoints
 

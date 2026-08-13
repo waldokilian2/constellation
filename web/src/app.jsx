@@ -4251,7 +4251,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
   // ── Unified conversation chat hook ──
   const {
     messages, loading, model, models, error,
-    send, newConversation, loadConversation, deleteConversation,
+    send, stop, newConversation, loadConversation, deleteConversation,
     setModel, setError,
     scrollRef, inputRef,
     conversationId, convList, refreshConvList,
@@ -4492,9 +4492,17 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
               }}
               disabled={loading}
             />
-            <button className="chat-send" onClick={() => sendMsg(input)} disabled={!input.trim() || loading}>
-              ↑
-            </button>
+            {loading ? (
+              <button className="chat-stop" onClick={stop} aria-label="Stop generation" title="Stop">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+                  <rect x="6" y="6" width="12" height="12" rx="2.5" />
+                </svg>
+              </button>
+            ) : (
+              <button className="chat-send" onClick={() => sendMsg(input)} disabled={!input.trim()}>
+                ↑
+              </button>
+            )}
           </div>
         </div>
       )}

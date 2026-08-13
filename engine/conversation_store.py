@@ -233,7 +233,7 @@ class ConversationStore:
     # Valid render modes for a diagram body.
     _DIAGRAM_KINDS = ("mermaid", "html")
     # Valid CRUD actions accepted by ``mutate_diagrams``.
-    _DIAGRAM_ACTIONS = ("add", "replace", "remove", "get", "clear")
+    _DIAGRAM_ACTIONS = ("add", "replace", "append", "patch", "remove", "get", "clear")
 
     def get_diagrams(self, project_id: str, conv_id: str) -> list[dict]:
         """Return the conversation's current panel diagrams (empty if missing)."""
@@ -249,6 +249,7 @@ class ConversationStore:
         header: str = "",
         code: str = "",
         kind: str = "mermaid",
+        edits: list | None = None,
     ) -> dict:
         """Apply one diagram CRUD op on a conversation's preview panel.
 
@@ -265,12 +266,22 @@ class ConversationStore:
                           is updated; with zero diagrams it falls back to
                           ``add``; with many and a wrong id it returns the
                           current list with an ``error`` hint.
+          * ``append``  — concatenate ``code`` onto an existing diagram's
+                          body (build a large doc across small calls).
+          * ``patch``   — targeted find/replace edits on an existing
+                          diagram's body (``edits`` = list of
+                          ``{find, replace}``). All-or-nothing: if ANY
+                          ``find`` string is absent, NOTHING changes and the
+                          error lists the missing ones (so the caller can
+                          ``get`` exact text). All occurrences of each find
+                          are replaced; counts are reported in ``patched``.
           * ``remove``  — delete a diagram by id (no-op if absent).
           * ``clear``   — delete every diagram.
           * ``get``     — read-only; returns the current list.
 
         Returns ``{"action", "diagram_id", "diagrams": [...]}`` (the full
-        current list after the op so callers can mirror deterministically).
+        current list after the op so callers can mirror deterministically),
+        plus ``patched`` for a successful ``patch``.
         """
         action = (action or "add").strip().lower()
         if action not in self._DIAGRAM_ACTIONS:
@@ -291,6 +302,7 @@ class ConversationStore:
         kind = kind if kind in self._DIAGRAM_KINDS else "mermaid"
         changed = False
         resolved_id = diagram_id
+        patch_report = None  # populated by a successful 'patch' action
 
         def _find(target_id: str) -> int:
             for i, d in enumerate(diagrams):
@@ -341,6 +353,104 @@ class ConversationStore:
             d["updated_at"] = now
             changed = True
 
+        elif action == "append":
+            # Concatenate ``code`` onto an existing diagram's body — lets the
+            # AI build a large plan document across several small calls (each
+            # fitting the response budget) instead of one oversized payload.
+            # Mainly for ``kind: html`` plan documents.
+            i = _find(resolved_id) if resolved_id else -1
+            if i == -1:
+                if not resolved_id and len(diagrams) == 1:
+                    i = 0
+                    resolved_id = diagrams[0].get("id", "")
+                elif not resolved_id and len(diagrams) == 0:
+                    # Nothing to append to → add instead (graceful for first edit).
+                    return self.mutate_diagrams(
+                        project_id, conv_id, "add",
+                        diagram_id="", header=header, code=code, kind=kind,
+                    )
+                else:
+                    return {
+                        "action": "append", "diagram_id": resolved_id,
+                        "diagrams": diagrams,
+                        "error": (
+                            "No matching diagram to append to. Call "
+                            "render_diagram with action 'get' to list current "
+                            "ids, then 'append' with the diagram_id."
+                        ),
+                    }
+            d = diagrams[i]
+            if code:
+                d["code"] = (d.get("code", "") or "") + code
+            if header:
+                d["header"] = header.strip()
+            d["updated_at"] = now
+            changed = True
+
+        elif action == "patch":
+            # Targeted find/replace on an existing diagram's body — lets the AI
+            # fix a section/word/status without re-sending the whole document.
+            # All-or-nothing: if any find-string is absent, apply nothing and
+            # report which failed (so the caller can 'get' exact text first).
+            i = _find(resolved_id) if resolved_id else -1
+            if i == -1:
+                if not resolved_id and len(diagrams) == 1:
+                    i = 0
+                    resolved_id = diagrams[0].get("id", "")
+                else:
+                    return {
+                        "action": "patch", "diagram_id": resolved_id,
+                        "diagrams": diagrams,
+                        "error": (
+                            "No matching diagram to patch. Call render_diagram "
+                            "with action 'get' to list current ids, then 'patch' "
+                            "with the diagram_id."
+                        ),
+                    }
+            edits_list = edits or []
+            if not edits_list:
+                return {
+                    "action": "patch", "diagram_id": resolved_id,
+                    "diagrams": diagrams,
+                    "error": (
+                        "No edits provided. Pass 'edits' as a list of "
+                        "{find, replace} pairs."
+                    ),
+                }
+            d = diagrams[i]
+            body = d.get("code", "") or ""
+            # Pre-validate: every find must already be present.
+            missing = [
+                e.get("find", "") for e in edits_list
+                if isinstance(e, dict) and (e.get("find") or "") not in body
+            ]
+            if missing:
+                return {
+                    "action": "patch", "diagram_id": resolved_id,
+                    "diagrams": diagrams,
+                    "error": (
+                        "patch aborted — nothing changed. These 'find' strings "
+                        f"are not in the document: {missing}. Call "
+                        "render_diagram action 'get' with full:true to see the "
+                        "exact current text, then retry."
+                    ),
+                }
+            applied = []
+            for e in edits_list:
+                if not isinstance(e, dict):
+                    continue
+                find = e.get("find", "")
+                repl = e.get("replace", "")
+                if not find:
+                    continue
+                count = body.count(find)
+                body = body.replace(find, repl)
+                applied.append({"find": find[:80], "replacements": count})
+            d["code"] = body
+            d["updated_at"] = now
+            patch_report = applied
+            changed = True
+
         elif action == "remove":
             i = _find(resolved_id)
             if i != -1:
@@ -357,11 +467,14 @@ class ConversationStore:
             conv.diagrams = diagrams
             self.save(project_id, conv)
 
-        return {
+        result = {
             "action": action,
             "diagram_id": resolved_id,
             "diagrams": diagrams,
         }
+        if patch_report is not None:
+            result["patched"] = patch_report
+        return result
 
 
 # Placeholder titles that ``replace_messages`` overwrites with a real,

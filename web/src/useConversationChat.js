@@ -75,6 +75,8 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
   // Snapshot of committed history captured at send time; in-flight segments
   // are appended to this so the live view never mutates prior turns.
   const baseRef = useRef([]);
+  // AbortController for the in-flight stream, so Stop can cancel it.
+  const abortRef = useRef(null);
 
   const refreshConvList = useCallback(async () => {
     try {
@@ -178,10 +180,13 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
 
     try {
       const cid = conversationId;
+      const controller = new AbortController();
+      abortRef.current = controller;
       const res = await fetch(projPath(pid, "/conversations/" + cid + "/chat/stream"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...(ctxPayload || {}), content: msg, model, planner }),
+        signal: controller.signal,
       });
 
       if (!res.ok || !res.body) {
@@ -227,7 +232,18 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
             });
             if (onToolResult) onToolResult(ev.name, ev);
           } else if (ev.type === "task_complete") {
-            // Server-side continuation signal; no separate bubble.
+            // The AI signalled completion. If it streamed no prose this turn,
+            // surface its `message` as the assistant's final bubble — otherwise
+            // the user-facing reply would be lost. In planner mode this same
+            // message doubles as the plan-readiness statement.
+            if (ev.message) {
+              ensureSeg();
+              patchCur((s) => { if (!s.content) s.content = ev.message; });
+            }
+          } else if (ev.type === "stopped") {
+            // User-initiated Stop — finalize gracefully without an error.
+            segs.forEach((s) => { s.streaming = false; });
+            flush();
           } else if (ev.type === "error") {
             setError(ev.message || "Stream error");
           } else if (ev.type === "done") {
@@ -239,13 +255,26 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
       segs.forEach((s) => { s.streaming = false; });
       flush();
     } catch (e) {
-      setError(e.message);
+      if (e && e.name === "AbortError") {
+        // user hit Stop — keep whatever streamed, no error toast
+      } else {
+        setError(e.message);
+      }
       segs.forEach((s) => { s.streaming = false; });
       flush();
     } finally {
+      abortRef.current = null;
       setLoading(false);
     }
   }, [messages, loading, model, pid, conversationId, ctxPayload, planner, onToolResult]);
+
+  // ── Stop the in-flight stream (user clicked Stop) ──
+  const stop = useCallback(() => {
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch {}
+      abortRef.current = null;
+    }
+  }, []);
 
   // ── New conversation ──
   const newConversation = useCallback(async () => {
@@ -300,7 +329,7 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
 
   return {
     messages, loading, model, models, error,
-    send, newConversation, loadConversation, deleteConversation,
+    send, stop, newConversation, loadConversation, deleteConversation,
     setModel, setError,
     scrollRef, inputRef,
     conversationId, convList, refreshConvList,

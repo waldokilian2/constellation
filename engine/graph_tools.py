@@ -222,9 +222,9 @@ TOOL_DEFINITIONS = [
                     "enum": ["complete", "incomplete"],
                     "description": "'complete' when all work is done; 'incomplete' when there are remaining steps to execute",
                 },
-                "summary": {
+                "message": {
                     "type": "string",
-                    "description": "Brief summary of what was accomplished",
+                    "description": "A concise, user-facing message summarizing what you accomplished. This is shown to the user as your final reply (and, in planner mode, as the plan-readiness statement) — write it as a direct message to them, not an internal log.",
                 },
                 "next_steps": {
                     "type": "string",
@@ -249,8 +249,24 @@ TOOL_DEFINITIONS = [
             "               omit the id and exactly one diagram exists, it updates that "
             "               one; with none it adds; with many and a bad id it errors and "
             "               tells you to call 'get' first.\n"
+            "  - append  — concatenate ``code`` onto an EXISTING diagram's body "
+            "(by id). Build a large plan document across several small calls "
+            "instead of one oversized payload: ``add`` the header + first "
+            "section, then ``append`` each further section. Id omitted + "
+            "exactly one diagram → appends to it; none → adds.\n"
+            "  - patch   — targeted find/replace edits on an EXISTING diagram's "
+            "body (by id). Pass ``edits`` as a list of {find, replace}; ALL "
+            "occurrences of each find are replaced. All-or-nothing: if any "
+            "``find`` string is absent, NOTHING changes and it reports which "
+            "failed. Use this to fix a section, word, or status class without "
+            "re-sending the whole document. If unsure of exact text, first "
+            "``get`` with ``full: true``.\n"
             "  - remove  — delete a single diagram by id.\n"
-            "  - get     — return the diagrams currently shown in the panel.\n"
+            "  - get     — return the diagrams currently in the panel. Large "
+            "documents come back as a length + head/tail preview, not the full "
+            "body (the full body still renders in the panel). Pass "
+            "``full: true`` to receive the complete bodies verbatim — use this "
+            "when you need exact text to make a ``patch`` edit.\n"
             "  - clear   — remove every diagram from the panel.\n\n"
             "Every call returns the full current list of diagrams (id, header, kind) "
             "so you can verify the panel state. STOP once the user's visuals are "
@@ -260,20 +276,22 @@ TOOL_DEFINITIONS = [
             "storing; on 'ok: false' with a parse error, fix the exact error and "
             "retry once, then simplify if it fails again. Prefer Mermaid (kind "
             "'mermaid') for flows; keep syntax simple and ALWAYS double-quote edge "
-            "labels, e.g. A -.->|\"@EventListener\"| B. Use kind 'html' only for "
-            "visuals Mermaid cannot express (HTML/CSS only, no scripts, keep it small)."
+            "labels, e.g. A -.->|\"@EventListener\"| B. Use kind 'html' for the "
+            "plan document and custom visuals Mermaid cannot express (HTML/CSS "
+            "only, no scripts); keep each call small and build large documents "
+            "with 'append'."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "replace", "remove", "get", "clear"],
+                    "enum": ["add", "replace", "append", "patch", "remove", "get", "clear"],
                     "description": "What to do with the panel diagram(s).",
                 },
                 "diagram_id": {
                     "type": "string",
-                    "description": "Diagram id (from a previous add/get). Required for remove; optional for replace; ignored for add/clear/get.",
+                    "description": "Diagram id (from a previous add/get). Required for remove; optional for replace/patch; ignored for add/clear/get.",
                 },
                 "header": {
                     "type": "string",
@@ -281,12 +299,28 @@ TOOL_DEFINITIONS = [
                 },
                 "code": {
                     "type": "string",
-                    "description": "Diagram source — Mermaid or HTML (add/replace).",
+                    "description": "Diagram source — Mermaid or HTML (add/replace/append).",
                 },
                 "kind": {
                     "type": "string",
                     "enum": ["mermaid", "html"],
                     "description": "Render mode for the diagram body. Default 'mermaid'.",
+                },
+                "edits": {
+                    "type": "array",
+                    "description": "For action 'patch': find/replace pairs applied to an existing diagram's body (all-or-nothing).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "find": {"type": "string", "description": "Exact substring currently present in the diagram body."},
+                            "replace": {"type": "string", "description": "Text to substitute in place of each match."},
+                        },
+                        "required": ["find", "replace"],
+                    },
+                },
+                "full": {
+                    "type": "boolean",
+                    "description": "For action 'get': return complete diagram bodies verbatim (not a compact preview) — use when you need exact text for a 'patch' edit.",
                 },
             },
             "required": ["action"],
@@ -1045,18 +1079,24 @@ def diff_graphs(old: dict, new: dict) -> dict:
 
 # ── Tool dispatcher ───────────────────────────────────────────────
 
-def task_complete(status: str = "complete", summary: str = "", next_steps: str = "") -> dict:
+def task_complete(status: str = "complete", message: str = "", next_steps: str = "", summary: str = "") -> dict:
     """Passthrough result for the ``task_complete`` tool.
 
     This is a signalling tool: the server's tool loop inspects the returned
     ``status`` field to decide whether to stop (``complete``) or continue
     (``incomplete``). The function itself does no work beyond echoing the
     arguments back as structured data.
+
+    ``message`` is shown to the user — as the assistant's final bubble when
+    no prose was streamed that turn, and (in planner mode) as the readiness
+    statement — so it must read as a direct, user-facing reply, not an
+    internal log. ``summary`` is accepted as a legacy alias for ``message``.
     """
+    text = message or summary or ""
     return {
         "type": "task_complete",
         "status": status if status in ("complete", "incomplete") else "complete",
-        "summary": summary or "",
+        "message": text,
         "next_steps": next_steps or "",
     }
 
@@ -1069,7 +1109,7 @@ def execute_tool(graph: dict, tool_name: str, arguments: dict) -> dict:
     Note: ``render_diagram`` is a planner-only, stateful UI tool whose
     state lives on the conversation (not the graph). It is intentionally
     NOT in this dispatch table — it is special-cased in the streaming
-    layer (``server._stream_llm_events_v2``), which has the conversation
+    layer (``server._stream_llm_events``), which has the conversation
     id needed to persist panel diagrams via ``ConversationStore``. If it
     ever reaches here, it is treated as unknown.
     """

@@ -82,10 +82,14 @@ function diffHasChanges(compare) {
   return Object.values(s).some((v) => v > 0);
 }
 
-function fmtSnapshot(ts) {
-  const n = Number(ts);
-  if (!isNaN(n) && n > 1e12) return new Date(n / 1e6).toLocaleString();
-  return String(ts);
+// Spelled-out tooltip for a repo's concise diff badge (see the orbs/flow badges).
+function repoDiffText(rc) {
+  if (!rc) return "";
+  const parts = [];
+  if (rc.added > 0) parts.push(rc.added + " entry point" + (rc.added > 1 ? "s" : "") + " added");
+  if (rc.changed > 0) parts.push(rc.changed + " entry point" + (rc.changed > 1 ? "s" : "") + " changed");
+  if (rc.removed > 0) parts.push(rc.removed + " entry point" + (rc.removed > 1 ? "s" : "") + " removed");
+  return parts.join(", ") + " since last scan";
 }
 
 const nodeKeyOf = (n) => [n && n.method, n && n.file, n && n.line].join("|");
@@ -377,12 +381,10 @@ function ErrorScreen({ message }) {
 }
 
 /* ---------------- Header ---------------- */
-function Header({ graph, mode, onModeChange, onHome, stale, crumbs }) {
+function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, comparing, snapshots, onToggleCompare }) {
   const gen = graph && graph.generated_at
     ? new Date(graph.generated_at).toLocaleString()
     : "";
-  const statusLabel = stale ? "Stale" : "Up to date";
-  const statusCls = stale ? "stale" : "ok";
   return (
     <header className="topbar glass">
       <div className="hdr-left">
@@ -417,17 +419,59 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs }) {
         </div>
       )}
       <div className="meta">
-        {gen && (
-          <span className={"meta-pill status-" + statusCls}>
-            <span className="pill-date" aria-hidden="true">{gen ? "Last scanned: " + gen : ""}</span>
-            <span className="pill-status">
-              <span className="status-dot" />
-              <span className="status-label">{statusLabel}</span>
-            </span>
-          </span>
-        )}
+        <ComparePill
+          stale={stale}
+          generatedAt={gen}
+          diffLatest={diffLatest}
+          comparing={comparing}
+          snapshots={snapshots}
+          onToggleCompare={onToggleCompare}
+        />
       </div>
     </header>
+  );
+}
+
+/* ---------------- Compare pill (status + compare-mode toggle) ---------------- */
+// Replaces the old .meta-pill. Owns three pieces of truth: git staleness
+// (stale), graph diff (diffLatest), and compare mode (comparing). It is the
+// single compare-mode toggle/indicator — the separate CompareBar banner is gone.
+function ComparePill({ stale, generatedAt, diffLatest, comparing, snapshots, onToggleCompare }) {
+  const hasHistory = !!(snapshots && snapshots.length > 0);
+  const hasChanges = !!diffLatest && diffHasChanges(diffLatest);
+  const canCompare = hasHistory;
+  const statusCls = stale ? "stale" : "ok";
+  const statusLabel = stale ? "Stale" : "Up to date";
+  const diffTooltip = hasChanges && diffLatest ? diffSummaryText(diffLatest) : "";
+  return (
+    <div className="meta-right">
+      <button
+        type="button"
+        className={"compare-pill status-" + statusCls + (comparing ? " comparing" : "") + (canCompare && !comparing ? " can-toggle" : "")}
+        onClick={canCompare || comparing ? onToggleCompare : undefined}
+        disabled={!canCompare && !comparing}
+        aria-pressed={comparing}
+        title={(comparing ? "" : generatedAt ? "Last scanned: " + generatedAt + (diffTooltip ? "\n" + diffTooltip : "") : diffTooltip)}
+      >
+        <span className="seg seg-status">
+          <span className="status-dot" />
+          <span className="status-label">{comparing ? "COMPARING" : statusLabel}</span>
+        </span>
+        {canCompare && !comparing && (
+          <span className={"seg seg-diff" + (hasChanges ? " st-diff" : "")}>
+            <span className="seg-sep">|</span>
+            {hasChanges ? (
+              <span className="seg-action">
+                View changes <span className="seg-arrow" aria-hidden="true">→</span>
+              </span>
+            ) : (
+              "no changes"
+            )}
+          </span>
+        )}
+        {comparing && <span className="seg seg-exit">✕ exit</span>}
+      </button>
+    </div>
   );
 }
 
@@ -568,68 +612,6 @@ function buildCrumbs(view, mode, graph, flows, projectName, nav) {
   return root;
 }
 
-/* ---------------- Compare bar (graph diff banner + controls) ---------------- */
-const DIFF_BAR_H = 40;
-
-function CompareBar({ diffInfo, compareInfo, compareMode, compareTs, onEnter, onExit, onSelectTs, onDismiss }) {
-  const latest = diffInfo && diffInfo.diff ? diffInfo : null;
-  const active = compareInfo && compareInfo.diff ? compareInfo : null;
-  if (!latest || !(latest.snapshots || []).length) return null;
-
-  if (!compareMode) {
-    const anyChanges = diffHasChanges(latest);
-    const s = latest.diff.summary || {};
-    const chips = [];
-    if (s.entry_points_added) chips.push(<span key="ea" className="diff-chip added">+{s.entry_points_added} entry point{s.entry_points_added > 1 ? "s" : ""}</span>);
-    if (s.entry_points_changed) chips.push(<span key="ec" className="diff-chip changed">~{s.entry_points_changed} entry point{s.entry_points_changed > 1 ? "s" : ""}</span>);
-    if (s.entry_points_removed) chips.push(<span key="er" className="diff-chip removed">−{s.entry_points_removed} entry point{s.entry_points_removed > 1 ? "s" : ""}</span>);
-    if (s.producers_added) chips.push(<span key="pa" className="diff-chip added">+{s.producers_added} producer{s.producers_added > 1 ? "s" : ""}</span>);
-    if (s.producers_removed) chips.push(<span key="pr" className="diff-chip removed">−{s.producers_removed} producer{s.producers_removed > 1 ? "s" : ""}</span>);
-    if (s.links_added) chips.push(<span key="la" className="diff-chip added">+{s.links_added} channel{s.links_added > 1 ? "s" : ""}</span>);
-    if (s.links_removed) chips.push(<span key="lr" className="diff-chip removed">−{s.links_removed} channel{s.links_removed > 1 ? "s" : ""}</span>);
-    return (
-      <div className="compare-bar">
-        <span className={"compare-text" + (anyChanges ? "" : " quiet")}>
-          {anyChanges ? "Since last scan: " : "No changes since last scan."}
-          {anyChanges && <span className="compare-chips">{chips}</span>}
-        </span>
-        {anyChanges && (
-          <button className="compare-action" onClick={onEnter} title="Overlay the previous version's differences on this view">Compare</button>
-        )}
-        {onDismiss && (
-          <button className="compare-x" onClick={onDismiss} title="Dismiss for this session">×</button>
-        )}
-      </div>
-    );
-  }
-
-  const snapshots = [...(latest.snapshots || [])].reverse(); // newest first
-  const activeText = active ? diffSummaryText(active) : "";
-  const activeChanges = active ? diffHasChanges(active) : false;
-  return (
-    <div className="compare-bar active">
-      <span className="compare-title">COMPARING</span>
-      <span className="compare-versions">
-        current ↔
-        <select
-          value={compareTs}
-          onChange={(e) => onSelectTs(e.target.value)}
-          title="Compare against an older snapshot"
-        >
-          <option value="">previous snapshot ({snapshots[0] ? fmtSnapshot(snapshots[0]) : "—"})</option>
-          {snapshots.slice(1).map((ts) => (
-            <option key={ts} value={ts}>{fmtSnapshot(ts)}</option>
-          ))}
-        </select>
-      </span>
-      <span className={"compare-text" + (activeChanges ? "" : " quiet")}>
-        {activeChanges ? activeText : "No differences vs this snapshot."}
-      </span>
-      <button className="compare-action" onClick={onExit}>Exit compare</button>
-    </div>
-  );
-}
-
 /* ---------------- Legend ---------------- */
 function Legend({ types = [], diff = false }) {
   const shown = Object.keys(TYPE_META).filter((k) => types.includes(k));
@@ -657,16 +639,16 @@ function Legend({ types = [], diff = false }) {
         <>
           <div className="legend-sep">Since last scan</div>
           <div className="legend-item">
-            <span className="legend-line diff" style={{ background: DIFF_COLORS.added }}></span>
-            Added
+            <span className="diff-chip added">+</span>
+            <span>added</span>
           </div>
           <div className="legend-item">
-            <span className="legend-line diff" style={{ background: DIFF_COLORS.changed }}></span>
-            Changed
+            <span className="diff-chip changed">~</span>
+            <span>changed</span>
           </div>
           <div className="legend-item">
-            <span className="legend-line diff dashed" style={{ background: DIFF_COLORS.removed }}></span>
-            Removed
+            <span className="diff-chip removed">−</span>
+            <span>removed</span>
           </div>
         </>
       )}
@@ -1421,7 +1403,7 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
               })}
               <div className="repo-label" style={{ top: p.r + 26 }}>{p.name}</div>
               {repoHasDiff && (
-                <span className="repo-diff-badge">
+                <span className="repo-diff-badge" title={repoDiffText(rc)}>
                   {rc.added > 0 && <span className="diff-chip added">+{rc.added}</span>}
                   {rc.changed > 0 && <span className="diff-chip changed">~{rc.changed}</span>}
                   {rc.removed > 0 && <span className="diff-chip removed">−{rc.removed}</span>}
@@ -1783,6 +1765,31 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
   );
 }
 
+/* ---------------- Solar diff legend (compare mode only) ---------------- */
+// Bottom-left glass panel mirroring the galaxy legend's "Since last scan"
+// section. Rendered outside the pan canvas so it stays fixed while the star
+// field pans/zooms. Gate: compare mode only (cmp truthy).
+function SolarDiffLegend({ cmp }) {
+  if (!cmp) return null;
+  return (
+    <div className="legend solar-legend glass" role="note" aria-label="Diff legend">
+      <div className="legend-title">Since last scan</div>
+      <div className="legend-item">
+        <span className="diff-chip added">+</span>
+        <span>added</span>
+      </div>
+      <div className="legend-item">
+        <span className="diff-chip changed">~</span>
+        <span>changed</span>
+      </div>
+      <div className="legend-item">
+        <span className="diff-chip removed">−</span>
+        <span>removed</span>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Solar System View ---------------- */
 function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, compare }) {
   const eps = useMemo(
@@ -1893,10 +1900,12 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
             onClick={() => setHideRemoved((v) => !v)}
             title="Toggle removed entry points (ghosts)"
           >
-            ▼ {cmp.removedEps.length} removed {hideRemoved ? "(hidden)" : ""}
+            − {cmp.removedEps.length} removed {hideRemoved ? "(hidden)" : ""}
           </button>
         )}
       </div>
+
+      <SolarDiffLegend cmp={cmp} />
 
       <div
         className="canvas solar-canvas pan-canvas"
@@ -1920,8 +1929,8 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
             onClick={(e) => onSelectEntry(s.ep.id, e)}
           >
             {s.status && s.status !== "same" && (
-              <span className={"star-badge st-" + s.status}>
-                {s.status === "added" ? "▲" : s.status === "removed" ? "▼" : "~"}
+              <span className={"star-badge st-" + s.status} title={DIFF_LABELS[s.status] + " since last scan"}>
+                {s.status === "added" ? "+" : s.status === "removed" ? "−" : "~"}
               </span>
             )}
             <span className="star-core" style={{ width: s.size, height: s.size }}></span>
@@ -2141,7 +2150,7 @@ function ChannelCard({ c, onOpenFlow, status }) {
         </span>
         {status && status !== "same" && (
           <span className={"diff-chip " + status} title={DIFF_LABELS[status] + " since last scan"}>
-            {status === "added" ? "▲" : status === "removed" ? "▼" : "~"} {DIFF_LABELS[status]}
+            {status === "added" ? "+" : status === "removed" ? "−" : "~"} {DIFF_LABELS[status]}
           </span>
         )}
         <span className={"cc-kind " + c.kind} title={c.kind === "http" ? "Sync HTTP call" : "Message channel"}>
@@ -2531,7 +2540,7 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
             <>· depth {entryPoint.metrics.depth} · {entryPoint.metrics.total_nodes} nodes</>
           )}
           {diffCtx && diffCtx.status === "added" && (
-            <span className="edge-popup-status st-added">▲ new since last scan</span>
+            <span className="edge-popup-status st-added">+ new since last scan</span>
           )}
           {diffCtx && diffCtx.status !== "added" && diffCtx.metricsChanged && (
             <span className="compare-inline">
@@ -2609,7 +2618,7 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
                   )}
                   {dstatus && dstatus !== "same" && (
                     <span className={"pv-diff-chip st-" + dstatus}>
-                      {dstatus === "added" ? "▲ new" : "~ changed"}
+                      {dstatus === "added" ? "+ new" : "~ changed"}
                     </span>
                   )}
                 </button>
@@ -2652,7 +2661,7 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
                   <span className="exit-point-channel">{oc.channel}</span>
                   {status && status !== "same" && (
                     <span className={"edge-popup-status st-" + status}>
-                      {status === "added" ? "▲ new" : status === "removed" ? "▼ removed" : "~ changed"}
+                      {status === "added" ? "+ new" : status === "removed" ? "− removed" : "~ changed"}
                     </span>
                   )}
                   <span className="exit-point-arrow">→</span>
@@ -2678,7 +2687,7 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
               }}
             >
               <button className="pv-removed-title" onClick={() => setRemovedOpen((v) => !v)}>
-                <span>{removedOpen ? "▼" : "▶"}</span> {diffCtx.removedNodes.length} call node{diffCtx.removedNodes.length > 1 ? "s" : ""} removed since last scan
+                <span>{removedOpen ? "−" : "▶"}</span> {diffCtx.removedNodes.length} call node{diffCtx.removedNodes.length > 1 ? "s" : ""} removed since last scan
               </button>
               {removedOpen && (
                 <div className="pv-removed-list">
@@ -2799,9 +2808,9 @@ function DetailPanel({ node, entryPoint, onClose, pid, compare }) {
         {changes && (
           <div className="dp-changes">
             <div className="dp-changes-title">Changes since last scan</div>
-            {changes.epAdded && <div className="dp-changes-line st-added">▲ entry point is new</div>}
+            {changes.epAdded && <div className="dp-changes-line st-added">+ entry point is new</div>}
             {!changes.epAdded && changes.nodeStatus === "added" && (
-              <div className="dp-changes-line st-added">▲ this call node is new</div>
+              <div className="dp-changes-line st-added">+ this call node is new</div>
             )}
             {changes.metrics && (
               <div className="dp-changes-metrics">
@@ -2989,7 +2998,7 @@ function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
               <div className="flow-card-glow" />
               {fStatus && (
                 <span className={"flow-card-diff-chip st-" + fStatus}>
-                  {fStatus === "added" ? "▲ channels added" : fStatus === "removed" ? "▼ channels removed" : "~ channels changed"}
+                  {fStatus === "added" ? "+ channels added" : fStatus === "removed" ? "− channels removed" : "~ channels changed"}
                 </span>
               )}
               <div className="flow-card-origin">
@@ -3302,7 +3311,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
                   <text className={"edge-label" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={st && st !== "same" ? -9 : 0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                   {st && st !== "same" && (
                     <text className="edge-diff-mark" x={pillW / 2 - 12} y={0} dominantBaseline="central" textAnchor="middle">
-                      {st === "added" ? "▲" : st === "removed" ? "▼" : "~"}
+                      {st === "added" ? "+" : st === "removed" ? "−" : "~"}
                     </text>
                   )}
                 </g>
@@ -3338,7 +3347,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
           >
             <div className="flow-repo-glow" />
             {repoHasDiff && (
-              <span className="flow-repo-diff-badge">
+              <span className="flow-repo-diff-badge" title={repoDiffText(rc)}>
                 {rc.added > 0 && <span className="diff-chip added">+{rc.added}</span>}
                 {rc.changed > 0 && <span className="diff-chip changed">~{rc.changed}</span>}
                 {rc.removed > 0 && <span className="diff-chip removed">−{rc.removed}</span>}
@@ -4164,30 +4173,18 @@ function App() {
 
   // ── graph-diff / compare state ───────────────────────────────────
   const [diffInfo, setDiffInfo] = useState(null);     // latest /diff payload for the active project
-  const [compareInfo, setCompareInfo] = useState(null); // diff payload for the snapshot currently overlaid
   const [compareMode, setCompareMode] = useState(false);
-  const [compareTs, setCompareTs] = useState("");       // "" = latest; non-empty = specific snapshot
-  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   // Load diff info whenever the active project changes or a rescan completes.
   useEffect(() => {
-    if (!activeId) { setDiffInfo(null); setCompareMode(false); setCompareInfo(null); setCompareTs(""); return; }
+    if (!activeId) { setDiffInfo(null); setCompareMode(false); return; }
     fetchDiff(activeId, "", false).then(setDiffInfo).catch(() => setDiffInfo(null));
     fetchProjectDiff(activeId);
     // eslint-disable-next-line
   }, [activeId, graphStatus]);  // graphStatus changes from "loading"→"ready" after rescan
 
-  // When the user picks a snapshot to compare against.
-  useEffect(() => {
-    if (!compareMode || !activeId) { setCompareInfo(null); return; }
-    if (!compareTs) { setCompareInfo(diffInfo); return; }
-    fetchDiff(activeId, compareTs, false).then(setCompareInfo).catch(() => {});
-  }, [compareMode, compareTs, activeId, diffInfo]);  // eslint-disable-line
-
-  const enterCompare = () => { setBannerDismissed(false); setCompareMode(true); };
-  const exitCompare = () => { setCompareMode(false); setCompareTs(""); };
-  const selectCompareTs = (ts) => { setCompareTs(ts); };
-  const dismissBanner = () => setBannerDismissed(true);
+  const enterCompare = () => { setCompareMode(true); };
+  const exitCompare = () => { setCompareMode(false); };
 
   // Load the active project's scoped graph.
   useEffect(() => {
@@ -4228,7 +4225,7 @@ function App() {
   const refreshActive = () => {
     if (!activeId) { refreshProjects(); return; }
     // Reset compare state — the graph just changed.
-    setCompareMode(false); setCompareTs(""); setBannerDismissed(false);
+    setCompareMode(false);
     fetchJSON(projPath(activeId, "/graph"))
       .then((g) => { setGraph(g); setFlows(detectFlows(g)); setGraphStatus("ready"); })
       .catch(() => {});
@@ -4277,18 +4274,15 @@ function App() {
   const goSolar = (repo) => { setSelectedNode(null); setView({ name: "solar", repo }); };
   const goFlow = (flowId) => { setSelectedNode(null); setView({ name: "flow", flowId }); };
 
-  // Compare bar occupies space below the fixed topbar; shrink the stage to match.
-  const barVisible = compareMode || (!bannerDismissed && !!diffInfo && (diffInfo.snapshots || []).length > 0);
-  const stageH = dims.h - (barVisible ? DIFF_BAR_H : 0);
-
-  // Active compare overlay: the diff data for the snapshot being compared.
+  // Active compare overlay: the latest diff payload for the active project.
   // Only non-null when the user has explicitly entered compare mode; the
-  // CompareBar banner outside compare mode reads diffInfo directly.
+  // compare pill reads diffInfo directly outside compare mode. (Compare mode
+  // always compares against the latest previous snapshot — no snapshot
+  // selector exists.)
   const compare = useMemo(() => {
     if (!compareMode) return null;
-    const info = compareInfo && compareInfo.diff ? compareInfo : diffInfo && diffInfo.diff ? diffInfo : null;
-    return info;
-  }, [compareMode, compareInfo, diffInfo]);
+    return diffInfo && diffInfo.diff ? diffInfo : null;
+  }, [compareMode, diffInfo]);
 
   // Single navigation trail rendered in the header (see buildCrumbs above).
   const crumbs = useMemo(
@@ -4375,26 +4369,18 @@ function App() {
         onHome={backToProjects}
         stale={!!(updatesByPid[activeId] && updatesByPid[activeId].stale_count > 0)}
         crumbs={crumbs}
+        diffLatest={diffInfo}
+        comparing={compareMode}
+        snapshots={diffInfo ? (diffInfo.snapshots || []) : []}
+        onToggleCompare={() => (compareMode ? exitCompare() : enterCompare())}
       />
-      {barVisible && (
-        <CompareBar
-          diffInfo={diffInfo}
-          compareInfo={compareInfo}
-          compareMode={compareMode}
-          compareTs={compareTs}
-          onEnter={enterCompare}
-          onExit={exitCompare}
-          onSelectTs={selectCompareTs}
-          onDismiss={dismissBanner}
-        />
-      )}
-      <main className="stage" style={barVisible ? { marginTop: 0, height: `calc(100% - var(--topbar-h) - ${DIFF_BAR_H}px)` } : undefined}>
+      <main className="stage">
         {/* ── Topology mode (existing) ── */}
         {mode === "topology" && view.name === "galaxy" && (
           <div className="view" key="galaxy">
             <GalaxyView
               graph={graph}
-              dims={{ w: dims.w, h: stageH }}
+              dims={dims}
               onOpenGaps={() => { setSelectedNode(null); setView({ name: "gaps" }); }}
               onSelectRepo={(repo, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);
@@ -4419,7 +4405,7 @@ function App() {
             <SolarSystemView
               graph={graph}
               repo={view.repo}
-              dims={{ w: dims.w, h: stageH }}
+              dims={dims}
               flows={flows}
               onOpenFlow={(flowId) => {
                 setSelectedNode(null);
@@ -4485,7 +4471,7 @@ function App() {
           <div className="view" key="flowIndex">
             <FlowIndexView
               graph={graph}
-              dims={{ w: dims.w, h: stageH }}
+              dims={dims}
               onSelectFlow={(f, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);
                 drill(x, y, () => { setSelectedNode(null); setView({ name: "flow", flowId: f.id }); });
@@ -4502,7 +4488,7 @@ function App() {
               <FlowView
                 flow={flow}
                 graph={graph}
-                dims={{ w: dims.w, h: stageH }}
+                dims={dims}
                 onSelectRepoInFlow={(repo, entryId, e) => {
                   const [x, y] = centerOf(e && e.currentTarget);
                   drill(x, y, () => { setSelectedNode(null); setView({ name: "flowTrace", flowId: flow.id, repo }); });
@@ -4521,7 +4507,7 @@ function App() {
                 flow={flow}
                 repo={view.repo}
                 graph={graph}
-                dims={{ w: dims.w, h: stageH }}
+                dims={dims}
                 selectedNode={selectedNode}
                 onSelectNode={(n) => setSelectedNode(n)}
                 chatOpen={chatOpen}
@@ -4713,6 +4699,9 @@ function ProjectCard({ index, p, updates, diff, onOpen, onAddRepo, onRescan, onD
         {repos.length} repos · {stats.entry_points || 0} entry points · {stats.cross_repo_links || 0} links
       </div>
       {changedCount > 0 && (
+        // Deliberate exception to the canvas symbol-unification: the landing
+        // page has no legend and ample room, so the project card keeps full
+        // prose ("+1 entry point") instead of the concise "+1" canvas notation.
         <div className="pc-diff" title="Since last scan">
           <span className="pc-diff-label">since last scan:</span>
           {s.entry_points_added > 0 && <span className="diff-chip added">+{s.entry_points_added} entry point{s.entry_points_added > 1 ? "s" : ""}</span>}

@@ -11,6 +11,8 @@ and a **GitHub issue** card on the [Constellation board](https://github.com/user
 | [#13](https://github.com/waldokilian2/constellation/issues/13) | Graph diff & versioning | [01-graph-diff-versioning.md](01-graph-diff-versioning.md) | engine |
 | [#14](https://github.com/waldokilian2/constellation/issues/14) | Orphan + cycle detection | [02-orphan-cycle-detection.md](02-orphan-cycle-detection.md) | engine |
 | [#15](https://github.com/waldokilian2/constellation/issues/15) | Blast-radius + Mermaid export | [03-blast-radius-mermaid-export.md](03-blast-radius-mermaid-export.md) | engine |
+| — | Compare-mode UX overhaul (Topology & Orbs) | [04-compare-mode-ux-overhaul.md](04-compare-mode-ux-overhaul.md) | frontend |
+| — | Solar view: bottom-left diff legend (replace colliding diff-key) | [05-solar-diff-legend.md](05-solar-diff-legend.md) | frontend |
 
 ## Workflow
 

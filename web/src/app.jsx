@@ -4,6 +4,7 @@
    ============================================================ */
 
 import React, { useState, useEffect, useRef, useMemo, useLayoutEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import ChangePlannerView from "./changePlanner.jsx";
 import ConversationMenu from "./ConversationMenu.jsx";
 import MarkdownContent from "./Markdown.jsx";
@@ -1824,6 +1825,143 @@ const LANE_COLORS = ["#f87171", "#a78bfa", "#f5a524", "#60a5fa", "#34d399"];
 const laneColor = (i, n) => LANE_COLORS[
   Math.min(LANE_COLORS.length - 1, Math.round((i * (LANE_COLORS.length - 1)) / Math.max(1, n - 1)))
 ];
+// Styled replacement for the native <select> on board cards. Native select
+// popups are rendered by the OS and ignore page styling, so the picker is a
+// custom listbox: the trigger keeps the .board-status look and the option menu
+// is rendered in a portal (position: fixed) so the lane's overflow container
+// can't clip it. Opens above the trigger when there's more room there.
+function BoardStatusSelect({ value, options, disabled, disabledTitle, onSelect }) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const [pos, setPos] = useState(null);  // { left, width, top?, bottom?, maxHeight }
+  const btnRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const allOptions = ["", ...options];
+  const label = value || "No status";
+
+  const close = useCallback(() => { setOpen(false); setPos(null); }, []);
+
+  const toggle = () => {
+    if (disabled) return;
+    if (open) { close(); return; }
+    const r = btnRef.current && btnRef.current.getBoundingClientRect();
+    if (!r) return;
+    const below = window.innerHeight - r.bottom >= r.top;  // open where more room is
+    setActive(Math.max(0, allOptions.indexOf(value)));
+    setPos({
+      left: r.left,
+      width: r.width,
+      below,
+      top: below ? r.bottom + 4 : undefined,
+      bottom: below ? undefined : window.innerHeight - r.top + 4,
+      maxHeight: (below ? window.innerHeight - r.bottom : r.top) - 12,
+    });
+    setOpen(true);
+  };
+
+  const pick = (v) => {
+    close();
+    if (v !== value) onSelect(v);
+  };
+
+  // Close on outside pointerdown, Escape, or any scroll outside the menu
+  // (the lane body scrolls, which would otherwise leave the menu floating
+  // away from its trigger).
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => {
+      if (btnRef.current && btnRef.current.contains(e.target)) return;
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      close();
+    };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    const onScroll = (e) => {
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      close();
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open, close]);
+
+  // Clamp horizontally so the menu never leaves the viewport.
+  useLayoutEffect(() => {
+    if (!open || !menuRef.current) return;
+    const m = menuRef.current.getBoundingClientRect();
+    const left = Math.max(8, Math.min(pos.left, window.innerWidth - m.width - 8));
+    menuRef.current.style.left = left + "px";
+  }, [open, pos]);
+
+  const onKeyDown = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(allOptions.length - 1, a + 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(0, a - 1)); }
+    else if (e.key === "Home") { e.preventDefault(); setActive(0); }
+    else if (e.key === "End") { e.preventDefault(); setActive(allOptions.length - 1); }
+    else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (active >= 0 && active < allOptions.length) pick(allOptions[active]);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        ref={btnRef}
+        className={"board-status" + (open ? " open" : "")}
+        onClick={toggle}
+        onKeyDown={onKeyDown}
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={disabledTitle || "Move card (change Status)"}
+      >
+        <span className="board-status-label">{label}</span>
+        <span className="board-status-caret">▾</span>
+      </button>
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          className="board-status-menu"
+          role="listbox"
+          style={{
+            left: pos.left,
+            width: Math.max(pos.width, 160),
+            top: pos.top,
+            bottom: pos.bottom,
+            maxHeight: pos.maxHeight,
+          }}
+        >
+          {allOptions.map((s, i) => (
+            <button
+              type="button"
+              key={s || "__none__"}
+              role="option"
+              aria-selected={s === value}
+              className={"board-status-option" + (s === value ? " selected" : "") + (i === active ? " active" : "")}
+              onPointerDown={(e) => { e.preventDefault(); pick(s); }}
+              onMouseEnter={() => setActive(i)}
+            >
+              <span
+                className="board-status-dot"
+                style={{ background: s ? laneColor(options.indexOf(s), options.length) : "#94a3b8" }}
+              />
+              <span className="board-status-option-label">{s || "No status"}</span>
+              {s === value && <span className="board-status-check">✓</span>}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
 // A top-level mode (next to Topology / Flows / Dead code). Syncs an external
 // issue board (GitHub via the official GitHub MCP server) into Constellation
 // and renders it as Open/Closed columns. Two-way write-back (Phase 2) and
@@ -2124,16 +2262,13 @@ function BoardsView({ pid }) {
                               </div>
                             )}
                             <div className="board-card-actions">
-                              <select
-                                className="board-status"
+                              <BoardStatusSelect
                                 value={it.status || ""}
-                                onChange={(e) => moveItem(b.id, it.id, e.target.value)}
+                                options={allStatuses}
+                                onSelect={(status) => moveItem(b.id, it.id, status)}
                                 disabled={caps.move === false || moving}
-                                title={caps.move === false ? "Token lacks the 'project' scope" : "Move card (change Status)"}
-                              >
-                                <option value="" disabled>No status</option>
-                                {allStatuses.map((s) => <option key={s} value={s}>{s}</option>)}
-                              </select>
+                                disabledTitle={caps.move === false ? "Token lacks the 'project' scope" : "Move card (change Status)"}
+                              />
                               {it.url && (
                                 <a className="board-link" href={it.url} target="_blank" rel="noreferrer" title="Open on GitHub">↗</a>
                               )}

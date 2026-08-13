@@ -75,7 +75,7 @@ BOARD_TOOL_NAMES = {t["name"] for t in BOARD_TOOL_DEFINITIONS}
 def _run_async(factory):
     """Run an async coroutine in a fresh thread + event loop.
 
-    ``_stream_llm_events_v2`` runs on the main event loop in the non-streaming
+    ``_stream_llm_events`` runs on the main event loop in the non-streaming
     path, so ``asyncio.run`` directly would raise — spawning a dedicated thread
     is safe in both cases.
     """

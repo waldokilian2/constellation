@@ -214,19 +214,6 @@ async def get_source(file_path: str):
         "line_count": len(SAMPLE_SOURCE.split("\\n")),
     })
 
-@app.post("/api/ai/explain")
-async def ai_explain(request: Request):
-    body = await request.json()
-    return JSONResponse({
-        "available": True,
-        "response": f"\\nThis is a mock AI explanation for '{body.get('function_name', 'function')}'.\\n\\n"
-                    f"In response to: {body.get('question', '')}\\n\\n"
-                    "The function appears to be part of a Spring Boot microservice. "
-                    "It validates input, persists state, and emits a Kafka event. "
-                    "Potential concerns: idempotency, message ordering, and failure handling "
-                    "for the Kafka send (fire-and-forget pattern).\\n",
-    })
-
 from starlette.staticfiles import StaticFiles
 
 # Mount static files at root (must come after all API routes are registered)

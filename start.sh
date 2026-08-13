@@ -16,12 +16,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ── Protect local .env edits from being committed ────────────────
-# .env ships as a committed template; mark it skip-worktree so each
-# user's secrets stay local and are never pushed. Harmless if not a
-# git repo or .env is absent.
-if [ -f ".env" ]; then
-    git update-index --skip-worktree .env 2>/dev/null || true
+# ── Ensure local .env exists ────────────────────────────────────
+# .env is git-ignored (secrets stay local). If missing, create it from
+# the committed .env.example template.
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+    cp .env.example .env
+    echo "→ Created .env from .env.example — fill in your keys."
 fi
 
 # ── Colors ────────────────────────────────────────────────────────

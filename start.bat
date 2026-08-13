@@ -18,6 +18,16 @@ REM Switch the console to UTF-8 so the box-drawing / checkmark glyphs below
 REM render correctly instead of as mojibake (the file is saved as UTF-8).
 chcp 65001 >nul
 
+REM ── Ensure local .env exists ─────────────────────────────────
+REM .env is git-ignored (secrets stay local). If missing, create it
+REM from the committed .env.example template.
+if not exist ".env" (
+    if exist ".env.example" (
+        copy /y ".env.example" ".env" >nul
+        echo → Created .env from .env.example — fill in your keys.
+    )
+)
+
 echo.
 echo ╔══════════════════════════════════════════════╗
 echo ║  Constellation — Codebase Entry Point Mapper ║

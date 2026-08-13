@@ -77,7 +77,7 @@ docker compose run --rm --entrypoint python constellation \
 - **Python 3.10+**
 - **Node.js 18+** (for the Vite frontend build)
 - **A modern browser** (for the web UI)
-- **Optional:** `OPENCODE_API_KEY` env var for AI features (defaults to Zen; works without — just disables AI chat). Add it to the committed `.env` template.
+- **Optional:** `OPENCODE_API_KEY` env var for AI features (defaults to Zen; works without — just disables AI chat). Copy the committed `.env.example` to `.env` (git-ignored) and fill in your keys.
 
 ---
 

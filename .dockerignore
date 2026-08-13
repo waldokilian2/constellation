@@ -5,6 +5,9 @@
 .idea/
 .vscode/
 
+# Local secrets — never sent into the build context
+.env
+
 # Python
 .venv/
 __pycache__/

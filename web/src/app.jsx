@@ -2196,32 +2196,41 @@ function BoardsView({ pid }) {
                 onClick={() => setCollapsed((c) => ({ ...c, [b.id]: !c[b.id] }))}
                 title={collapsed[b.id] ? "Expand board" : "Collapse board"}
               >{collapsed[b.id] ? "▸" : "▾"}</button>
-              <span
-                className="board-name board-name-toggle"
-                onClick={() => setCollapsed((c) => ({ ...c, [b.id]: !c[b.id] }))}
-                title="Click to collapse/expand"
-              >{b.name}</span>
-              <span className="gaps-repo">{b.provider} · {b.kind}</span>
-              {caps.move === false && (
-                <span className="board-cap" title="Token lacks the GitHub 'project' scope">
-                  move disabled
-                </span>
-              )}
-              {caps.comment === false && (
-                <span className="board-cap" title="Token lacks the GitHub 'repo' scope — commenting needs it">
-                  commenting disabled (needs repo scope)
-                </span>
-              )}
-              <span className="board-sync">
-                {b.synced_at ? "synced " + new Date(b.synced_at).toLocaleString() : "not synced"}
-              </span>
-              <button
-                className="gaps-action"
-                disabled={!!syncing[b.id]}
-                onClick={() => sync(b.id)}
-                title="Pull the latest items and columns from GitHub via MCP"
-              >{syncing[b.id] ? <><span className="spinner" /> Syncing…</> : "⟳ Sync from GitHub"}</button>
-              <button className="gaps-action danger" onClick={() => disconnect(b.id)}>✕ Disconnect</button>
+              <div className="board-head-main">
+                <button
+                  className="board-name board-name-toggle"
+                  onClick={() => setCollapsed((c) => ({ ...c, [b.id]: !c[b.id] }))}
+                  title="Click to collapse/expand"
+                  aria-expanded={!collapsed[b.id]}
+                >{b.name}</button>
+                <div className="board-meta">
+                  <span className="gaps-repo">{b.provider} · {b.kind}</span>
+                  <span className="board-sync">
+                    {b.synced_at ? "synced " + new Date(b.synced_at).toLocaleString() : "not synced"}
+                  </span>
+                </div>
+              </div>
+              <div className="board-head-status">
+                {caps.move === false && (
+                  <span className="board-cap" title="Token lacks the GitHub 'project' scope">
+                    move disabled
+                  </span>
+                )}
+                {caps.comment === false && (
+                  <span className="board-cap" title="Token lacks the GitHub 'repo' scope — commenting needs it">
+                    commenting disabled
+                  </span>
+                )}
+              </div>
+              <div className="board-head-actions">
+                <button
+                  className="gaps-action board-sync-action"
+                  disabled={!!syncing[b.id]}
+                  onClick={() => sync(b.id)}
+                  title="Pull the latest items and columns from GitHub via MCP"
+                >{syncing[b.id] ? <><span className="spinner" /> Syncing…</> : "⟳ Sync from GitHub"}</button>
+                <button className="gaps-action danger board-disconnect" onClick={() => disconnect(b.id)}>Disconnect</button>
+              </div>
             </div>
             {collapsed[b.id] ? (
               <div className="board-summary">
@@ -2234,10 +2243,13 @@ function BoardsView({ pid }) {
                 const color = col.label === "No status" ? "#94a3b8" : laneColor(ci, columns.length);
                 return (
                   <div className="board-col" key={col.label} style={{ "--lane": color }}>
-                    <div className="board-col-head">{col.label} · {col.items.length}</div>
+                    <div className="board-col-head">
+                      <span className="board-col-title">{col.label}</span>
+                      <span className="board-col-count">{col.items.length}</span>
+                    </div>
                     <div className="board-col-body">
                     {col.items.length === 0 ? (
-                      <div className="gaps-empty">—</div>
+                      <div className="board-col-empty">No items yet</div>
                     ) : (
                       col.items.map((it) => {
                         const bz = busy[it.id];
@@ -2247,13 +2259,16 @@ function BoardsView({ pid }) {
                         return (
                           <div className={"gaps-card board-card" + (failed ? " board-card-failed" : "")} key={it.id}>
                             <div className="gaps-card-top">
-                              <span className="gaps-channel mono">
-                                {it.number ? "#" + it.number + " " : ""}{it.title}
+                              <span className="gaps-channel board-card-title">
+                                {it.number && <span className="board-card-number">#{it.number}</span>}
+                                <span>{it.title}</span>
                               </span>
-                              <span className="gaps-repo">{it.assignee || ""}</span>
+                              {it.assignee && <span className="gaps-repo board-assignee">{it.assignee}</span>}
                             </div>
                             {!!(it.labels || []).length && (
-                              <div className="gaps-card-sub mono">{(it.labels || []).join(", ")}</div>
+                              <div className="board-labels">
+                                {(it.labels || []).map((label) => <span className="board-label" key={label}>{label}</span>)}
+                              </div>
                             )}
                             {(moving || commenting || failed) && (
                               <div className={"board-pending" + (failed ? " error" : "")}
@@ -2270,7 +2285,7 @@ function BoardsView({ pid }) {
                                 disabledTitle={caps.move === false ? "Token lacks the 'project' scope" : "Move card (change Status)"}
                               />
                               {it.url && (
-                                <a className="board-link" href={it.url} target="_blank" rel="noreferrer" title="Open on GitHub">↗</a>
+                                <a className="board-link" href={it.url} target="_blank" rel="noreferrer" title="Open on GitHub" aria-label={`Open ${it.title} on GitHub`}>↗</a>
                               )}
                             </div>
                             <form
@@ -2286,6 +2301,7 @@ function BoardsView({ pid }) {
                                 className="boards-input board-comment-input"
                                 name="body"
                                 placeholder={caps.comment === false ? "commenting disabled (token needs repo scope)" : "comment…"}
+                                aria-label={caps.comment === false ? "Comments disabled" : "Add a comment"}
                                 disabled={caps.comment === false || commenting}
                               />
                               <button type="submit" className="gaps-action" disabled={loading || caps.comment === false || commenting}>Send</button>

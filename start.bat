@@ -3,8 +3,8 @@ REM ============================================================
 REM Constellation — Startup Script (Windows)
 REM ============================================================
 REM Sets up the Python venv if missing, installs dependencies,
-REM generates graph.json from the test repos if missing, and
-REM starts the web server.
+REM generates the demo graphs (graph.json + graph-java-ee.json)
+REM from the test repos if missing, and starts the web server.
 REM
 REM Usage:
 REM   start.bat                  REM start with default repos
@@ -59,27 +59,44 @@ call ".venv\Scripts\activate.bat"
 
 echo ✓ Virtual environment ready
 
-REM Check if deps need installing
-%PYTHON% -c "import tree_sitter, fastapi" 2>nul
+REM Check if deps need installing. Use the venv `python` (post-activation)
+REM so the probe inspects the venv, not a `py`-launcher pick. requirements.txt
+REM now also requires the MCP SDK (mcp>=2.0), so probe for it too.
+python -c "import tree_sitter, fastapi, mcp" 2>nul
 if errorlevel 1 (
     echo → Installing dependencies...
     pip install --quiet -r requirements.txt
 )
 echo ✓ Dependencies ready
 
-REM ── Generate graph.json if missing or custom repos passed ───────
-if exist "output\graph.json" if "%~1"=="" goto :have_graph
+REM ── Generate demo graphs if missing or custom repos passed ───────
+REM The server seeds two demo projects on first load (ProjectStore
+REM ensure_legacy_seed): output\graph.json → "Spring Boot" and
+REM output\graph-java-ee.json → "Java EE". Match start.sh and produce
+REM both, so the Java EE demo isn't missing on Windows.
+if exist "output\graph.json" if exist "output\graph-java-ee.json" if "%~1"=="" goto :have_graph
 
 echo → Analyzing codebase...
 
 if "%~1"=="" (
     REM Default: use built-in test repos
     if exist "tests\repos\order-service" (
-        echo    Using built-in test repos...
-        python -m engine.constellation tests\repos\order-service tests\repos\fulfillment-service tests\repos\notification-service --output output\graph.json 2>&1 | findstr /v "RuntimeWarning"
+        if not exist "output\graph.json" (
+            echo    Using built-in test repos...
+            python -m engine.constellation tests\repos\order-service tests\repos\fulfillment-service tests\repos\notification-service --output output\graph.json 2>&1 | findstr /v "RuntimeWarning"
+        )
+        REM Second demo project: Java EE / Jakarta annotations coverage.
+        if exist "tests\repos\java-ee-order-service" (
+            if not exist "output\graph-java-ee.json" (
+                echo    Analyzing java-ee services - Java EE annotations...
+                python -m engine.constellation tests\repos\java-ee-order-service tests\repos\java-ee-fulfillment-service tests\repos\java-ee-notification-service --output output\graph-java-ee.json 2>&1 | findstr /v "RuntimeWarning"
+            )
+        )
     ) else if exist "tests\repos\sample-spring-kafka-microservices" (
-        echo    Using sample-spring-kafka-microservices...
-        python -m engine.constellation tests\repos\sample-spring-kafka-microservices\order-service tests\repos\sample-spring-kafka-microservices\payment-service tests\repos\sample-spring-kafka-microservices\stock-service --output output\graph.json 2>&1 | findstr /v "RuntimeWarning"
+        if not exist "output\graph.json" (
+            echo    Using sample-spring-kafka-microservices...
+            python -m engine.constellation tests\repos\sample-spring-kafka-microservices\order-service tests\repos\sample-spring-kafka-microservices\payment-service tests\repos\sample-spring-kafka-microservices\stock-service --output output\graph.json 2>&1 | findstr /v "RuntimeWarning"
+        )
     ) else (
         echo Error: No repos found to analyze.
         echo        Pass repo paths as arguments: start.bat C:\path\to\repo1
@@ -102,12 +119,22 @@ if "%~1"=="" (
 echo ✓ Graph data ready
 
 REM ── Build frontend ──────────────────────────────────────────────
+REM Always run npm install (idempotent). Gating it on `node_modules`
+REM existing silently broke the build whenever package.json gained a
+REM dependency after the last install (e.g. dompurify in Markdown.jsx),
+REM which left a stale web/dist being served. Abort on a failed build,
+REM matching start.sh's `set -e`.
 if exist "package.json" (
     echo → Building frontend...
-    if not exist "node_modules" (
-        call npm install --silent
-    )
+    call npm install --silent --no-audit --no-fund
     call npm run build
+    if errorlevel 1 (
+        echo.
+        echo ✗ Frontend build failed - the server would serve a stale UI.
+        echo   Fix the npm error above, then re-run start.bat.
+        pause
+        exit /b 1
+    )
     echo ✓ Frontend ready
 )
 

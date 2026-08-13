@@ -2820,6 +2820,118 @@ code { font-family: var(--mono); color: var(--cyan); }
 .gaps-cycle-chain { font-size: 13px; color: var(--text); }
 .gaps-cycle-chans { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
 
+/* ── Boards view (external issue-board sync; reuses .gaps-* / .view-*) ── */
+.gaps-action {
+  font-size: 12px; font-weight: 600; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: 10px; padding: 6px 12px; cursor: pointer;
+  transition: border-color .2s, background .2s;
+}
+.gaps-action:hover:not(:disabled) { border-color: var(--amber); background: rgba(255,255,255,.05); }
+.gaps-action:disabled { opacity: .5; cursor: default; }
+.gaps-action.danger:hover:not(:disabled) { border-color: #f87171; color: #f87171; }
+.boards-empty { padding: 24px; }
+.boards-connect {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px;
+}
+.boards-input {
+  flex: 0 1 240px; font-size: 13px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: 10px; padding: 8px 12px; outline: none;
+}
+.boards-input:focus { border-color: var(--amber); }
+.view-top-actions { display: flex; align-items: center; gap: 8px; }
+.spinner {
+  display: inline-block; width: 12px; height: 12px; vertical-align: -2px; margin-right: 6px;
+  border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.board-loading-hint {
+  width: 100%; font-size: 12px; color: var(--text-dim); font-style: italic;
+}
+.board-head {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.board-name { font-size: 14px; font-weight: 700; color: var(--text); }
+.board-name-toggle { cursor: pointer; }
+.board-name-toggle:hover { color: var(--amber); }
+.board-collapse {
+  background: none; border: 1px solid var(--border-strong); border-radius: 8px;
+  color: var(--text-dim); font-size: 11px; line-height: 1; padding: 4px 7px;
+  cursor: pointer; transition: border-color .2s, color .2s;
+}
+.board-collapse:hover { border-color: var(--amber); color: var(--amber); }
+.board-summary {
+  font-size: 12px; color: var(--text-dim); padding: 6px 4px;
+  border: 1px dashed var(--border-strong); border-radius: 10px;
+}
+.board-sync { font-size: 11px; color: var(--text-faint); margin-left: auto; }
+.board-cap {
+  font-size: 10px; color: #f87171; border: 1px solid rgba(248,113,113,.4);
+  border-radius: 999px; padding: 2px 8px;
+}
+/* The boards view uses the full stage width (not the centered ~980px column
+   other gaps views use) so the swim lanes fit side by side and scroll less. */
+.gaps.boards .gaps-scroll {
+  padding-left: 28px; padding-right: 28px;
+}
+.board-cols {
+  display: flex; flex-direction: row; align-items: stretch;
+  gap: 12px; overflow-x: auto; padding-bottom: 8px;
+}
+.board-col {
+  display: flex; flex-direction: column;
+  flex: 1 1 260px; min-width: 240px; max-width: 380px;
+  max-height: 70vh;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: rgba(255,255,255,.02); padding: 10px;
+  min-width: 240px;
+  border-top: 3px solid var(--lane, var(--border));
+}
+.board-col-head {
+  flex-shrink: 0;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--lane, var(--text-dim)); font-weight: 700;
+  padding: 2px 4px 8px;
+}
+/* Cards area scrolls inside the lane once it exceeds the column's max height. */
+.board-col-body {
+  display: flex; flex-direction: column; gap: 8px;
+  overflow-y: auto; padding-right: 4px;
+}
+.board-card { cursor: default; }
+.board-card:hover { transform: none; }
+/* Cards inherit the lane color from their column (--lane), so their title and
+   label text match the swim lane they sit in. */
+.board-card .gaps-channel { color: var(--lane, var(--amber)); }
+.board-card .gaps-card-sub { color: color-mix(in srgb, var(--lane, var(--amber)) 70%, var(--text-dim)); }
+.board-card-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.board-status {
+  flex: 1; min-width: 0; font-size: 11px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: 8px; padding: 4px 6px; outline: none; cursor: pointer;
+}
+.board-status:focus { border-color: var(--amber); }
+.board-link {
+  align-self: flex-start; font-size: 12px; color: var(--amber);
+  text-decoration: none; flex-shrink: 0;
+}
+.board-link:hover { text-decoration: underline; }
+.board-comment { display: flex; gap: 6px; margin-top: 6px; }
+.board-comment-input { flex: 1; min-width: 0; font-size: 11px; padding: 5px 8px; }
+/* In-flight / failure feedback on a card while a write is happening. */
+.board-pending {
+  align-self: flex-start; font-size: 10px; font-weight: 600;
+  color: var(--amber); letter-spacing: .04em;
+  animation: board-pulse 1s ease-in-out infinite;
+}
+.board-pending.error { color: #f87171; animation: none; }
+.board-card-failed { border-color: rgba(248,113,113,.7); }
+@keyframes board-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.board-error { border-color: rgba(248,113,113,.5); color: #f87171; font-style: normal; }
+
 /* ── Source modal (producer source viewer — reuses .dp-* / .code classes) ── */
 .source-modal-overlay {
   position: fixed; inset: 0; z-index: 200;

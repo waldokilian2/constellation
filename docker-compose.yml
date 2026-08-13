@@ -1,7 +1,7 @@
 # Constellation — all-in-one (AIO) compose. See issue #27.
 #
 #   docker compose up                              # http://localhost:8765
-#   ANTHROPIC_API_KEY=sk-... docker compose up     # with AI chat enabled
+#   OPENCODE_API_KEY=sk-... docker compose up      # with AI chat enabled
 services:
   constellation:
     build:
@@ -19,11 +19,25 @@ services:
       # the UI/API as local:/repos/<name> (README → Docker → "Analyze repos you've already cloned").
       # - ./path/to/your/repos:/repos:ro
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # AI chat (OpenAI-compatible; Zen by default). OPENCODE_* are canonical,
+      # OPENAI_* are accepted as aliases.
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-https://opencode.ai/zen/v1}
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-deepseek-v4-flash-free}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
       CONSTELLATION_API_TOKEN: ${CONSTELLATION_API_TOKEN:-}
+      # GitHub Boards sync (engine/boards) — forwarded so the container can reach
+      # the GitHub MCP server. docker compose reads these from the repo .env.
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN:-}
+      GITHUB_MCP_TRANSPORT: ${GITHUB_MCP_TRANSPORT:-http}
+      GITHUB_MCP_URL: ${GITHUB_MCP_URL:-https://api.githubcopilot.com/mcp/}
+      GITHUB_MCP_COMMAND: ${GITHUB_MCP_COMMAND:-}
+      GITHUB_MCP_ARGS: ${GITHUB_MCP_ARGS:-}
+      GITHUB_MCP_TOOLSETS: ${GITHUB_MCP_TOOLSETS:-issues,projects}
+      GITHUB_MCP_TIMEOUT: ${GITHUB_MCP_TIMEOUT:-120}
+      GITHUB_MCP_CONNECT_TIMEOUT: ${GITHUB_MCP_CONNECT_TIMEOUT:-10}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/health', timeout=3)\""]

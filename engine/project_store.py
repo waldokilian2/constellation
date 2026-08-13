@@ -157,6 +157,10 @@ class ProjectStore:
     def graph_path(self, pid: str) -> Path:
         return self.project_dir(pid) / "graph.json"
 
+    def boards_path(self, pid: str) -> Path:
+        """Per-project boards.json — connected boards + cached items (boards feature)."""
+        return self.project_dir(pid) / "boards.json"
+
     def repos_dir(self, pid: str) -> Path:
         return self.project_dir(pid) / "repos"
 
@@ -284,6 +288,27 @@ class ProjectStore:
             diff["compared_at"] = _now()
             _atomic_write_json(self.last_diff_path(pid), diff)
         return diff
+
+    # ── boards (external board sync) ───────────────────────────────
+
+    def load_boards(self, pid: str) -> dict:
+        """Load a project's boards.json. Returns ``{"boards": []}`` if none yet
+        (boards are optional — never raises, unlike :meth:`load_graph`)."""
+        path = self.boards_path(pid)
+        if not path.exists():
+            return {"boards": []}
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {"boards": []}
+        if isinstance(data, dict) and isinstance(data.get("boards"), list):
+            return data
+        return {"boards": []}
+
+    def save_boards(self, pid: str, data: dict) -> None:
+        """Persist boards.json for a project (connection config, cached items, sync state)."""
+        self.project_dir(pid).mkdir(parents=True, exist_ok=True)
+        self.boards_path(pid).write_text(json.dumps(data, indent=2))
 
     # ── mutation ───────────────────────────────────────────────────
 

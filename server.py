@@ -44,10 +44,12 @@ _USER_AGENT = os.environ.get("CONSTELLATION_USER_AGENT", "Constellation/0.1")
 
 # Windows proactor accept-resilience: a transient network blip (WinError 64
 # etc.) must not close the listening socket — retry instead. Installed here,
-# at import time, before uvicorn creates the event loop.
-import win_accept_resilience
+# at import time, before uvicorn creates the event loop. Windows-only: the
+# Docker/Linux image doesn't ship this module and doesn't need it, so guard it.
+if sys.platform == "win32":
+    import win_accept_resilience
 
-win_accept_resilience.install()
+    win_accept_resilience.install()
 
 # ── AI provider config (OpenAI-compatible; Zen by default) ─────────
 # Zen (https://opencode.ai/zen) exposes an OpenAI-compatible API. Any
@@ -386,6 +388,217 @@ async def project_updates(pid: str):
     }
 
 
+# ── Boards (external board sync via MCP) ────────────────────────────
+# Connect a GitHub board (via the official GitHub MCP server) to a project,
+# pull its items, and refresh on demand. Two-way write-back (Phase 2) and
+# graph linking (Phase 3) extend these routes.
+
+from engine.boards import provider_for, BoardError
+from datetime import datetime, timezone
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _board_identity(provider: str, config: dict) -> dict:
+    """Stable id / display name / source URL for a board derived from its config."""
+    if provider == "github-mcp":
+        owner = (config or {}).get("owner", "")
+        project_number = (config or {}).get("project_number") or (config or {}).get("project")
+        if project_number:
+            num = str(project_number)
+            return {
+                "id": f"github-project:{owner}/{num}",
+                "name": f"{owner} project #{num}",
+                "source_url": f"https://github.com/users/{owner}/projects/{num}" if owner else "",
+                "kind": "project",
+            }
+        repo = (config or {}).get("repo", "")
+        scope = f"{owner}/{repo}".strip("/")
+        return {
+            "id": f"github:{scope}",
+            "name": f"{scope} issues",
+            "source_url": f"https://github.com/{scope}" if scope else "",
+            "kind": "issues",
+        }
+    return {"id": provider, "name": provider, "source_url": "", "kind": "issues"}
+
+
+class BoardConnectRequest(BaseModel):
+    """Connect an external board to a project."""
+    provider: str            # "github-mcp"
+    config: dict = {}        # e.g. {"owner": "...", "repo": "..."}
+    name: str = ""           # optional display-name override
+
+
+@app.get("/api/projects/{pid}/boards")
+async def list_boards(pid: str):
+    """Connected boards + their cached items for a project."""
+    _load_project(pid)
+    return PROJECT_STORE.load_boards(pid)
+
+
+@app.post("/api/projects/{pid}/boards")
+async def connect_board(pid: str, req: BoardConnectRequest):
+    """Connect a board and run its initial sync (pulls items now)."""
+    _load_project(pid)
+    ident = _board_identity(req.provider, req.config)
+    board = {
+        "id": ident["id"],
+        "provider": req.provider,
+        "name": req.name or ident["name"],
+        "kind": ident["kind"],
+        "source_url": ident["source_url"],
+        "config": req.config,
+        "items": [],
+        "synced_at": "",
+    }
+    try:
+        provider = provider_for(board)
+        # Pre-flight token check so a missing/bad token fails with the API's
+        # details before any MCP call is made.
+        token_status = await run_in_threadpool(provider.token_status)
+        if not token_status.get("valid"):
+            raise BoardError(token_status.get("error") or "GitHub token not valid", status=401)
+        # For project boards, use the real GitHub project title as the display name.
+        if req.name:
+            board["name_override"] = True  # keep a user-provided name on later syncs
+        elif ident["kind"] == "project":
+            title = await provider.project_title(board)
+            if title:
+                board["name"] = title
+        items = await provider.list_items(board)
+        options = await provider.status_options(board)
+        caps = await provider.capabilities(board)
+    except BoardError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    board["items"] = [it.to_dict() for it in items]
+    if options:
+        board["status_options"] = options
+    if caps:
+        board["capabilities"] = caps
+    board["synced_at"] = _now_iso()
+
+    data = PROJECT_STORE.load_boards(pid)
+    data["boards"] = [b for b in data["boards"] if b["id"] != board["id"]]  # replace if present
+    data["boards"].append(board)
+    PROJECT_STORE.save_boards(pid, data)
+    return {"board": board, "count": len(board["items"])}
+
+
+@app.post("/api/projects/{pid}/boards/{bid:path}/sync")
+async def sync_board(pid: str, bid: str):
+    """Refresh a board's items from its source (pull)."""
+    # Board ids contain '/', e.g. "github:owner/repo". A plain {bid} segment
+    # cannot match a value with a slash (uvicorn decodes %2F -> '/' before
+    # route matching, so even the encoded URL misses and returns 404). The
+    # ":path" converter matches across slashes and is already percent-decoded.
+    _load_project(pid)
+    data = PROJECT_STORE.load_boards(pid)
+    board = next((b for b in data["boards"] if b["id"] == bid), None)
+    if board is None:
+        raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
+    try:
+        provider = provider_for(board)
+        items = await provider.list_items(board)
+        options = await provider.status_options(board)
+        caps = await provider.capabilities(board)
+        # Refresh the real GitHub project title on sync (unless the user set a
+        # custom name) so boards connected before the title feature get renamed.
+        if board.get("kind") == "project" and not board.get("name_override"):
+            title = await provider.project_title(board)
+            if title:
+                board["name"] = title
+    except BoardError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    board["items"] = [it.to_dict() for it in items]
+    if options:
+        board["status_options"] = options
+    if caps:
+        board["capabilities"] = caps
+    board["synced_at"] = _now_iso()
+    PROJECT_STORE.save_boards(pid, data)
+    return {"board": board, "count": len(board["items"])}
+
+
+@app.delete("/api/projects/{pid}/boards/{bid:path}")
+async def disconnect_board(pid: str, bid: str):
+    """Remove a connected board (cached items are deleted; the source is untouched)."""
+    # Same ":path" converter as sync_board — bid ids contain '/' so a plain
+    # {bid} segment can never match.
+    _load_project(pid)
+    data = PROJECT_STORE.load_boards(pid)
+    before = len(data["boards"])
+    data["boards"] = [b for b in data["boards"] if b["id"] != bid]
+    if len(data["boards"]) == before:
+        raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
+    PROJECT_STORE.save_boards(pid, data)
+    return {"ok": True, "id": bid}
+
+
+class BoardItemPatch(BaseModel):
+    """Move a board item (item_id in body — item ids contain '/', like board ids)."""
+    item_id: str
+    status: str = ""
+
+
+class BoardCommentRequest(BaseModel):
+    item_id: str
+    body: str
+
+
+def _replace_item(board: dict, item: dict) -> None:
+    """Update a cached item in place (matched by id)."""
+    items = board.get("items") or []
+    for i, it in enumerate(items):
+        if it.get("id") == item.get("id"):
+            items[i] = item
+            return
+    items.append(item)
+    board["items"] = items
+
+
+@app.post("/api/projects/{pid}/boards/{bid:path}/items")
+async def update_board_item(pid: str, bid: str, req: BoardItemPatch):
+    """Move a board item — immediate write to the source.
+
+    For project boards this is the card's Status (swim lane); for issues boards,
+    the open/closed state. Note: the GitHub MCP server does not expose field-level
+    etags, so there's no optimistic-concurrency conflict detection here — the
+    write is last-writer-wins, and the canonical item is refetched and returned.
+    """
+    _load_project(pid)
+    data = PROJECT_STORE.load_boards(pid)
+    board = next((b for b in data["boards"] if b["id"] == bid), None)
+    if board is None:
+        raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
+    try:
+        provider = provider_for(board)
+        item = await provider.update_item(board, req.item_id, {"status": req.status})
+    except BoardError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    _replace_item(board, item.to_dict())
+    PROJECT_STORE.save_boards(pid, data)
+    return {"item": item.to_dict()}
+
+
+@app.post("/api/projects/{pid}/boards/{bid:path}/items/comment")
+async def comment_board_item(pid: str, bid: str, req: BoardCommentRequest):
+    """Add a comment to a board item's underlying issue."""
+    _load_project(pid)
+    data = PROJECT_STORE.load_boards(pid)
+    board = next((b for b in data["boards"] if b["id"] == bid), None)
+    if board is None:
+        raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
+    try:
+        provider = provider_for(board)
+        await provider.add_comment(board, req.item_id, req.body)
+    except BoardError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    return {"ok": True, "item_id": req.item_id}
+
+
 # ── Git-host import (remote repo discovery) ────────────────────────
 
 @app.get("/api/remotes/repos")
@@ -478,6 +691,7 @@ class ChatRequest(BaseModel):
     repo: str = ""  # optional repo context (for solar/flow views)
     flow_context: dict = {}  # optional flow context (name, repos, hops, etc.)
     planner: bool = False  # when True, uses the change-planner system prompt
+    boards: bool = False  # when True, uses the board-focused system prompt (Boards view)
     conversation_id: str = ""  # optional: target a persisted conversation
 
 
@@ -505,6 +719,7 @@ class ConversationChatRequest(BaseModel):
     repo: str = ""
     flow_context: dict = {}
     planner: bool = False
+    boards: bool = False  # board-focused system prompt (Boards view)
 
 
 def _build_ai_context(graph: dict, entry_point_id: str, node: dict) -> tuple[str, str]:
@@ -518,7 +733,8 @@ def _build_ai_context(graph: dict, entry_point_id: str, node: dict) -> tuple[str
     """
     from engine.context_builder import ContextBuilder
 
-    cb = ContextBuilder(graph)
+    boards = PROJECT_STORE.load_boards(pid).get("boards", [])
+    cb = ContextBuilder(graph, boards=boards)
 
     # Global mode — no specific entry point selected
     if not entry_point_id:
@@ -675,12 +891,18 @@ def _call_llm(
         return {"available": False, "error": str(e)}
 
 
-def _build_chat_prompt(req, graph: dict) -> str:
+def _build_chat_prompt(req, graph: dict, pid: str = "") -> str:
     """Build the system prompt for a chat request (incl. flow/repo context)."""
     if req.planner:
         from engine.context_builder import ContextBuilder
-        cb = ContextBuilder(graph)
+        boards = PROJECT_STORE.load_boards(pid).get("boards", []) if pid else []
+        cb = ContextBuilder(graph, boards=boards)
         return cb.build_planner_prompt(req.repo or "")
+    if getattr(req, "boards", False):
+        from engine.context_builder import ContextBuilder
+        boards = PROJECT_STORE.load_boards(pid).get("boards", []) if pid else []
+        cb = ContextBuilder(graph, boards=boards)
+        return cb.build_boards_prompt()
 
     system_prompt, _ = _build_ai_context(graph, req.entry_point_id, req.node)
 
@@ -993,6 +1215,7 @@ def _stream_llm_events_v2(
         return
 
     from engine.graph_tools import execute_tool
+    from engine.boards.tools import BOARD_TOOL_NAMES, execute_board_tool
 
     url = _ai_base_url() + "/chat/completions"
     headers = {
@@ -1179,7 +1402,13 @@ def _stream_llm_events_v2(
                         "diagrams": tool_result.get("diagrams", []),
                     }
                 else:
-                    tool_result = execute_tool(graph, tool_name, tool_args)
+                    if tool_name in BOARD_TOOL_NAMES and pid:
+                        # Board tools read/write the synced boards via the MCP
+                        # provider (async) — dispatched separately from the pure
+                        # graph tools.
+                        tool_result = execute_board_tool(PROJECT_STORE, pid, tool_name, tool_args)
+                    else:
+                        tool_result = execute_tool(graph, tool_name, tool_args)
                     if tool_name == "task_complete":
                         yield {
                             "type": "task_complete",
@@ -1296,7 +1525,7 @@ async def ai_chat(pid: str, req: ChatRequest):
     from engine.graph_tools import get_tool_definitions
 
     graph = _load_graph(pid)
-    system_prompt = _build_chat_prompt(req, graph)
+    system_prompt = _build_chat_prompt(req, graph, pid=pid)
 
     # Convert messages to plain dicts
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
@@ -1325,7 +1554,7 @@ async def ai_chat_stream(pid: str, req: ChatRequest):
     from engine.graph_tools import get_tool_definitions
 
     graph = _load_graph(pid)
-    system_prompt = _build_chat_prompt(req, graph)
+    system_prompt = _build_chat_prompt(req, graph, pid=pid)
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     tools = get_tool_definitions()
 
@@ -1469,7 +1698,7 @@ async def conversation_chat_stream(pid: str, cid: str, req: ConversationChatRequ
 
     graph = _load_graph(pid)
 
-    system_prompt = _build_chat_prompt(req, graph)
+    system_prompt = _build_chat_prompt(req, graph, pid=pid)
     system_prompt = _append_diagram_context(system_prompt, pid, cid, req.planner)
 
     conv.messages.append({"role": "user", "content": req.content})
@@ -1483,6 +1712,9 @@ async def conversation_chat_stream(pid: str, cid: str, req: ConversationChatRequ
     ])
 
     tools = get_tool_definitions(include_planner_tools=req.planner)
+    if PROJECT_STORE.load_boards(pid).get("boards"):
+        from engine.boards.tools import BOARD_TOOL_DEFINITIONS
+        tools = tools + BOARD_TOOL_DEFINITIONS
 
     _SENTINEL = object()
 
@@ -1541,7 +1773,7 @@ async def conversation_chat(pid: str, cid: str, req: ConversationChatRequest):
 
     graph = _load_graph(pid)
 
-    system_prompt = _build_chat_prompt(req, graph)
+    system_prompt = _build_chat_prompt(req, graph, pid=pid)
     system_prompt = _append_diagram_context(system_prompt, pid, cid, req.planner)
 
     conv.messages.append({"role": "user", "content": req.content})
@@ -1551,6 +1783,9 @@ async def conversation_chat(pid: str, cid: str, req: ConversationChatRequest):
     ])
 
     tools = get_tool_definitions(include_planner_tools=req.planner)
+    if PROJECT_STORE.load_boards(pid).get("boards"):
+        from engine.boards.tools import BOARD_TOOL_DEFINITIONS
+        tools = tools + BOARD_TOOL_DEFINITIONS
 
     # Run the v2 tool loop synchronously, collecting the streamed text.
     content_parts: list[str] = []

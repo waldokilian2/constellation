@@ -1,131 +1,64 @@
-﻿"""Windows accept-resilience patch for asyncio's proactor event loop.
+﻿"""Event-loop policy setup — avoid the Windows proactor accept bug.
 
-On Windows, a transient network-stack failure — WinError 64 "The specified
-network name is no longer available", WSAECONNRESET/ABORTED etc. — can make
-the proactor's AcceptEx callback fail. These happen during Wi-Fi blips,
-adapter resets and sleep/wake cycles, and are especially likely while the
-engine is cloning repos over the network. CPython's default handling for an
-accept failure CLOSES the listening socket: the server process keeps running
-but can never accept another connection, which looks exactly like the server
-dying.
+The problem (CPython #93821, open since 2022, unfixed in main through 3.14)
+---------------------------------------------------------------------------
+On Windows Python's default loop is the *proactor* loop (IOCP). Its accept
+loop, ``BaseProactorEventLoop._start_serving``, treats *any* ``OSError`` from an
+overlapped ``AcceptEx`` as fatal and closes the listening socket. A transient
+client abort — ``WinError 64`` (``ERROR_NETNAME_DELETED``) / ``WSAECONNRESET``,
+common on this app's multi-poll landing page — therefore makes the server
+unreachable while it keeps looking alive. ``GetOverlappedResult`` reports these
+as the generic ``ERROR_NETNAME_DELETED`` rather than the specific WSA error, so
+the loop can't tell a fatal failure from a benign client RST.
 
-This module installs a subclassed proactor loop whose accept loop treats
-transient errnos as retryable — it logs a warning and reschedules the accept
-instead of closing the socket. Installed from ``server.py`` at import time,
-before uvicorn creates the event loop. The classifier is a pure function so
-the behaviour is unit-testable; the loop reimplementation is version-guarded
-(CPython 3.13, the version this repo is developed against).
+The fix
+-------
+The *selector* loop does not have this bug: ``BaseSelectorEventLoop._accept_connection``
+discards ``ConnectionAbortedError``, retries resource-exhaustion errors, and
+re-raises+ignores other ``OSError`` without ever closing the listener. It is the
+default on Linux/macOS. So we simply use the selector loop on Windows too. This
+eliminates the whole class of failure with **no coupling to CPython internals**
+— no private-method override, no version-pinning, no drift tests.
+
+Trade-offs (acceptable for this local dev server)
+-------------------------------------------------
+* Loses IOCP's scaling and the Windows ``select()`` ``FD_SETSIZE`` ceiling
+  (~512 sockets). Immaterial here: this is a developer tool whose connection
+  counts stay far below that.
+* The proactor is the only loop that supports ``asyncio`` subprocesses on
+  Windows. Not used by this server — it runs blocking ``subprocess.run`` in a
+  threadpool (``run_in_executor``), which works on any loop.
+
+Installed from ``server.py`` at import time, before uvicorn creates its loop.
 """
 from __future__ import annotations
 
 import asyncio
 import sys
 
-# ── transient-error classification (pure) ─────────────────────────
-
-# errnos that indicate a transient network blip rather than a fatal server
-# error: ERROR_NETNAME_DELETED, WSAENETDOWN, WSAENETRESET, WSAECONNABORTED,
-# WSAECONNRESET, WSAENOTCONN.
-TRANSIENT_ACCEPT_ERRNOS = frozenset({64, 10050, 10052, 10053, 10054, 10057})
+# On Windows we force the selector loop to dodge the proactor accept-close bug
+# (CPython #93821). Anywhere else the selector loop is already the default.
+TARGET_POLICY_KIND: str | None = "selector" if sys.platform.startswith("win") else None
 
 
-def is_transient_accept_error(exc: BaseException) -> bool:
-    """True when an accept failure is a retryable network blip."""
-    return isinstance(exc, OSError) and exc.errno in TRANSIENT_ACCEPT_ERRNOS
+def desired_policy_kind(platform: str = sys.platform) -> str | None:
+    """Pure: which loop-policy kind to install for the given platform.
+
+    Returns ``"selector"`` on Windows, ``None`` elsewhere. Pure and
+    platform-parametric so it is unit-testable on any OS.
+    """
+    return "selector" if platform.startswith("win") else None
 
 
-# ── resilient proactor loop (CPython 3.13, Windows only) ──────────
+def install() -> bool:
+    """Install the desired loop policy. Returns True when one was applied.
 
-if sys.platform == "win32" and sys.version_info[:2] == (3, 13):
-    from asyncio import proactor_events as _proactor_events
-    from asyncio import windows_events as _windows_events
-
-    def _resilient_start_serving(
-        self,
-        protocol_factory,
-        sock,
-        sslcontext=None,
-        server=None,
-        backlog=100,
-        ssl_handshake_timeout=None,
-        ssl_shutdown_timeout=None,
-    ):
-        """Copy of ProactorEventLoop._start_serving that retries transient errors.
-
-        Kept in lock-step with CPython 3.13's implementation; the only change
-        is the transient-error branch (retry via call_later) in the OSError
-        handler. The version guard above prevents this from running on a
-        Python whose internals differ.
-        """
-        def loop(f=None):
-            try:
-                if f is not None:
-                    conn, addr = f.result()
-                    if self._debug:
-                        _proactor_events.logger.debug(
-                            "%r got a new connection from %r: %r",
-                            server, addr, conn,
-                        )
-                    protocol = protocol_factory()
-                    if sslcontext is not None:
-                        self._make_ssl_transport(
-                            conn, protocol, sslcontext, server_side=True,
-                            extra={"peername": addr}, server=server,
-                            ssl_handshake_timeout=ssl_handshake_timeout,
-                            ssl_shutdown_timeout=ssl_shutdown_timeout,
-                        )
-                    else:
-                        self._make_socket_transport(
-                            conn, protocol,
-                            extra={"peername": addr}, server=server,
-                        )
-                if self.is_closed():
-                    return
-                f = self._proactor.accept(sock)
-            except OSError as exc:
-                if is_transient_accept_error(exc):
-                    # Network blip: keep the listener alive and retry shortly
-                    # instead of letting the default handler close the socket
-                    # (which makes the server unreachable for good).
-                    _proactor_events.logger.warning(
-                        "Transient accept error ignored (retrying): %r", exc
-                    )
-                    if not self.is_closed():
-                        self.call_later(1.0, loop)
-                    return
-                if sock.fileno() != -1:
-                    self.call_exception_handler({
-                        "message": "Accept failed on a socket",
-                        "exception": exc,
-                        "socket": _proactor_events.trsock.TransportSocket(sock),
-                    })
-                    sock.close()
-                elif self._debug:
-                    _proactor_events.logger.debug(
-                        "Accept failed on socket %r", sock, exc_info=True
-                    )
-            except asyncio.CancelledError:
-                sock.close()
-            else:
-                self._accept_futures[sock.fileno()] = f
-                f.add_done_callback(loop)
-
-        self.call_soon(loop)
-
-    class _ResilientProactorEventLoop(_windows_events.ProactorEventLoop):
-        _start_serving = _resilient_start_serving
-
-    class _ResilientWindowsPolicy(asyncio.WindowsProactorEventLoopPolicy):
-        def new_event_loop(self):
-            return _ResilientProactorEventLoop()
-
-    def install() -> bool:
-        """Install the resilient loop policy. Returns True when applied."""
-        asyncio.set_event_loop_policy(_ResilientWindowsPolicy())
-        return True
-
-else:  # pragma: no cover - only reached on non-Windows or other Python versions
-
-    def install() -> bool:
-        """No-op on platforms/Pythons without the patched proactor internals."""
+    No-op on non-Windows (the selector loop is already the default there).
+    """
+    kind = desired_policy_kind()
+    if kind is None:
         return False
+    if kind == "selector":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        return True
+    return False  # pragma: no cover - no other kinds are defined

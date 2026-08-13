@@ -55,6 +55,7 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
 
   const repos = (graph && graph.repos) || [];
   const channelCount = (graph && graph.cross_repo_links) ? graph.cross_repo_links.length : 0;
+  const entryPointCount = (graph && graph.entry_points) ? graph.entry_points.length : 0;
 
   const sendMsg = (text) => {
     if (!text.trim() || loading) return;
@@ -81,12 +82,6 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
               <path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" />
             </svg>
           </button>
-          {models.length > 0 && (
-            <select className="planner-chat-model" value={model}
-              onChange={(e) => setModel(e.target.value)} disabled={loading}>
-              {models.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-          )}
           <button className="planner-chat-new" onClick={newPlan} title="New plan">+ New Plan</button>
         </div>
       </div>
@@ -106,6 +101,13 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
         <span className="planner-ctx-dot" />
         <span className="planner-ctx-label">Context</span>
         <span className="planner-ctx-value">Architecture overview · {repos.length} repos · {channelCount} channels</span>
+        {models.length > 0 && (
+          <select className="planner-chat-model" value={model}
+            onChange={(e) => setModel(e.target.value)} disabled={loading}
+            title="Model">
+            {models.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        )}
       </div>
 
       {/* Messages */}
@@ -113,8 +115,13 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
         {messages.length === 0 && !loading && (
           <div className="chat-welcome">
             <div className="chat-welcome-icon">✦</div>
-            <p>Describe a change and the planner will map its impact across services.</p>
-            <p className="muted small">Plans render as markdown in the chat. The planner drives the right-side canvas with its <code>render_diagram</code> tool — ask it to add, replace, or remove diagrams there.</p>
+            <p className="planner-welcome-title">Plan architecture changes before you code</p>
+            <p className="muted small">Describe a change and the planner maps its blast radius across services — then renders diagrams for the affected flows on the right.</p>
+            <div className="planner-welcome-stats">
+              <span className="planner-welcome-stat"><b>{repos.length}</b> repos</span>
+              <span className="planner-welcome-stat"><b>{entryPointCount}</b> entry points</span>
+              <span className="planner-welcome-stat"><b>{channelCount}</b> channels</span>
+            </div>
           </div>
         )}
 

@@ -68,7 +68,8 @@ web/                 # React 18 + Vite frontend
   src/
     main.jsx         # entry point: createRoot(<App />)
     app.jsx          # Projects → Galaxy → Solar System → Path → Detail (~3600 lines)
-    galaxyLayout.js  # deterministic Galaxy layout (components + force relaxation, no deps)
+    galaxyLayout.js  # deterministic Galaxy layout (components + force relaxation,
+                     # post-fit resolver incl. island-vs-edge-curve clearance, no deps)
     styles.css       # SVG + CSS visualization styles
   dist/              # Vite build output (gitignored, created by npm run build)
   mock_server.py     # static in-memory backend for frontend dev

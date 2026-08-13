@@ -80,6 +80,21 @@ All changes are in `web/src/galaxyLayout.js` and `web/src/app.jsx`.
    so the greedy pass converges geometrically instead of oscillating on
    integer rounding; pill-vs-label pushes are direction-aware. The layout is
    re-centered afterwards (pure translation; preserves every clearance).
+8. **Isolated repos never cross an edge** (2026-08-13 follow-up) — the pill
+   checks cleared pills but not the *bare curve* between pill and orbs, so a
+   lone star (reporting-service) sat on the `order→payment` curve and its
+   label crossed two others. Two changes: (a) the resolver now builds one
+   pill per **directed** edge — a bidirectional pair renders two pills (one
+   per bend side) and previously the flipped-side pill was invisible to the
+   resolver; same-pair pill overlaps separate by lengthening the chord
+   (endpoint pushes would cancel). (b) A curve-corridor pass samples every
+   edge curve (12 segments) and pushes each island's orb (≥10px clearance)
+   and label (corners ≥5px, no sampled point inside the rect) clear of it.
+   Islands take the whole push in every constraint (orb-orb, label-orb,
+   pill-orb, pill-label, curve) — they have no edges pulling them back, so
+   the constellation never yields to a lone star. This applies to **all**
+   graphs: every render path goes through `layoutGalaxy`, so islands can
+   never sit on an edge in any project/viewport.
 
 ## Prototyped and rejected (with evidence)
 
@@ -113,6 +128,7 @@ and reports rect-vs-circle / rect-vs-rect intersections.
 | Synthetic 8-repo cycle @ 1920×1080 / 1280×800 | all zeros |
 | Synthetic 12-repo chain @ 1920×1080 / 800×600 | all zeros (overflows the small viewport; pan/zoom) |
 | **Real expanded Spring Boot graph: 11 repos, 17 edges, 19 directed link pairs** (9-repo connected constellation incl. 3 bidirectional pairs + 2 isolated islands) @ 1920×1080 / 1366×768 / 800×600 / 2560×1440 | **all zeros**; isoGap 156px |
+| **Island-vs-curve** (the follow-up): expanded graph @ 3 viewports + triangle+lone-star + hub star with 2 islands + 4+3 mixed — island orbs/labels never touch a curve; before the fix, reporting-service sat 28px onto the `order→payment` curve | **all zeros** |
 | Determinism (same input twice, 2–26 repos) | identical output |
 
 `npm run build` passes; the server serves the rebuilt bundle. The Python suite

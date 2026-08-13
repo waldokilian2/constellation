@@ -407,20 +407,21 @@ class SymbolIndex:
         return out
 
 
-    def resolve_call(
+    def resolve_call_all(
         self,
         ci: TypeInfo,
         receiver: str,
         method_name: str,
         arity: Optional[int] = None,
         local_types: Optional[dict[str, str]] = None,
-    ) -> tuple[Optional[MethodInfo], bool, Optional[str]]:
-        """Resolve a method call to a definition.
+    ) -> list[MethodInfo]:
+        """All candidate definitions for a call — for reachability fan-out.
 
-        Returns ``(method, ambiguous, receiver_type_simple)``. ``ambiguous`` is
-        True when the call could not be uniquely resolved (multiple candidates).
-        Strategy: resolve receiver → type → (interface→impls or concrete class)
-        → find the method there, arity-filtered when possible.
+        Like {@link resolve_call} but returns EVERY candidate instead of
+        picking one. Used by the dead-code reachability walk so a method
+        reachable through ANY implementation of an interface (polymorphic
+        dispatch) is not flagged unreachable. The displayed call trees keep
+        the single-target AMBIGUOUS behaviour via {@link resolve_call}.
         """
         local_types = local_types or {}
         recv_type = ""
@@ -467,6 +468,38 @@ class SymbolIndex:
             narrowed = [m for m in cands if len(m.param_types) == arity]
             if narrowed:
                 cands = narrowed
+        return cands
+
+    def resolve_call(
+        self,
+        ci: TypeInfo,
+        receiver: str,
+        method_name: str,
+        arity: Optional[int] = None,
+        local_types: Optional[dict[str, str]] = None,
+    ) -> tuple[Optional[MethodInfo], bool, Optional[str]]:
+        """Resolve a method call to a definition.
+
+        Returns ``(method, ambiguous, receiver_type_simple)``. ``ambiguous`` is
+        True when the call could not be uniquely resolved (multiple candidates).
+        Strategy: resolve receiver → type → (interface→impls or concrete class)
+        → find the method there, arity-filtered when possible. When several
+        candidates exist (e.g. multiple interface impls), the first is returned
+        for display; use {@link resolve_call_all} to enumerate all of them.
+        """
+        recv_type = ""
+        if not receiver or receiver in ("this", "super"):
+            recv_type = ci.simple_name
+        elif local_types and receiver in local_types:
+            recv_type = local_types[receiver]
+        else:
+            ft = self.field_type(ci, receiver)
+            if ft:
+                recv_type = ft
+            elif receiver in self.by_simple and len(self.by_simple[receiver]) == 1:
+                recv_type = receiver
+
+        cands = self.resolve_call_all(ci, receiver, method_name, arity=arity, local_types=local_types)
 
         if not cands:
             return None, False, recv_type or None
@@ -475,7 +508,6 @@ class SymbolIndex:
             return cands[0], False, recv_type or None
 
         # Multiple candidates — prefer one in the receiver's own class.
-        own = [m for m in cands if any(cc.simple_name == m.class_simple for cc in candidate_classes)]
         # Prefer a unique class among candidates.
         classes = {m.class_simple for m in cands}
         if len(classes) == 1:

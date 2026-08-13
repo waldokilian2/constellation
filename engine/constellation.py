@@ -21,6 +21,7 @@ from .entry_detector import EntryPointDetector
 from .call_graph import CallGraphBuilder, _is_trivial_definition
 from .cross_repo import CrossRepoLinker
 from .symbol_index import SymbolIndex
+from .languages import java_ast
 from .models import ConstellationGraph, CallNode, ConfidenceTag
 
 
@@ -112,12 +113,16 @@ class ConstellationEngine:
         # unlike the display trees) so deep-but-reachable methods aren't flagged.
         reached = builder.compute_reachable(all_entry_points)
         # Candidate pool = indexed methods minus pure-contract declarations.
-        # Interface methods have no body — they're contracts, not dead code, so
-        # they can never be "unreachable" in a meaningful sense.
+        # A method with no body is a contract (interface method, abstract
+        # method in an abstract class, or a native method). Such methods are
+        # dispatched dynamically (e.g. gRPC *ImplBase overrides, polymorphic
+        # dispatch) and can never be "reached" via a static call-graph walk,
+        # so flagging them unreachable is always a false positive. Keying off
+        # the body (not the declaring-type kind) covers interfaces AND abstract
+        # classes uniformly.
         candidate_methods = []
         for m in index.methods:
-            ci = index.class_for_method(m)
-            if ci and ci.kind == "interface":
+            if m.node is not None and java_ast.get_method_body(m.node) is None:
                 continue
             candidate_methods.append(m)
         methods_total = len(candidate_methods)

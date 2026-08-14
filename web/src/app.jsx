@@ -1345,9 +1345,19 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
     if (!isFinite(l)) return { x: 0, y: 0, zoom: 1 };
     const cw = r - l, ch = b - t;
     const zoom = Math.min(1, (W - 90 * 2) / cw, (H - 90 * 2) / ch);
+    // Center on the ORB CENTROID (mass center), not the content bbox — the
+    // constellation should balance left/right and top/bottom.  Clamp so the
+    // full bbox (labels, pills, arc envelopes) stays within the margins;
+    // when the bbox is asymmetric, the centroid wins until a side would
+    // leave the frame.
+    let sx = 0, sy = 0;
+    positions.forEach((p) => { sx += p.x; sy += p.y; });
+    const ccx = sx / positions.length, ccy = sy / positions.length;
+    const xMin = 90 - l * zoom, xMax = (W - 90) - r * zoom;
+    const yMin = 90 - t * zoom, yMax = (H - 90) - b * zoom;
     return {
-      x: 90 - l * zoom,
-      y: (H - ch * zoom) / 2 - t * zoom,
+      x: Math.max(xMin, Math.min(xMax, W / 2 - ccx * zoom)),
+      y: Math.max(yMin, Math.min(yMax, H / 2 - ccy * zoom)),
       zoom,
     };
   }, [positions, pillPlacement, edges, posMap, edgeBends, getSide, W, H]);

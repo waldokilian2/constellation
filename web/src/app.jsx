@@ -430,7 +430,7 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, 
           <button
             className={"mode-btn" + (mode === "dead" ? " active" : "")}
             onClick={() => onModeChange("dead")}
-          >Dead code</button>
+          >Gaps</button>
           <button
             className={"mode-btn" + (mode === "planner" ? " active" : "")}
             onClick={() => onModeChange("planner")}
@@ -580,9 +580,6 @@ function buildCrumbs(view, mode, graph, flows, projectName, nav) {
     if (view.name === "galaxy") {
       return [{ label: "Projects", onClick: nav.goProjects }, projectCrumb(true)];
     }
-    if (view.name === "gaps") {
-      return [...root, { label: "Gaps", current: true }];
-    }
     if (view.name === "solar") {
       return [...root, { label: view.repo, current: true }];
     }
@@ -598,14 +595,14 @@ function buildCrumbs(view, mode, graph, flows, projectName, nav) {
     }
   } else if (mode === "dead") {
     if (view.name === "dead") {
-      return [...root, { label: "Dead code", current: true }];
+      return [...root, { label: "Gaps", current: true }];
     }
     if (view.name === "path") {
       const ep = graph && (graph.entry_points || []).find((e) => e.id === view.entryId);
       if (ep) {
         return [
           ...root,
-          { label: "Dead code", onClick: nav.goDead },
+          { label: "Gaps", onClick: nav.goDead },
           { label: ep.repo }, // context — no repo page in dead-code mode
           { label: methodLabel(ep), current: true },
         ];
@@ -1498,11 +1495,6 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
   );
 }
 
-/* ---------------- Gaps / Orphans View ---------------- */
-// Lists orphan producers, orphan consumers, and repo dependency cycles.
-// Data comes from detectOrphans/detectCycles (client-side mirrors of the
-// engine tools); entries link into the existing Path view (consumers) or a
-// source viewer (producers).
 /* ---------------- Info tip (hover/focus explanation) ---------------- */
 // Small ⓘ next to a heading; reveals a styled bubble on hover or keyboard focus.
 function InfoTip({ text }) {
@@ -1540,77 +1532,6 @@ function CollapsibleSection({ title, count, help, children, defaultOpen = true }
       </header>
       {open && <div className="gaps-section-body">{children}</div>}
     </section>
-  );
-}
-
-function GapsView({ graph, onOpenEntry, onOpenSource }) {
-  const orphans = useMemo(() => detectOrphans(graph), [graph]);
-  const cyc = useMemo(() => detectCycles(graph), [graph]);
-  const totalGaps = orphans.summary.orphan_producers + orphans.summary.orphan_consumers;
-
-  const section = (title, count, help, body) => (
-    <CollapsibleSection key={title} title={title} count={count} help={help}>{body}</CollapsibleSection>
-  );
-  const empty = (msg) => <div className="gaps-empty">{msg}</div>;
-
-  return (
-    <div className="gaps">
-      <div className="view-top">
-        <div className="view-hint">
-          {totalGaps} unconnected channel{totalGaps === 1 ? "" : "s"} ·{" "}
-          {cyc.summary.cycle_count} cycle{cyc.summary.cycle_count === 1 ? "" : "s"}
-        </div>
-      </div>
-      <div className="gaps-scroll">
-        {section("Orphan producers", orphans.summary.orphan_producers,
-          "Emits to a message channel no consumer in this project listens on — possibly a dead contract, a misnamed queue/topic, or a service not yet added.",
-          orphans.orphan_producers.length === 0
-            ? empty("Every message producer has a consumer.")
-            : orphans.orphan_producers.map((p) => (
-              <button className="gaps-card" key={p.id} onClick={() => onOpenSource(p.file, p.line)}>
-                <div className="gaps-card-top">
-                  <span className="gaps-channel mono">{p.channel}</span>
-                  <span className="gaps-repo">{p.repo}</span>
-                </div>
-                <div className="gaps-card-sub mono">
-                  {p.method}{p.file ? " · " + fmtFile(p.file) + (p.line ? ":" + p.line : "") : ""}
-                </div>
-                <span className="gaps-card-tag prod">no consumer</span>
-              </button>
-            ))
-        )}
-
-        {section("Orphan consumers", orphans.summary.orphan_consumers,
-          "Listens on a message channel no producer in this project emits to — possibly a dead listener or a typo in the queue/topic name.",
-          orphans.orphan_consumers.length === 0
-            ? empty("Every message consumer has a producer.")
-            : orphans.orphan_consumers.map((c) => (
-              <button className="gaps-card" key={c.id} onClick={() => onOpenEntry(c.id)}>
-                <div className="gaps-card-top">
-                  <span className="gaps-channel mono">{c.channel}</span>
-                  <span className="gaps-repo">{c.repo}</span>
-                </div>
-                <div className="gaps-card-sub mono">
-                  {c.method}{c.file ? " · " + fmtFile(c.file) + (c.line ? ":" + c.line : "") : ""}
-                </div>
-                <span className="gaps-card-tag cons">no producer</span>
-              </button>
-            ))
-        )}
-
-        {section("Dependency cycles", cyc.summary.cycle_count,
-          "Circular repo dependencies through channel edges (e.g. A → B → A) — an architectural smell where services can't be deployed or changed independently.",
-          cyc.cycles.length === 0
-            ? empty("No circular repo dependencies.")
-            : cyc.cycles.map((cy, i) => (
-              <div className="gaps-card cycle" key={i}>
-                <div className="gaps-cycle-chain mono">{cy.repos.join(" → ")}</div>
-                <div className="gaps-cycle-chans mono">{cy.channels.join(", ")}</div>
-              </div>
-            ))
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -1692,9 +1613,12 @@ function SourceModal({ pid, file, line, onClose }) {
   );
 }
 
-/* ---------------- Dead Code View ---------------- */
-// A top-level mode (next to Topology / Flows). Lists unreachable methods,
-// thin handlers, and isolated repos. Reuses the Gaps-view aesthetic.
+/* ---------------- Gaps / Dead Code View (split diptych) ---------------- */
+// A top-level mode (next to Topology / Flows). Two independently scrolling
+// columns: dead code on the left (unreachable methods, thin handlers,
+// isolated repos — rose accent, broken-satellite motif) and gaps on the right
+// (orphan producers/consumers, dependency cycles — amber accent), split by a
+// rift divider. Each column's glass header is sticky while it scrolls.
 /* ---------------- Broken satellite (dead-code background motif) ---------------- */
 // A single broken-satellite image drifting slowly behind the dead-code list —
 // the wreckage metaphor for abandoned code. Purely decorative.
@@ -1712,7 +1636,10 @@ function BrokenSatellite() {
 
 function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
   const dc = useMemo(() => detectDeadCode(graph), [graph]);
+  const orphans = useMemo(() => detectOrphans(graph), [graph]);
+  const cyc = useMemo(() => detectCycles(graph), [graph]);
   const reachable = Math.max(0, dc.methods_total - dc.unreachable_methods.length);
+  const totalGaps = orphans.summary.orphan_producers + orphans.summary.orphan_consumers;
 
   const section = (title, count, help, body) => (
     <CollapsibleSection key={title} title={title} count={count} help={help}>{body}</CollapsibleSection>
@@ -1720,21 +1647,26 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
   const empty = (msg) => <div className="gaps-empty">{msg}</div>;
 
   return (
-    <div className="gaps dead">
-      <div className="dead-bg" aria-hidden="true" />
+    <div className="gaps dead split">
       <BrokenSatellite />
-      <div className="view-top">
-        <div className="view-hint">
-          {dc.method_index_available
-            ? dc.unreachable_methods.length + " unreachable of " + dc.methods_total +
-              " methods · " + reachable + " reachable"
-            : "thin handlers & isolated repos"}
-          {" · " + dc.thin_handlers.length + " thin handler" + (dc.thin_handlers.length === 1 ? "" : "s")}
-        </div>
-      </div>
-      <div className="gaps-scroll">
+
+      {/* ── Left: dead code (rose) ── */}
+      <section className="split-col dead-col" aria-label="Dead code">
+        <header className="split-col-head">
+          <div className="split-col-title">
+            <span className="split-dot dead" aria-hidden="true" />
+            Dead code
+          </div>
+          <div className="split-col-stats mono">
+            {dc.method_index_available
+              ? dc.unreachable_methods.length + " of " + dc.methods_total + " methods unreachable · " +
+                reachable + " reachable"
+              : "method index unavailable"}
+            {" · " + dc.thin_handlers.length + " thin · " + dc.isolated_repos.length + " isolated"}
+          </div>
+        </header>
         {!dc.method_index_available && (
-          <div className="gaps-empty dead-note">
+          <div className="gaps-empty dead-note split-note">
             Unreachable-method detection needs a graph from a recent engine run
             (with method indexing). Regenerate this project's graph to enable it —
             thin handlers and isolated repos are still shown below.
@@ -1790,7 +1722,72 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
               </div>
             ))
         )}
-      </div>
+      </section>
+
+      {/* ── Rift divider (rose → amber seam) ── */}
+      <div className="split-rift" aria-hidden="true" />
+
+      {/* ── Right: gaps (amber) ── */}
+      <section className="split-col gaps-col" aria-label="Gaps">
+        <header className="split-col-head">
+          <div className="split-col-title">
+            <span className="split-dot gap" aria-hidden="true" />
+            Gaps
+          </div>
+          <div className="split-col-stats mono">
+            {totalGaps} unconnected channel{totalGaps === 1 ? "" : "s"} ·{" "}
+            {cyc.summary.cycle_count} cycle{cyc.summary.cycle_count === 1 ? "" : "s"}
+          </div>
+        </header>
+
+        {section("Orphan producers", orphans.summary.orphan_producers,
+          "Emits to a message channel no consumer in this project listens on — possibly a dead contract, a misnamed queue/topic, or a service not yet added.",
+          orphans.orphan_producers.length === 0
+            ? empty("Every message producer has a consumer.")
+            : orphans.orphan_producers.map((p) => (
+              <button className="gaps-card" key={p.id} onClick={() => onOpenSource(p.file, p.line)}>
+                <div className="gaps-card-top">
+                  <span className="gaps-channel mono">{p.channel}</span>
+                  <span className="gaps-repo">{p.repo}</span>
+                </div>
+                <div className="gaps-card-sub mono">
+                  {p.method}{p.file ? " · " + fmtFile(p.file) + (p.line ? ":" + p.line : "") : ""}
+                </div>
+                <span className="gaps-card-tag prod">no consumer</span>
+              </button>
+            ))
+        )}
+
+        {section("Orphan consumers", orphans.summary.orphan_consumers,
+          "Listens on a message channel no producer in this project emits to — possibly a dead listener or a typo in the queue/topic name.",
+          orphans.orphan_consumers.length === 0
+            ? empty("Every message consumer has a producer.")
+            : orphans.orphan_consumers.map((c) => (
+              <button className="gaps-card" key={c.id} onClick={() => onOpenEntry(c.id)}>
+                <div className="gaps-card-top">
+                  <span className="gaps-channel mono">{c.channel}</span>
+                  <span className="gaps-repo">{c.repo}</span>
+                </div>
+                <div className="gaps-card-sub mono">
+                  {c.method}{c.file ? " · " + fmtFile(c.file) + (c.line ? ":" + c.line : "") : ""}
+                </div>
+                <span className="gaps-card-tag cons">no producer</span>
+              </button>
+            ))
+        )}
+
+        {section("Dependency cycles", cyc.summary.cycle_count,
+          "Circular repo dependencies through channel edges (e.g. A → B → A) — an architectural smell where services can't be deployed or changed independently.",
+          cyc.cycles.length === 0
+            ? empty("No circular repo dependencies.")
+            : cyc.cycles.map((cy, i) => (
+              <div className="gaps-card cycle" key={i}>
+                <div className="gaps-cycle-chain mono">{cy.repos.join(" → ")}</div>
+                <div className="gaps-cycle-chans mono">{cy.channels.join(", ")}</div>
+              </div>
+            ))
+        )}
+      </section>
     </div>
   );
 }
@@ -5120,8 +5117,7 @@ function App() {
 
   const goGalaxy = () => { setSelectedNode(null); setView({ name: "galaxy" }); };
   const goFlowIndex = () => { setSelectedNode(null); setView({ name: "flowIndex" }); };
-  const goGaps = () => { setSelectedNode(null); setView({ name: "gaps" }); };
-  const goDead = () => { setSelectedNode(null); setView({ name: "dead" }); };
+  const goDead = () => { setSelectedNode(null); setMode("dead"); setView({ name: "dead" }); };
   const goBoards = () => { setSelectedNode(null); setView({ name: "boards" }); };
   const goSolar = (repo) => { setSelectedNode(null); setView({ name: "solar", repo }); };
   const goFlow = (flowId) => { setSelectedNode(null); setView({ name: "flow", flowId }); };
@@ -5140,7 +5136,7 @@ function App() {
   const crumbs = useMemo(
     () => buildCrumbs(view, mode, graph, flows, (activeMeta && activeMeta.name) || "", {
       goProjects: backToProjects,
-      goGalaxy, goGaps, goDead, goBoards, goSolar, goFlowIndex, goFlow,
+      goGalaxy, goDead, goBoards, goSolar, goFlowIndex, goFlow,
     }),
     [view, mode, graph, flows, activeMeta] // eslint-disable-line
   );
@@ -5235,22 +5231,12 @@ function App() {
             <GalaxyView
               graph={graph}
               dims={dims}
-              onOpenGaps={() => { setSelectedNode(null); setView({ name: "gaps" }); }}
+              onOpenGaps={() => switchMode("dead")}
               onSelectRepo={(repo, e) => {
                 const [x, y] = centerOf(e && e.currentTarget);
                 drill(x, y, () => { setSelectedNode(null); setView({ name: "solar", repo }); });
               }}
               compare={compare}
-            />
-          </div>
-        )}
-        {mode === "topology" && view.name === "gaps" && (
-          <div className="view" key="gaps">
-            <GapsView
-              graph={graph}
-              pid={activeId}
-              onOpenEntry={(id) => { setSelectedNode(null); setView({ name: "path", entryId: id }); }}
-              onOpenSource={(file, line) => setSourceModal({ file, line })}
             />
           </div>
         )}

@@ -5705,19 +5705,25 @@ function ProjectCard({ index, p, updates, diff, onOpen, onAddRepo, onRescan, onD
       <div className="pc-meta muted">
         {repos.length} repos · {stats.entry_points || 0} entry points · {stats.cross_repo_links || 0} links
       </div>
-      {changedCount > 0 && (
-        // Deliberate exception to the canvas symbol-unification: the landing
-        // page has no legend and ample room, so the project card keeps full
-        // prose ("+1 entry point") instead of the concise "+1" canvas notation.
-        <div className="pc-diff" title="Since last scan">
-          <span className="pc-diff-label">since last scan:</span>
-          {s.entry_points_added > 0 && <span className="diff-chip added">+{s.entry_points_added} entry point{s.entry_points_added > 1 ? "s" : ""}</span>}
-          {s.entry_points_changed > 0 && <span className="diff-chip changed">~{s.entry_points_changed} entry point{s.entry_points_changed > 1 ? "s" : ""}</span>}
-          {s.entry_points_removed > 0 && <span className="diff-chip removed">−{s.entry_points_removed} entry point{s.entry_points_removed > 1 ? "s" : ""}</span>}
-          {s.links_added > 0 && <span className="diff-chip added">+{s.links_added} channel{s.links_added > 1 ? "s" : ""}</span>}
-          {s.links_removed > 0 && <span className="diff-chip removed">−{s.links_removed} channel{s.links_removed > 1 ? "s" : ""}</span>}
-        </div>
-      )}
+      {/* Always rendered so every card keeps the same row structure and the
+          footer (Updated / Manage) lines up across the grid. */}
+      <div className="pc-diff" title="Since last scan">
+        {/* Deliberate exception to the canvas symbol-unification: the landing
+            page has no legend and ample room, so the project card keeps full
+            prose ("+1 entry point") instead of the concise "+1" canvas notation. */}
+        <span className="pc-diff-label">since last scan:</span>
+        {changedCount > 0 ? (
+          <>
+            {s.entry_points_added > 0 && <span className="diff-chip added">+{s.entry_points_added} entry point{s.entry_points_added > 1 ? "s" : ""}</span>}
+            {s.entry_points_changed > 0 && <span className="diff-chip changed">~{s.entry_points_changed} entry point{s.entry_points_changed > 1 ? "s" : ""}</span>}
+            {s.entry_points_removed > 0 && <span className="diff-chip removed">−{s.entry_points_removed} entry point{s.entry_points_removed > 1 ? "s" : ""}</span>}
+            {s.links_added > 0 && <span className="diff-chip added">+{s.links_added} channel{s.links_added > 1 ? "s" : ""}</span>}
+            {s.links_removed > 0 && <span className="diff-chip removed">−{s.links_removed} channel{s.links_removed > 1 ? "s" : ""}</span>}
+          </>
+        ) : (
+          <span className="diff-chip none">No changes</span>
+        )}
+      </div>
       <div className="pc-repos">
         {repos.slice(0, 4).map((r) => (
           <span className="repo-chip" key={r.name} title={r.source}>{r.name}</span>

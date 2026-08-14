@@ -3,7 +3,8 @@
 > Date: 2026-08-14 · Area: `web/src/galaxyLayout.js` + `web/src/app.jsx` GalaxyView/FlowView
 > Triggered by: design review feedback — "planets look too squashed / too clustered",
 > "no labels should overlap".
-> Status: analysis complete, measurements taken against the real seeded graphs; fix NOT yet implemented.
+> Status: **implemented and verified** (2026-08-14) — all six items P1–P6 shipped;
+> §8 records the measured before/after and the deviations from the plan.
 
 ## 0. Verdict summary
 
@@ -73,6 +74,12 @@ Spring Boot spacing is not tight in raw numbers (min inter-orb gap 165px, median
 avg edge 510px, 0/55 pairs at the floor) — the "squashed" look there is caused by the
 **clutter density**: pills resting 4.6px off orbs, curves threading under planets, and
 the cropped initial view. PetClinic is the opposite failure: literal label collisions.
+
+> Caveat on the curve-crossing numbers in this table: the first harness measured
+> crossings on the bend side *without* the bidirectional flip rule, so two of the four
+> Spring Boot crossing rows mix rendered and non-rendered curves. The defect class was
+> real — the old resolver protected only islands from curves — and is now fixed and
+> re-measured with the exact renderer rule (§8).
 
 ## 3. Findings (root causes)
 
@@ -274,7 +281,74 @@ made them pass locally).
 - **The scale=1-with-pills rule** — keep it; pair it with P4's fit-zoom instead.
 - **FlowIndexView** — its scroll-grid model is unrelated to this work.
 
-## 8. References
+## 8. Implementation results (2026-08-14)
+
+All of P1–P6 are implemented in `web/src/galaxyLayout.js` and `web/src/app.jsx`
+(the running server on :8765 serves the rebuilt bundle). Measured with the same
+harness as §2 (real graphs, real module, app-exact helpers — including the
+bidirectional side-flip rule, which the original harness got wrong and which
+invalidated two of the §2 crossing measurements):
+
+| Metric | Before (measured) | After | Target | Status |
+|---|---|---|---|---|
+| PetClinic label-vs-label overlaps | 5 | **0** | 0 | ✅ |
+| PetClinic min orb-to-label margin | 11.8px | **54px** | ≥ 24px | ✅ |
+| Spring Boot min pill↔orb clearance | 4.6px | **31.3px** | ≥ 24px | ✅ |
+| Spring Boot third-party orbs under curves | 50.7px deep | **0** | 0 | ✅ |
+| Spring Boot tightest constellation gap | 165px | **210px** | ≥ 200px | ✅ |
+| Spring Boot initial view @ 1366×768 | cropped (zoom 1) | **fit zoom 0.57, whole world visible, centered in the visible stage** | 100% bbox | ✅ |
+| Java EE triangle | clean (sides 336/339/333) | clean (sides 458/462/465, gaps ≥ 210px) | unchanged or better | ✅ |
+| Determinism (same input twice) | byte-identical | byte-identical | unchanged | ✅ |
+| Layout time (Spring Boot) | ~17ms | 24–48ms | < 100ms | ✅ |
+
+Synthetic stress graphs (10-spoke hub, 12-chain + 3 islands, 8-cycle bidirectional,
+two bridged 4-cycles + 4 islands): zero orb-orb / label-label / label-orb overlaps,
+zero curve crossings, layout 10–214ms; tightest pill clearance 10px in the densest
+synthetic (no overlap).
+
+### Second review round (label-on-edge + camera, 2026-08-14)
+
+Design review of the shipped implementation surfaced five follow-ups, all fixed:
+
+1. **Labels must sit precisely ON their edge.** The first round's perpendicular
+   pill lifts (±24/48/72px off-curve) made labels float next to their lines. Lifts
+   are removed — `placeEdgePills` slides along the curve only, and a measured check
+   confirms every Spring Boot pill center lies on its rendered curve with
+   **0.000px deviation**. The arc-over corridor (`r + CURVE_CLEAR + pillW/2`)
+   guarantees on-curve spots exist; the resolver's pushes open the rest.
+2. **Wild arcs detached labels from their endpoints.** The first round let arcs
+   bow to ~500px (2.5× of up to 200px). The TOTAL bend is now capped at **220px**
+   (`edgeCurve`), and `resolveEdgeBends` stops at the cap — the arc-capped push
+   fallback finishes the corridor. Spring Boot went from 8 bent edges (several at
+   the 2.5× cap) to **1 edge at 1.27×**; crossings stayed 0.
+3. **Initial camera was off-center and bottom-cropped.** The galaxy canvas used
+   the full `window.innerHeight`, but the visible stage is `window − 72px` (the
+   fixed topbar); `.stage`'s overflow clipped the bottom 72px and the world sat
+   ~36px low. All four pan/zoom views (Galaxy, Solar, Flow, FlowIndex) now use
+   `H = dims.h − 72`, and the galaxy's fit bbox additionally samples the bent
+   edge curves (12 samples/edge) so no arc swings past the frame.
+4. **Hover was unreliable.** Each edge now renders an invisible 16px hit path
+   (`pointer-events: stroke`) alongside the ~2px visible line; the hover CSS
+   targets only the visible line; the hover popup is `pointer-events: none` so an
+   open popup never blocks nearby lines; ghost edges gained the same hover
+   handlers and show a "removed" status chip in the popup.
+
+**Deviations from the plan (all deliberate):**
+- `EDGE_BREATHING` went to **120** (not 96) to hit the ≥ 200px constellation-gap
+  target; island pairs keep their 139px lone-star floor.
+- `resolveEdgeBends` clears to `r + CURVE_CLEAR + pillW/2` (not just `r + 10`): the
+  pill rides the edge's own curve, so the corridor must fit the pill rect or the
+  pill placement has nowhere clear to land. The arc-capped fallback pushes to the
+  same corridor target at 0.8 damping.
+- Per-repo label half-widths via `labelHalfWidth(name)` (≈ 7.5px/char + 8px padding,
+  clamped 64–180px full width); `LABEL_HALF_W` stays as the exported cap.
+- A known non-goal held: layouts for pathologically dense synthetic graphs (e.g. a
+  10-spoke hub with a spoke ring AND long cross-chords, 30–60 repos, pills on every
+  edge) can still hit the 200-pass resolver cap in both the old and new code —
+  not a regression, and far beyond the real graphs (≤ 26 repos, ≤ 19 directed
+  edges). The `npm run build` passes and `python tests/run_tests.py` is green.
+
+## 9. References
 
 - `web/src/galaxyLayout.js` — all layout/resolver code (line numbers in §1/§3).
 - `web/src/app.jsx:1166` GalaxyView, `:3744` FlowView, `:301` usePanZoom.

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "check": "esbuild web/src/main.jsx --bundle --format=esm --platform=node --jsx=automatic --loader:.css=empty --loader:.png=dataurl --outfile=node_modules/.esbuild-check.mjs",
+    "build": "npm run check && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

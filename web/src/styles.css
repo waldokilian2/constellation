@@ -263,8 +263,12 @@ code { font-family: var(--mono); color: var(--cyan); }
 .edges { position: absolute; inset: 0; pointer-events: none; z-index: 30; overflow: visible; }
 .tree-edges { position: absolute; inset: 0; pointer-events: none; }
 .edge { pointer-events: all; }
+/* Invisible wide hit zone (see the .edge-hit path in GalaxyView) — the visible
+   stroke is ~2px; this makes every edge highlight reliably.  The hover rule
+   targets only the VISIBLE line so the hit zone never shrinks mid-hover. */
+.edge-hit { pointer-events: stroke; }
 .edge path { transition: opacity .2s, stroke-width .2s; }
-.edge:hover path { opacity: .95 !important; stroke-width: 2.6 !important; }
+.edge:hover path.edge-line { opacity: .95 !important; stroke-width: 2.6 !important; }
 .edge-label {
   fill: var(--cyan); font-size: 9px; font-weight: 500; font-family: var(--mono);
 }
@@ -302,11 +306,13 @@ code { font-family: var(--mono); color: var(--cyan); }
   fill: #a78bfa;
 }
 
-/* Bundled-edge hover popup (single line per direction) */
+/* Bundled-edge hover popup (single line per direction).  pointer-events: none —
+   the popup is purely informational and must never block hovering nearby lines. */
 .edge-popup {
   position: absolute;
   transform: translate(-50%, calc(-100% - 14px));
   z-index: 60;
+  pointer-events: none;
   min-width: 210px;
   max-width: 340px;
   background: rgba(10, 14, 26, .96);

@@ -257,7 +257,10 @@ code { font-family: var(--mono); color: var(--cyan); }
   transition: transform .4s cubic-bezier(.2, .7, .2, 1);
 }
 .canvas { position: relative; width: 100%; }
-.edges { position: absolute; inset: 0; pointer-events: none; z-index: 30; }
+/* overflow: visible — flow worlds can be larger than the canvas (fixed layout
+   spacing), so edges must render beyond the svg box; the pan-canvas clips them
+   at the viewport edge. */
+.edges { position: absolute; inset: 0; pointer-events: none; z-index: 30; overflow: visible; }
 .tree-edges { position: absolute; inset: 0; pointer-events: none; }
 .edge { pointer-events: all; }
 .edge path { transition: opacity .2s, stroke-width .2s; }

@@ -3592,7 +3592,15 @@ function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
 function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
   const W = dims.w, H = dims.h;
   const cmp = useMemo(() => diffStatus(compare), [compare]);
-  const pz = usePanZoom(".flow-repo-node, .flow-external-node");
+
+  // ── Pan/zoom — path-view style, with fit-to-flow bounds ──────
+  // Initial view = whole flow fitted at ≤100% (flows are laid out at readable
+  // size, so fit only ever shrinks to take in very large flows), start node
+  // pinned to a consistent left spot. Min zoom = that fit (zooming out further
+  // shows nothing new), max zoom = 300%. Wheel zoom stays anchored on cursor.
+  const containerRef = useRef(null);
+  const [animating, setAnimating] = useState(false);
+  const dragRef = useRef({ active: false, startX: 0, startY: 0, vpX: 0, vpY: 0, moved: false });
 
   // Build a DAG of repo-level nodes + edges from the flow step tree
   const { repoNodes, flowEdges, externalInputs } = useMemo(() => {
@@ -3661,15 +3669,15 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
     return { repoNodes, flowEdges: edges, externalInputs: externals };
   }, [flow]);
 
-  // Layout: assign (x, y) positions using depth (x) + sibling offset (y)
+  // Layout: assign (x, y) positions using depth (x) + sibling offset (y).
+  // Horizontal spacing is FIXED (like the path view) rather than stretched to
+  // the viewport, so edges stay short and very large flows grow a wide world
+  // the user pans across — the fit-to-flow zoom range handles the rest.
   const layout = useMemo(() => {
     const hasExternal = externalInputs.length > 0;
-    const maxDepth = Math.max(...repoNodes.map((r) => r.depth), 0);
-    const numCols = maxDepth + 1 + (hasExternal ? 1 : 0);
 
     const paddingX = 120;
-    const usableW = W - paddingX * 2;
-    const colStep = numCols > 1 ? usableW / (numCols - 1) : 0;
+    const colStep = 440; // leaves ~270px between nodes — enough for edge labels
     const cy = H / 2 - 30;
 
     // Group repos by depth to vertically offset siblings at the same depth
@@ -3715,7 +3723,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
   // (an edge always attaches at the side of each node that faces the other,
   // so a request + response pair share the same attachment points). Skip edges
   // (spanning >1 depth) get a strong vertical arc to avoid intermediate nodes.
-  const edgeGeom = (a, b, edgeIndex, totalEdges, isSkip) => {
+  const edgeGeom = (a, b, edgeIndex, totalEdges, isSkip, positions) => {
     const NODE_HALF_W = 85;
     const forward = b.x >= a.x;
     const start = { x: a.x + (forward ? NODE_HALF_W : -NODE_HALF_W), y: a.y };
@@ -3723,13 +3731,29 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
     const dx = end.x - start.x;
 
     if (isSkip) {
-      // Arc upward to clear intermediate repos
-      const arcHeight = Math.min(160, Math.max(90, Math.abs(dx) * 0.28));
-      const arcY = start.y - arcHeight; // negative = upward
+      // Arc upward to clear intermediate repos — and raise further above any
+      // node stacked in the columns between the endpoints (siblings sit in the
+      // space above the row and would otherwise be crossed by the arc). The
+      // curve dips below its control y (bezier midpoint = 0.125*(y0+y1) +
+      // 0.75*arcY), so solve for arcY above the tallest intermediate node.
+      let arcY = start.y - Math.min(160, Math.max(90, Math.abs(dx) * 0.28));
+      if (positions) {
+        positions.forEach((p) => {
+          if (p === a || p === b) return;
+          const between = p.x > Math.min(a.x, b.x) - 85 && p.x < Math.max(a.x, b.x) + 85;
+          if (!between) return;
+          const dip = 0.125 * (start.y + end.y) + 0.75 * arcY;
+          if (p.y - 55 < dip + 20) {
+            arcY = Math.min(arcY, (p.y - 55 - 30 - 0.125 * (start.y + end.y)) / 0.75);
+          }
+        });
+      }
       const cp1 = { x: start.x + dx * 0.25, y: arcY };
       const cp2 = { x: end.x - dx * 0.25, y: arcY };
       const path = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y} ${cp2.x} ${cp2.y} ${end.x} ${end.y}`;
-      const mid = { x: start.x + dx / 2, y: arcY };
+      // Label sits ON the curve at its apex (bezier midpoint), not at the
+      // control y — otherwise it floats above the arc.
+      const mid = { x: start.x + dx / 2, y: 0.125 * (start.y + end.y) + 0.75 * arcY };
       return { mid, path };
     }
 
@@ -3755,6 +3779,107 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
     return m;
   }, [flowEdges]);
 
+  // World-space bounds of every rendered node (repos 170×~110, externals 160×~110)
+  const flowBounds = useMemo(() => {
+    let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity;
+    const grow = (x0, y0, x1, y1) => {
+      if (x0 < l) l = x0;
+      if (x1 > r) r = x1;
+      if (y0 < t) t = y0;
+      if (y1 > b) b = y1;
+    };
+    layout.externalPos.forEach((p) => grow(p.x - 80, p.y - 50, p.x + 80, p.y + 60));
+    layout.positions.forEach((p) => grow(p.x - 85, p.y - 55, p.x + 85, p.y + 85));
+    if (!isFinite(l)) return { l: 0, r: W, t: 0, b: H };
+    return { l, r, t, b };
+  }, [layout, W, H]);
+
+  // Viewport that fits the whole flow (capped at 100% — never zoom IN to fit),
+  // with the flow's left edge pinned to a consistent starting spot.
+  const fitViewport = useMemo(() => {
+    const cw = flowBounds.r - flowBounds.l;
+    const ch = flowBounds.b - flowBounds.t;
+    const zoom = Math.min(1, (W - 90 * 2) / cw, (H - 90 * 2) / ch);
+    return {
+      x: 90 - flowBounds.l * zoom,
+      y: (H - ch * zoom) / 2 - flowBounds.t * zoom,
+      zoom,
+    };
+  }, [flowBounds, W, H]);
+  const minZoom = fitViewport.zoom;
+
+  const [viewport, setViewport] = useState(fitViewport);
+
+  // Refit whenever a different flow opens (keeps the "start at the starting
+  // spot" consistency the path view has). Resize does NOT refit — use ⤢.
+  const lastFlowRef = useRef(null);
+  useEffect(() => {
+    if (lastFlowRef.current !== flow.id) {
+      lastFlowRef.current = flow.id;
+      setAnimating(true);
+      setViewport(fitViewport);
+      setTimeout(() => setAnimating(false), 400);
+    }
+  }, [flow.id, fitViewport]);
+
+  const fitView = useCallback(() => {
+    setAnimating(true);
+    setViewport(fitViewport);
+    setTimeout(() => setAnimating(false), 400);
+  }, [fitViewport]);
+
+  const zoomTo = useCallback((delta) => {
+    setAnimating(true);
+    setViewport((vp) => ({ ...vp, zoom: Math.max(minZoom, Math.min(3, vp.zoom + delta)) }));
+    setTimeout(() => setAnimating(false), 400);
+  }, [minZoom]);
+
+  const onMouseDown = useCallback((e) => {
+    if (e.target.closest(".flow-repo-node, .flow-external-node")) return;
+    dragRef.current = {
+      active: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      vpX: viewport.x,
+      vpY: viewport.y,
+      moved: false,
+    };
+  }, [viewport.x, viewport.y]);
+
+  const onMouseMove = useCallback((e) => {
+    if (!dragRef.current.active) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragRef.current.moved = true;
+    setViewport((vp) => ({ ...vp, x: dragRef.current.vpX + dx, y: dragRef.current.vpY + dy }));
+  }, []);
+
+  const onMouseUp = useCallback(() => { dragRef.current.active = false; }, []);
+
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    setViewport((vp) => {
+      const delta = -e.deltaY * 0.0015;
+      const newZoom = Math.max(minZoom, Math.min(3, vp.zoom * (1 + delta)));
+      const zr = newZoom / vp.zoom;
+      return { x: mx - (mx - vp.x) * zr, y: my - (my - vp.y) * zr, zoom: newZoom };
+    });
+  }, [minZoom]);
+
+  // Wheel needs passive: false
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e) => onWheel(e);
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [onWheel]);
+
   return (
     <div className="galaxy flow-view">
       <div className="view-top">
@@ -3765,14 +3890,17 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
       </div>
       <div
         className="canvas pan-canvas"
-        ref={pz.containerRef}
+        ref={containerRef}
         style={{ height: H }}
-        {...pz.handlers}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseUp}
       >
         <div
-          className={"canvas-world" + (pz.animating ? " animating" : "")}
+          className={"canvas-world" + (animating ? " animating" : "")}
           style={{
-            transform: `translate(${pz.viewport.x}px, ${pz.viewport.y}px) scale(${pz.viewport.zoom})`,
+            transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
             transformOrigin: "0 0",
           }}
         >
@@ -3785,13 +3913,14 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
               <path d="M0,0 L10,5 L0,10 z" fill="#00e0a8" opacity="0.95" />
             </marker>
           </defs>
-          {/* External input dashed edges */}
+          {/* External input dashed edges — the origin node already labels the
+              channel (with verb for REST), so the edge stays unlabeled to avoid
+              duplicating the text. */}
           {externalInputs.map((ei, i) => {
             const target = posMap[ei.targetRepo];
             if (!target) return null;
             const start = { x: layout.externalPos[i].x, y: layout.externalPos[i].y };
             const end = { x: target.x, y: target.y };
-            const mid = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
             return (
               <g key={"ext-" + i}>
                 <path
@@ -3803,10 +3932,6 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
                   opacity="0.5"
                   markerEnd="url(#flow-arrow)"
                 />
-                <g className="edge-label-pill" transform={`translate(${mid.x}, ${mid.y})`}>
-                  <rect className="edge-label-bg" x={-(ei.channel.length * 6.5 + 22) / 2} y={-10} width={ei.channel.length * 6.5 + 22} height={20} rx={10} />
-                  <text className="edge-label" x={0} y={0} dominantBaseline="central" textAnchor="middle">{ei.channel}</text>
-                </g>
               </g>
             );
           })}
@@ -3824,7 +3949,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
               const pk = pe.from < pe.to ? pe.from + ">>" + pe.to : pe.to + ">>" + pe.from;
               return pk === pairKey;
             }).length;
-            const g = edgeGeom(a, b, idx, total, isSkip);
+            const g = edgeGeom(a, b, idx, total, isSkip, layout.positions);
             const isSync = e.kind === "http";
             const isResp = e.kind === "http-response";
             const st = cmp ? (cmp.chStatus[e.channel] || "same") : null;
@@ -3836,10 +3961,20 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
                 ? (e.verb ? e.verb + " " : "") + e.channel
                 : e.channel;
             const pillW = label.length * 6.5 + 22 + (st && st !== "same" ? 18 : 0);
+            // Keep the pill clear of node boxes: when the edge midpoint lands
+            // on a stacked sibling node (or a tight column), lift the pill
+            // above it so labels never sit on top of nodes.
+            let pillY = g.mid.y;
+            if (layout.positions.some((p) => Math.abs(p.x - g.mid.x) < 85 + pillW / 2 && Math.abs(p.y - pillY) < 55 + 14)) {
+              const above = layout.positions
+                .filter((p) => Math.abs(p.x - g.mid.x) < 85 + pillW / 2)
+                .map((p) => p.y - 55);
+              pillY = Math.min(...above) - 14 - 8;
+            }
             return (
               <g key={"fe-" + i}>
                 <path d={g.path} fill="none" stroke={stroke} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={dash} opacity={st === "same" && cmp ? "0.3" : (isSkip ? "0.4" : "0.55")} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
-                <g className={"edge-label-pill" + (isSync || isResp ? " sync" : "")} transform={`translate(${g.mid.x}, ${g.mid.y})`}>
+                <g className={"edge-label-pill" + (isSync || isResp ? " sync" : "")} transform={`translate(${g.mid.x}, ${pillY})`}>
                   <rect className={"edge-label-glow" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
                   <rect className={"edge-label-bg" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />
                   <text className={"edge-label" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={st && st !== "same" ? -9 : 0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
@@ -3898,7 +4033,12 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
         })}
         </div>
       </div>
-      {pz.zoomControls}
+      <div className="zoom-controls">
+        <button onClick={() => zoomTo(0.15)} title="Zoom in">+</button>
+        <span className="zoom-level">{Math.round(viewport.zoom * 100)}%</span>
+        <button onClick={() => zoomTo(-0.15)} title="Zoom out">−</button>
+        <button onClick={fitView} title="Reset view">⤢</button>
+      </div>
     </div>
   );
 }

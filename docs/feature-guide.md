@@ -107,27 +107,21 @@ calls it.
 - Click any repo node to jump to that entry point's call tree. Flows are the "show me the
   whole journey" feature — perfect for onboarding a new engineer.
 
-### 7. Gaps — half-wired architecture, surfaced
-**What it does:** Flags channels only half-wired: **orphan producers** and **orphan
-consumers**, plus **dependency cycles**.
+### 7. Gaps — what's broken and what you can delete
+**What it does:** One combined page flagging **orphan producers/consumers** and
+**dependency cycles** (half-wired architecture), plus **unreachable methods**,
+**thin handlers** (empty call trees), and **isolated repos** (no cross-repo links).
 
 **Talking points:**
-- "2 unconnected channels · 0 cycles" — a health check for your message topology.
-- Each gap shows the channel, the service, the handler method, and `file:line`, and
-  deep-links to the entry point.
-- This is the "your producer never shipped / nobody reads this topic" finder.
-
-### 8. Dead code — what you can delete
-**What it does:** Finds **unreachable methods**, **thin handlers** (empty call trees), and
-**isolated repos** (no cross-repo links).
-
-**Talking points:**
-- "4 unreachable of 78 methods · 74 reachable · 0 thin handlers" — a deletion backlog you
-  can actually justify, because it's computed from the real call graph.
-- Every item links to the source location.
+- "5 unreachable of 31 methods · 1 unconnected channel · 0 cycles" — a health check
+  *and* a deletion backlog you can actually justify, because it's computed from the
+  real call graph.
+- Every item shows channel/method, service, `file:line`, and deep-links to the entry
+  point or source.
 - "What this means" explainers on every section — self-documenting.
+- The galaxy's **"N repos with gaps"** pill jumps straight to this page.
 
-### 9. AI Change Planner — plan changes, not just chat
+### 8. AI Change Planner — plan changes, not just chat
 **What it does:** A multi-turn chat that has the architecture as context and can *render*
 its plan.
 
@@ -143,7 +137,7 @@ its plan.
 - **Past conversations** persist with message counts and are deletable — a real product
   feature, not a demo hack.
 
-### 10. AI assistant everywhere
+### 9. AI assistant everywhere
 **What it does:** A global chat floating over any view, plus chat surfaces in the planner.
 
 **Talking points:**
@@ -153,7 +147,7 @@ its plan.
   error rendered as a clear message — the pipeline is honest end to end).
 - Tool-use loop runs `search_code`, `get_channel_flow`, `trace_path`, etc. live.
 
-### 11. Twelve graph tools — one source of truth
+### 10. Twelve graph tools — one source of truth
 **What it does:** `search_code`, `get_node`, `find_callers`, `trace_path`,
 `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`,
 `find_orphans`, `find_cycles`, `find_dead_code`, `diff_graphs` — pure, deterministic
@@ -168,7 +162,7 @@ queries.
 - When a project has boards connected, the AI's toolset also gains `list_boards`,
   `list_board_items`, `move_board_item`, `add_board_comment`.
 
-### 12. MCP server — your coding agent sees the architecture
+### 11. MCP server — your coding agent sees the architecture
 **What it does:** Expose the whole thing to Claude Code / Cursor / any MCP agent.
 
 **Talking points:**
@@ -180,7 +174,7 @@ queries.
 - An agent can now answer "trace the path from the REST endpoint to the DB write" with
   grounded graph data instead of guessing.
 
-### 13. Boards — your issue tracker, inside the map
+### 12. Boards — your issue tracker, inside the map
 **What it does:** Connect a **GitHub Project** (Projects v2) or a **repo's issues** to a
 project and get a live kanban inside Constellation, synced through the official GitHub
 MCP server.
@@ -198,7 +192,7 @@ MCP server.
 - Each project keeps its own boards; **Disconnect** clears the cache without touching
   the source.
 
-### 14. Graph diff & compare — "what changed since the last scan"
+### 13. Graph diff & compare — "what changed since the last scan"
 **What it does:** Every rescan snapshots the previous graph; a pure `diff_graphs` tool
 computes exactly what changed, and **compare mode** overlays it onto every view
 (green = added, amber = changed, red = removed).
@@ -250,7 +244,7 @@ computes exactly what changed, and **compare mode** overlays it onto every view
 4. **Path:** click `createOrder` → call tree with `EXTRACTED` badges and `file:line`.
    *"Every call resolved to the real definition — confidence is displayed honestly."*
 5. **Flows:** open **Create Order** → 3 repos, 2 hops. *"A full journey across services."*
-6. **Gaps / Dead code:** flip tabs — *"we also tell you what's broken and what's dead."*
+6. **Gaps:** open the tab — *"we also tell you what's broken and what's dead."*
 7. **Planner:** open a conversation; the AI drafts a Mermaid plan into the preview panel.
    *"AI as an advisor that reads the same map you see — never hallucinates structure."*
 8. *(Optional)* **Boards:** a connected GitHub board as a live kanban — move a card, or

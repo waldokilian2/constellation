@@ -1524,6 +1524,25 @@ code { font-family: var(--mono); color: var(--cyan); }
   border-left: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+/* Model selector — sits in the context bar, right-aligned next to the context */
+.chat-ctx-model {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: inherit;
+  max-width: 140px;
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.chat-ctx-model option {
+  background: #0a0e1a;
+}
+
 /* Body (messages area) */
 .chat-window-body {
   flex: 1;

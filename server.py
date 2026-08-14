@@ -744,9 +744,10 @@ class ConversationChatRequest(BaseModel):
     flow_context: dict = {}
     planner: bool = False
     boards: bool = False  # board-focused system prompt (Boards view)
+    dead: bool = False  # dead-code-focused system prompt (Code Issues view)
 
 
-def _build_ai_context(graph: dict, entry_point_id: str, node: dict) -> tuple[str, str]:
+def _build_ai_context(graph: dict, entry_point_id: str, node: dict, pid: str = "") -> tuple[str, str]:
     """
     Build the structured system prompt and fetch source code.
 
@@ -757,7 +758,7 @@ def _build_ai_context(graph: dict, entry_point_id: str, node: dict) -> tuple[str
     """
     from engine.context_builder import ContextBuilder
 
-    boards = PROJECT_STORE.load_boards(pid).get("boards", [])
+    boards = PROJECT_STORE.load_boards(pid).get("boards", []) if pid else []
     cb = ContextBuilder(graph, boards=boards)
 
     # Global mode — no specific entry point selected
@@ -806,8 +807,13 @@ def _build_chat_prompt(req, graph: dict, pid: str = "") -> str:
         boards = PROJECT_STORE.load_boards(pid).get("boards", []) if pid else []
         cb = ContextBuilder(graph, boards=boards)
         return cb.build_boards_prompt()
+    if getattr(req, "dead", False):
+        from engine.context_builder import ContextBuilder
+        boards = PROJECT_STORE.load_boards(pid).get("boards", []) if pid else []
+        cb = ContextBuilder(graph, boards=boards)
+        return cb.build_dead_code_prompt()
 
-    system_prompt, _ = _build_ai_context(graph, req.entry_point_id, req.node)
+    system_prompt, _ = _build_ai_context(graph, req.entry_point_id, req.node, pid=pid)
 
     if req.flow_context:
         fc = req.flow_context

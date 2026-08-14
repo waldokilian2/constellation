@@ -346,6 +346,26 @@ class ProjectStore:
             shutil.rmtree(pdir, ignore_errors=True)
         return True
 
+    def rename(self, pid: str, name: str) -> Optional[dict]:
+        """Rename a project (display name only — id and on-disk dirs are unchanged).
+
+        The project id is a slug+hash derived from the original name, so a
+        rename never touches the filesystem layout, graphs, or repos; only the
+        ``name`` field in ``projects.json`` is updated. Returns the updated
+        metadata, or ``None`` if no such project exists. Raises ``ValueError``
+        for a blank name.
+        """
+        meta = self.get_project(pid)
+        if meta is None:
+            return None
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Project name cannot be empty")
+        meta["name"] = name
+        meta["updated_at"] = _now()
+        self._upsert(meta)
+        return meta
+
     # ── ingestion ──────────────────────────────────────────────────
 
     # ── git helpers ────────────────────────────────────────────────

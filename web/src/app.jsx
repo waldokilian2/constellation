@@ -5110,6 +5110,14 @@ function App() {
       .catch(() => {});
   };
 
+  // Rename a project (display name only). The API PATCHes the metadata and
+  // returns the updated record; we refresh the list and, if the active project
+  // was renamed, update the header immediately.
+  const renameProject = (pid, name) => {
+    refreshProjects();
+    if (pid === activeId) setActiveMeta((m) => (m ? { ...m, name } : m));
+  };
+
   const goGalaxy = () => { setSelectedNode(null); setView({ name: "galaxy" }); };
   const goFlowIndex = () => { setSelectedNode(null); setView({ name: "flowIndex" }); };
   const goGaps = () => { setSelectedNode(null); setView({ name: "gaps" }); };
@@ -5179,6 +5187,7 @@ function App() {
           onOpen={openProject}
           onNew={() => setIngest({ mode: "create" })}
           onDelete={deleteProject}
+          onRename={renameProject}
           updatesByPid={updatesByPid}
           diffsByPid={diffsByPid}
           onAddRepo={startAddRepo}
@@ -5515,8 +5524,11 @@ function StatusBadge({ status, stale }) {
   return <span className={"status-badge " + m.cls}>{m.label}</span>;
 }
 
-function ProjectCard({ index, p, updates, diff, onOpen, onAddRepo, onRescan, onDelete }) {
+function ProjectCard({ index, p, updates, diff, onOpen, onAddRepo, onRescan, onDelete, onRename }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const renameInputRef = useRef(null);
   const stats = p.stats || {};
   const repos = p.repos || [];
   const stale = !!(updates && updates.stale_count > 0);
@@ -5527,6 +5539,40 @@ function ProjectCard({ index, p, updates, diff, onOpen, onAddRepo, onRescan, onD
   const d = diff && diff.diff ? diff.diff : null;
   const s = d ? (d.summary || {}) : null;
   const changedCount = s ? s.entry_points_added + s.entry_points_removed + s.entry_points_changed + s.links_added + s.links_removed : 0;
+
+  // When the rename panel opens, focus + select the current name so the user
+  // can type over it immediately.
+  useEffect(() => {
+    if (renaming && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [renaming]);
+
+  const startRename = () => { setRenameValue(p.name || ""); setRenaming(true); };
+
+  // PATCH the project metadata; on success, refresh the list via the parent
+  // and update the header if this is the active project.
+  const commitRename = async () => {
+    const name = renameValue.trim();
+    if (!name || name === p.name) { setRenaming(false); return; }
+    try {
+      const res = await fetch(projPath(p.id, ""), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const t = await res.json().catch(() => null);
+        throw new Error((t && t.detail) || "Rename failed (HTTP " + res.status + ")");
+      }
+      close();
+      onRename && onRename(p.id, name);
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
   const trash = (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <polyline points="3 6 5 6 21 6"></polyline>
@@ -5581,42 +5627,80 @@ function ProjectCard({ index, p, updates, diff, onOpen, onAddRepo, onRescan, onD
         <>
           <div className="menu-backdrop" onClick={(e) => { e.stopPropagation(); close(); }} />
           <div className="manage-menu" onClick={(e) => e.stopPropagation()}>
-            <button
-              className="manage-item"
-              title={stale ? "Pull latest for the stale repo(s), then re-analyse" : "All repos are up to date"}
-              disabled={busy || !hasRemote || !stale}
-              onClick={() => { close(); onRescan(p, true); }}
-            >
-              ↑ Update{stale ? " · " + updates.stale_count + " stale" : ""}
-            </button>
-            <button
-              className="manage-item"
-              title="Re-extract the graph from the current source (no download)"
-              disabled={busy}
-              onClick={() => { close(); onRescan(p, false); }}
-            >
-              ↻ Rescan
-            </button>
-            <button
-              className="manage-item"
-              title="Add another repository to this project"
-              disabled={busy}
-              onClick={() => { close(); onAddRepo(p); }}
-            >
-              + Add repo
-            </button>
-            <div className="manage-sep" />
-            <button
-              className="manage-item danger"
-              title="Delete project"
-              disabled={busy}
-              onClick={() => {
-                close();
-                if (confirm("Delete project '" + p.name + "'? This removes its graph and cloned repos.")) onDelete(p.id);
-              }}
-            >
-              {trash} Delete
-            </button>
+            {renaming ? (
+              <div className="manage-rename">
+                <span className="manage-rename-label">Rename project</span>
+                <input
+                  ref={renameInputRef}
+                  className="text-input"
+                  type="text"
+                  value={renameValue}
+                  placeholder="Project name"
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    if (e.key === "Escape") setRenaming(false);
+                  }}
+                />
+                <div className="manage-rename-actions">
+                  <button className="manage-item" onClick={() => setRenaming(false)}>Cancel</button>
+                  <button
+                    className="manage-item"
+                    disabled={!renameValue.trim() || renameValue.trim() === p.name}
+                    onClick={commitRename}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <button
+                  className="manage-item"
+                  title={stale ? "Pull latest for the stale repo(s), then re-analyse" : "All repos are up to date"}
+                  disabled={busy || !hasRemote || !stale}
+                  onClick={() => { close(); onRescan(p, true); }}
+                >
+                  ↑ Update{stale ? " · " + updates.stale_count + " stale" : ""}
+                </button>
+                <button
+                  className="manage-item"
+                  title="Re-extract the graph from the current source (no download)"
+                  disabled={busy}
+                  onClick={() => { close(); onRescan(p, false); }}
+                >
+                  ↻ Rescan
+                </button>
+                <button
+                  className="manage-item"
+                  title="Add another repository to this project"
+                  disabled={busy}
+                  onClick={() => { close(); onAddRepo(p); }}
+                >
+                  + Add repo
+                </button>
+                <button
+                  className="manage-item"
+                  title="Rename this project"
+                  disabled={busy}
+                  onClick={() => { startRename(); }}
+                >
+                  ✎ Rename
+                </button>
+                <div className="manage-sep" />
+                <button
+                  className="manage-item danger"
+                  title="Delete project"
+                  disabled={busy}
+                  onClick={() => {
+                    close();
+                    if (confirm("Delete project '" + p.name + "'? This removes its graph and cloned repos.")) onDelete(p.id);
+                  }}
+                >
+                  {trash} Delete
+                </button>
+              </>
+            )}
           </div>
         </>
       )}
@@ -5624,7 +5708,7 @@ function ProjectCard({ index, p, updates, diff, onOpen, onAddRepo, onRescan, onD
   );
 }
 
-function ProjectsView({ projects, loading, onOpen, onNew, onDelete, updatesByPid, diffsByPid, onAddRepo, onRescan }) {
+function ProjectsView({ projects, loading, onOpen, onNew, onDelete, onRename, updatesByPid, diffsByPid, onAddRepo, onRescan }) {
   return (
     <div className="projects-view">
       <div className="projects-inner">
@@ -5663,6 +5747,7 @@ function ProjectsView({ projects, loading, onOpen, onNew, onDelete, updatesByPid
                 onAddRepo={onAddRepo}
                 onRescan={onRescan}
                 onDelete={onDelete}
+                onRename={onRename}
               />
             ))}
           </div>

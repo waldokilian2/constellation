@@ -2280,6 +2280,16 @@ code { font-family: var(--mono); color: var(--cyan); }
 .manage-item svg { flex: 0 0 auto; }
 .manage-sep { height: 1px; background: var(--border); margin: 3px 2px; }
 
+/* Inline rename panel inside the manage dropdown */
+.manage-rename { display: flex; flex-direction: column; gap: 8px; padding: 6px 4px; min-width: 200px; }
+.manage-rename-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-dim); padding: 0 4px;
+}
+.manage-rename .text-input { width: 100%; }
+.manage-rename-actions { display: flex; gap: 4px; justify-content: flex-end; }
+.manage-rename-actions .manage-item { padding: 5px 12px; font-size: 12px; }
+
 .status-badge {
   font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
   padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-strong);

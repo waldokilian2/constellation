@@ -153,15 +153,20 @@ its plan.
   error rendered as a clear message — the pipeline is honest end to end).
 - Tool-use loop runs `search_code`, `get_channel_flow`, `trace_path`, etc. live.
 
-### 11. Eleven graph tools — one source of truth
+### 11. Twelve graph tools — one source of truth
 **What it does:** `search_code`, `get_node`, `find_callers`, `trace_path`,
 `get_channel_flow`, `list_channels`, `get_source`, `get_architecture_overview`,
-`find_orphans`, `find_cycles`, `find_dead_code` — pure, deterministic queries.
+`find_orphans`, `find_cycles`, `find_dead_code`, `diff_graphs` — pure, deterministic
+queries.
 
 **Talking points:**
 - The **same functions** power the web UI, the REST API, and the MCP server — no drift.
+- `diff_graphs` compares two graph snapshots — the engine behind compare mode, exposed
+  to agents too.
 - `find_callers` = instant impact analysis ("if I change `save`, what entry points
   break?"). That single tool is a demo closer.
+- When a project has boards connected, the AI's toolset also gains `list_boards`,
+  `list_board_items`, `move_board_item`, `add_board_comment`.
 
 ### 12. MCP server — your coding agent sees the architecture
 **What it does:** Expose the whole thing to Claude Code / Cursor / any MCP agent.
@@ -175,12 +180,56 @@ its plan.
 - An agent can now answer "trace the path from the REST endpoint to the DB write" with
   grounded graph data instead of guessing.
 
+### 13. Boards — your issue tracker, inside the map
+**What it does:** Connect a **GitHub Project** (Projects v2) or a **repo's issues** to a
+project and get a live kanban inside Constellation, synced through the official GitHub
+MCP server.
+
+**Talking points:**
+- **Connect in one form** — owner + project number (or a repo) → items and columns pull
+  immediately via the GitHub MCP server; the real project title becomes the board name.
+- **Swim lanes you can act on:** move cards between columns (writes back to GitHub
+  instantly), comment on any item, and `↗` straight to the issue on GitHub.
+- **Honest capability chips:** the UI reads your token's scopes and shows "move
+  disabled" / "commenting disabled" up front instead of failing mysteriously.
+- **The AI works the board too:** the chat gets board tools (`list_boards`,
+  `list_board_items`, `move_board_item`, `add_board_comment`) — "move #13 to In review"
+  really moves the card, and the view self-heals by polling.
+- Each project keeps its own boards; **Disconnect** clears the cache without touching
+  the source.
+
+### 14. Graph diff & compare — "what changed since the last scan"
+**What it does:** Every rescan snapshots the previous graph; a pure `diff_graphs` tool
+computes exactly what changed, and **compare mode** overlays it onto every view
+(green = added, amber = changed, red = removed).
+
+**Talking points:**
+- **No more silent overwrites.** Each rescan saves a timestamped snapshot (last 10 kept),
+  so you can always answer "what changed since the last analysis?"
+- **The Compare pill in the header** shows "Up to date / Stale" plus "View changes →";
+  one click enters compare mode against the previous snapshot — or any saved one via the
+  snapshot picker.
+- **The diff is deterministic** — a pure graph-to-graph tool (`diff_graphs`, the same
+  engine everywhere), never an LLM guess: entry points added/removed/changed, producers,
+  and cross-repo links (topics *and* HTTP path templates).
+- **Overlays everywhere, opt-in:**
+  - **Galaxy** — per-repo `+N/~N/−N` badges, recolored message *and* HTTP edges, dashed
+    **ghost edges** for removed channels, and a "Since last scan" legend.
+  - **Solar** — stars get status badges; removed entry points render as red **ghosts**
+    with a toggle; the docked panel shows a diff chip on every channel card.
+  - **Path** — call-tree nodes outlined green/amber; a strikethrough strip lists
+    old-only nodes; metrics deltas surfaced.
+  - **Detail panel** — "Changes since last scan" block (new node, metrics `old → new`).
+  - **Flows** — status chips on flow cards and recolored edges.
+  - **Project cards** — a "since last scan:" chip row on the project list, no click needed.
+- Outside compare mode nothing changes — every view behaves exactly as before.
+
 ---
 
 ## The 3-interface story (diagram-worthy)
 
 ```
-                Graph Tools (11 pure functions)
+                Graph Tools (12 pure functions)
                             │
         ┌───────────────────┼───────────────────┐
         ▼                   ▼                   ▼
@@ -204,13 +253,17 @@ its plan.
 6. **Gaps / Dead code:** flip tabs — *"we also tell you what's broken and what's dead."*
 7. **Planner:** open a conversation; the AI drafts a Mermaid plan into the preview panel.
    *"AI as an advisor that reads the same map you see — never hallucinates structure."*
+8. *(Optional)* **Boards:** a connected GitHub board as a live kanban — move a card, or
+   ask the chat to move it for you. *"The issue tracker, inside the map."*
+9. *(Optional)* **Compare:** the header pill says "View changes →"; one click paints
+   green/amber/red ghosts of what changed since the last scan across the galaxy.
 
 ## On the roadmap (don't demo, but tease)
 
 - **Python (FastAPI) support** — in progress, same deterministic pipeline.
 - **TypeScript/Express, Go, C#** — planned.
-- **Graph diff & compare** — snapshot your scans and overlay exactly what changed
-  (green/amber/red) across every view.
+- **Deeper snapshot tooling** — full-history graph browsing, archive/restore, and
+  cross-project diffs (today compare keeps the last 10 snapshots).
 
 ---
 

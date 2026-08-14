@@ -434,6 +434,24 @@ class BoardConnectRequest(BaseModel):
     name: str = ""           # optional display-name override
 
 
+# One wall-clock budget per board operation, server-side. Each provider call
+# has its own MCP timeout (GITHUB_MCP_TIMEOUT, default 120s), but a single
+# operation chains several calls (sync = items + options + caps; create =
+# issue + project-add + lane + refetch), so the operation budget must cover
+# the whole chain. Clients set their fetch timeouts slightly ABOVE these so
+# the server's clearer error wins the race.
+BOARD_OP_TIMEOUT = int(os.environ.get("BOARD_OP_TIMEOUT", "300"))  # sync / connect
+BOARD_WRITE_TIMEOUT = int(os.environ.get("BOARD_WRITE_TIMEOUT", "180"))  # move / comment / create
+
+
+async def _with_timeout(coro, seconds: int, what: str):
+    """Await ``coro`` with a wall-clock budget; raise BoardError 504 on expiry."""
+    try:
+        return await asyncio.wait_for(coro, timeout=seconds)
+    except asyncio.TimeoutError:
+        raise BoardError(f"{what} timed out after {seconds}s — GitHub is slow or unreachable; retry.", status=504)
+
+
 @app.get("/api/projects/{pid}/boards")
 async def list_boards(pid: str):
     """Connected boards + their cached items for a project."""
@@ -444,19 +462,19 @@ async def list_boards(pid: str):
 @app.post("/api/projects/{pid}/boards")
 async def connect_board(pid: str, req: BoardConnectRequest):
     """Connect a board and run its initial sync (pulls items now)."""
-    _load_project(pid)
-    ident = _board_identity(req.provider, req.config)
-    board = {
-        "id": ident["id"],
-        "provider": req.provider,
-        "name": req.name or ident["name"],
-        "kind": ident["kind"],
-        "source_url": ident["source_url"],
-        "config": req.config,
-        "items": [],
-        "synced_at": "",
-    }
-    try:
+
+    async def _connect():
+        ident = _board_identity(req.provider, req.config)
+        board = {
+            "id": ident["id"],
+            "provider": req.provider,
+            "name": req.name or ident["name"],
+            "kind": ident["kind"],
+            "source_url": ident["source_url"],
+            "config": req.config,
+            "items": [],
+            "synced_at": "",
+        }
         provider = provider_for(board)
         # Pre-flight token check so a missing/bad token fails with the API's
         # details before any MCP call is made.
@@ -470,11 +488,26 @@ async def connect_board(pid: str, req: BoardConnectRequest):
             title = await provider.project_title(board)
             if title:
                 board["name"] = title
-        items = await provider.list_items(board)
+        board["items"] = [it.to_dict() for it in await provider.list_items(board)]
         options = await provider.status_options(board)
+        if options:
+            board["status_options"] = options
         caps = await provider.capabilities(board)
+        if caps:
+            board["capabilities"] = caps
+        board["synced_at"] = _now_iso()
+        return board
+
+    try:
+        board = await _with_timeout(_connect(), BOARD_OP_TIMEOUT, "Board connect")
     except BoardError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
+    _load_project(pid)
+    data = PROJECT_STORE.load_boards(pid)
+    data["boards"] = [b for b in data["boards"] if b["id"] != board["id"]]  # replace if present
+    data["boards"].append(board)
+    PROJECT_STORE.save_boards(pid, data)
+    return {"board": board, "count": len(board["items"])}
     board["items"] = [it.to_dict() for it in items]
     if options:
         board["status_options"] = options
@@ -501,8 +534,8 @@ async def sync_board(pid: str, bid: str):
     board = next((b for b in data["boards"] if b["id"] == bid), None)
     if board is None:
         raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
-    try:
-        provider = provider_for(board)
+
+    async def _sync():
         items = await provider.list_items(board)
         options = await provider.status_options(board)
         caps = await provider.capabilities(board)
@@ -512,14 +545,18 @@ async def sync_board(pid: str, bid: str):
             title = await provider.project_title(board)
             if title:
                 board["name"] = title
+        board["items"] = [it.to_dict() for it in items]
+        if options:
+            board["status_options"] = options
+        if caps:
+            board["capabilities"] = caps
+        board["synced_at"] = _now_iso()
+
+    provider = provider_for(board)
+    try:
+        await _with_timeout(_sync(), BOARD_OP_TIMEOUT, "Board sync")
     except BoardError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
-    board["items"] = [it.to_dict() for it in items]
-    if options:
-        board["status_options"] = options
-    if caps:
-        board["capabilities"] = caps
-    board["synced_at"] = _now_iso()
     PROJECT_STORE.save_boards(pid, data)
     return {"board": board, "count": len(board["items"])}
 
@@ -577,7 +614,10 @@ async def update_board_item(pid: str, bid: str, req: BoardItemPatch):
         raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
     try:
         provider = provider_for(board)
-        item = await provider.update_item(board, req.item_id, {"status": req.status})
+        item = await _with_timeout(
+            provider.update_item(board, req.item_id, {"status": req.status}),
+            BOARD_WRITE_TIMEOUT, "Card move",
+        )
     except BoardError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
     _replace_item(board, item.to_dict())
@@ -595,10 +635,47 @@ async def comment_board_item(pid: str, bid: str, req: BoardCommentRequest):
         raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
     try:
         provider = provider_for(board)
-        await provider.add_comment(board, req.item_id, req.body)
+        await _with_timeout(
+            provider.add_comment(board, req.item_id, req.body),
+            BOARD_WRITE_TIMEOUT, "Comment",
+        )
     except BoardError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
     return {"ok": True, "item_id": req.item_id}
+
+
+class BoardCreateItemRequest(BaseModel):
+    """Create a new issue and add it to a board."""
+    title: str
+    body: str = ""
+    labels: list = []
+    status: str = ""  # starting swim lane (project boards)
+
+
+@app.post("/api/projects/{pid}/boards/{bid:path}/items/create")
+async def create_board_item(pid: str, bid: str, req: BoardCreateItemRequest):
+    """Create a new issue and add it to the board.
+
+    For project boards the issue is created in the repo the board's items live
+    in, added to the project, and optionally placed in a Status lane. The new
+    item is cached onto the board and returned.
+    """
+    _load_project(pid)
+    data = PROJECT_STORE.load_boards(pid)
+    board = next((b for b in data["boards"] if b["id"] == bid), None)
+    if board is None:
+        raise HTTPException(status_code=404, detail=f"Board '{bid}' not found")
+    try:
+        provider = provider_for(board)
+        item = await _with_timeout(
+            provider.create_item(board, req.title, req.body, req.labels, req.status),
+            BOARD_WRITE_TIMEOUT, "Issue creation",
+        )
+    except BoardError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    _replace_item(board, item.to_dict())
+    PROJECT_STORE.save_boards(pid, data)
+    return {"item": item.to_dict()}
 
 
 # ── Git-host import (remote repo discovery) ────────────────────────

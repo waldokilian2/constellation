@@ -1018,38 +1018,48 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 .chat-input::placeholder { color: #475569; }
 
+/* Send button — circular, mirrors the planner's .planner-chat-send but sized
+   for the smaller one-row chat window input. Inactive = muted slate circle;
+   .active (input non-empty) = cyan gradient with glow. */
 .chat-send {
-  background: rgba(0, 212, 255, 0.15);
-  border: 1px solid rgba(0, 212, 255, 0.3);
-  color: #00d4ff;
-  border-radius: 8px;
-  width: 32px;
-  height: 32px;
-  font-size: 16px;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 38px; height: 38px; flex-shrink: 0; padding: 0; cursor: pointer;
+  border-radius: 50%;
+  background: rgba(100, 116, 139, 0.15);
+  border: 1px solid rgba(100, 116, 139, 0.25);
+  color: #94a3b8;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s ease;
 }
+.chat-send svg { transition: transform 0.2s ease; }
 .chat-send:hover:not(:disabled) {
-  background: rgba(0, 212, 255, 0.25);
+  background: rgba(100, 116, 139, 0.26);
+  color: #cbd5e1;
+  transform: translateY(-2px);
 }
-.chat-send:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
+.chat-send:active:not(:disabled) { transform: scale(0.94); }
+.chat-send:disabled { cursor: not-allowed; }
+.chat-send.active {
+  background: linear-gradient(135deg, #00d4ff, #0ea5e9);
+  border-color: transparent; color: #fff;
+  box-shadow: 0 2px 12px rgba(0, 212, 255, 0.35);
+}
+.chat-send.active:hover {
+  background: linear-gradient(135deg, #19dcff, #2fb1ff);
+  box-shadow: 0 5px 18px rgba(0, 212, 255, 0.55);
+  transform: translateY(-3px);
 }
 
 /* Stop button — swaps in for .chat-send while a stream is in flight.
-   Same 32px footprint as send, danger-red, gentle pulse; matches the
+   Same 38px circle as send, danger-red, gentle pulse; matches the
    planner's .planner-chat-stop. Respects reduced-motion. */
 .chat-stop {
   background: rgba(248, 113, 113, 0.15);
   border: 1px solid rgba(248, 113, 113, 0.35);
   color: #fca5a5;
-  border-radius: 8px;
-  width: 32px;
-  height: 32px;
+  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
   cursor: pointer;
   transition: background 0.2s, color 0.2s, transform 0.2s;
   display: flex;
@@ -1595,11 +1605,14 @@ code { font-family: var(--mono); color: var(--cyan); }
   color: #e2e8f0;
 }
 
-/* Input area */
+/* Input area — flex-end keeps the circular send button aligned with the
+   textarea's bottom edge as it auto-grows (planner-chat-input look, but the
+   compact one-row variant). */
 .chat-window-input {
   display: flex;
   gap: 8px;
   padding: 12px;
+  align-items: flex-end;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 .chat-window-input input,

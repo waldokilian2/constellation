@@ -114,7 +114,7 @@ class ConversationStore:
         path = self._file(project_id, conv_id)
         if not path.exists():
             return None
-        data = json.loads(path.read_text(errors="replace"))
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         return Conversation(
             id=data["id"],
             project_id=data["project_id"],
@@ -142,7 +142,7 @@ class ConversationStore:
         results = []
         for path in conv_dir.glob("*.json"):
             try:
-                data = json.loads(path.read_text(errors="replace"))
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
             except (json.JSONDecodeError, KeyError):
                 continue
             if scoped and (data.get("kind", "chat") or "chat") != scoped:

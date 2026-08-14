@@ -4647,6 +4647,20 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
       };
     }
 
+    // ── Code Issues (dead-code) mode ──
+    if (level === "dead") {
+      const dc = detectDeadCode(graph);
+      const bits = [];
+      if (dc.method_index_available) bits.push(`${dc.unreachable_methods.length} unreachable`);
+      if (dc.thin_handlers.length) bits.push(`${dc.thin_handlers.length} thin`);
+      if (dc.isolated_repos.length) bits.push(`${dc.isolated_repos.length} isolated`);
+      return {
+        payload: { entry_point_id: "", node: {}, dead: true },
+        label: bits.length ? `Dead code · ${bits.join(" · ")}` : "Dead code",
+        scope: "dead",
+      };
+    }
+
     return { payload: { entry_point_id: "", node: {} }, label: "Whole system", scope: "system" };
   }, [view, selectedNode, flows, entryPoint]);
 
@@ -4808,16 +4822,6 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
               {messages.length > 0 && (
                 <button className="chat-new-btn" onClick={newChat} title="Start a new conversation">+ New</button>
               )}
-              {models.length > 0 && (
-                <select
-                  className="chat-window-model"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={loading}
-                >
-                  {models.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              )}
               <button className="chat-window-close" onClick={() => onOpenChange(false)}>✕</button>
             </div>
           </div>
@@ -4838,6 +4842,16 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
             <span className="chat-ctx-label">Context</span>
             <span className="chat-ctx-value" title={ctx.sub ? ctx.label + " · " + ctx.sub : ctx.label}>{ctx.label}</span>
             {ctx.sub && <span className="chat-ctx-sub" title={ctx.sub}>{ctx.sub}</span>}
+            {models.length > 0 && (
+              <select
+                className="chat-ctx-model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={loading}
+              >
+                {models.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            )}
           </div>
 
           <div className="chat-window-body" ref={scrollRef}>

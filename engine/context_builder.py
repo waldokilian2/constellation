@@ -296,6 +296,83 @@ class ContextBuilder:
         )
         return "\n\n".join(sections)
 
+    def build_dead_code_prompt(self) -> str:
+        """System prompt for the Code Issues (dead-code) view chat.
+
+        The user is looking at the dead-code view: unreachable methods, thin
+        (no-op) handlers, and isolated repos. Embeds the deterministic
+        dead-code analysis so the AI can explain *why* something is flagged
+        and what the options are, without re-deriving it from source.
+        """
+        from engine.graph_tools import find_dead_code
+
+        dc = find_dead_code(self.graph)
+        summary = dc.get("summary", {})
+
+        sections = [
+            "You are a code quality assistant for Constellation's Code Issues "
+            "view. The user is looking at dead-code analysis: methods no entry "
+            "point can reach, suspiciously thin (no-op) handlers, and repos "
+            "with no cross-repo links. The findings below were extracted "
+            "deterministically from the codebase — trust them as fact. Help "
+            "the user understand each finding, why it is flagged, and what the "
+            "options are (remove, keep with justification, or revive via a new "
+            "call site). Be concrete: cite repo-relative file:line and "
+            "Class.method names."
+        ]
+
+        # ── The deterministic findings ──────────────────────────
+        unreachable = dc.get("unreachable_methods", []) or []
+        um_lines = ["DEAD CODE ANALYSIS:"]
+        if not summary.get("method_index_available"):
+            um_lines.append(
+                "  Unreachable-method data is unavailable — this graph predates "
+                "the reachability phase. Tell the user to rescan the project "
+                "to get it."
+            )
+        else:
+            um_lines.append(
+                f"  {summary.get('unreachable_methods', 0)} of "
+                f"{summary.get('methods_total', '?')} methods are unreachable."
+            )
+            for m in unreachable:
+                name = m.get("method") or m.get("name", "?")
+                um_lines.append(
+                    f"    - {m.get('repo', '?')} → {name} "
+                    f"({m.get('file', '?')}:{m.get('line', 0)})"
+                )
+        um_lines.append(
+            f"  Thin handlers (no-op entry points): {summary.get('thin_handlers', 0)}"
+        )
+        isolated = dc.get("isolated_repos", []) or []
+        um_lines.append(
+            f"  Isolated repos (no cross-repo links): {', '.join(isolated) or 'none'}"
+        )
+        sections.append("\n".join(um_lines))
+
+        # ── Caveats ─────────────────────────────────────────────
+        sections.append(
+            "IMPORTANT: dead-code analysis is *static*. An 'unreachable' method "
+            "may still run via reflection, framework magic, or dynamic dispatch "
+            "that AST analysis cannot see, so frame any removal as a "
+            "recommendation with a confidence caveat — never a guaranteed-safe "
+            "deletion."
+        )
+
+        # ── Tools ───────────────────────────────────────────────
+        sections.append(
+            "Tools available: find_dead_code, find_orphans, find_cycles, "
+            "get_node, get_source, search_code, trace_path. Use get_source to "
+            "inspect a flagged method before recommending anything."
+        )
+
+        # ── Connected boards (if any) ───────────────────────────
+        boards = self._boards_section()
+        if boards:
+            sections.append(boards)
+
+        return "\n\n".join(sections)
+
     def build_planner_prompt(self, repo: str = "") -> str:
         """
         Build a system prompt for AI change planning mode.

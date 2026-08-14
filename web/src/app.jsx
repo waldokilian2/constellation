@@ -428,10 +428,6 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, 
             onClick={() => onModeChange("flows")}
           >Flows</button>
           <button
-            className={"mode-btn" + (mode === "dead" ? " active" : "")}
-            onClick={() => onModeChange("dead")}
-          >Gaps</button>
-          <button
             className={"mode-btn" + (mode === "planner" ? " active" : "")}
             onClick={() => onModeChange("planner")}
           >Planner</button>
@@ -439,6 +435,10 @@ function Header({ graph, mode, onModeChange, onHome, stale, crumbs, diffLatest, 
             className={"mode-btn" + (mode === "boards" ? " active" : "")}
             onClick={() => onModeChange("boards")}
           >Boards</button>
+          <button
+            className={"mode-btn" + (mode === "dead" ? " active" : "")}
+            onClick={() => onModeChange("dead")}
+          >Code Issues</button>
         </div>
       )}
       <div className="meta">
@@ -595,14 +595,14 @@ function buildCrumbs(view, mode, graph, flows, projectName, nav) {
     }
   } else if (mode === "dead") {
     if (view.name === "dead") {
-      return [...root, { label: "Gaps", current: true }];
+      return [...root, { label: "Code Issues", current: true }];
     }
     if (view.name === "path") {
       const ep = graph && (graph.entry_points || []).find((e) => e.id === view.entryId);
       if (ep) {
         return [
           ...root,
-          { label: "Gaps", onClick: nav.goDead },
+          { label: "Code Issues", onClick: nav.goDead },
           { label: ep.repo }, // context — no repo page in dead-code mode
           { label: methodLabel(ep), current: true },
         ];

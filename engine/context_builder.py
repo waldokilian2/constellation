@@ -604,11 +604,13 @@ class ContextBuilder:
             "captured alongside the plan. Only do this when there's a clearly "
             "relevant ticket and the user would benefit — don't comment on "
             "every ticket.\n"
-            "- **What you can and can't do on tickets:** you can READ tickets, "
-            "COMMENT on them, and MOVE their status. You CANNOT create new "
-            "tickets. If no relevant ticket exists, suggest the user create "
-            "one and then offer to attach the plan to it — never imply you can "
-            "create a ticket yourself.\n"
+            "- **What you can do on tickets:** you can READ tickets, "
+            "COMMENT on them, MOVE their status, and CREATE new tickets via "
+            "``create_board_item``. When creating a ticket, ALWAYS confirm "
+            "with the user first — present the title, description, labels, "
+            "and starting lane, and only call the tool after they agree. "
+            "If no relevant ticket exists, offer to create one and attach "
+            "the plan to it.\n"
         )
 
         return "\n\n".join(sections)

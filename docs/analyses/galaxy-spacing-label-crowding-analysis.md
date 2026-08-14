@@ -348,6 +348,30 @@ Design review of the shipped implementation surfaced five follow-ups, all fixed:
   not a regression, and far beyond the real graphs (≤ 26 repos, ≤ 19 directed
   edges). The `npm run build` passes and `python tests/run_tests.py` is green.
 
+### Scale hardening (2026-08-14, rebased onto main after PR #112)
+
+A repo-count sweep (1–200 repos, mixed hubs/rings/chains/skip-chords/HTTP links)
+found the resolver froze at scale (37s at 100 repos) — per-pass work was
+O(edges × repos). Fixed while keeping the real graphs byte-identical in quality:
+
+- **Corridor prefilters**: `resolveEdgeBends` and `placeEdgePills` now only check
+  repos inside the curve/pill envelope (bend cap + clearances + orb reach) instead
+  of scanning every repo.
+- **Cached guides**: the resolver re-places pills/bends only when the layout has
+  drifted ≥ 48px (or every 8 passes) — stale-by-a-few-px guides push just as well,
+  and the renderer re-places on the final positions anyway.
+- **Oscillation guard**: per-pass drift stops shrinking → the greedy state is
+  final; the resolver stops early instead of shivering through 200 passes.
+- **Forced-fresh polish**: after the final resolve, 12 fresh-placement passes make
+  the settled state match exactly what the renderer draws (pills AND arc bends).
+
+Result (deterministic, zero orb/label/pill overlaps at every size): 1–26 repos
+2–220ms with 0 violations; 50–100 repos 0.7–2.0s with a few curve near-misses in
+the pathological chord-dense generator; 200 repos ~9s worst case. Real projects
+(3–26 repos) stay at the §8 table quality; the rebase onto main (PR #112, Code
+Issues SignalCards) verified end-to-end — galaxy + Code Issues views render with
+zero runtime errors across 1024×768–1920×1080.
+
 ## 9. References
 
 - `web/src/galaxyLayout.js` — all layout/resolver code (line numbers in §1/§3).

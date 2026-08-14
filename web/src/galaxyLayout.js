@@ -261,6 +261,21 @@ export function placeEdgePills(edges, positions, pillWFor, bends) {
     const pairKey = a.name < b.name ? a.name + "|" + b.name : b.name + "|" + a.name;
     const side = edgeBendSide(a, b, others, pairBoth.has(pairKey) && a.name > b.name);
     const curve = edgeCurve(a, b, side, (bends && bends[o.from + ">>" + o.to]) || 1);
+    // Near-orb prefilter: only repos whose center lies inside the curve's
+    // envelope (sampled bbox + the pill half-size + the largest orb/label
+    // reach) can interact with any candidate — the full-repos scan made
+    // placement O(edges × repos) and dominated dense layouts.
+    let ex0 = Infinity, ex1 = -Infinity, ey0 = Infinity, ey1 = -Infinity;
+    for (let s = 0; s <= 8; s++) {
+      const q = curvePoint(curve, s / 8);
+      ex0 = Math.min(ex0, q.x); ex1 = Math.max(ex1, q.x);
+      ey0 = Math.min(ey0, q.y); ey1 = Math.max(ey1, q.y);
+    }
+    const xm = o.pw / 2 + LABEL_HALF_W;
+    const ym = pillH / 2 + 82 + LABEL_GAP + LABEL_H;
+    const near = positions.filter((p) => p !== a && p !== b
+      && p.x >= ex0 - xm && p.x <= ex1 + xm
+      && p.y >= ey0 - ym && p.y <= ey1 + ym);
     let best = null;
     // Pills stay ON their curve (no perpendicular offsets) so every label
     // sits exactly on its edge line; the slide along t resolves crowding.
@@ -270,7 +285,7 @@ export function placeEdgePills(edges, positions, pillWFor, bends) {
       const p = curvePoint(curve, t);
       const rect = { x: p.x - o.pw / 2, y: p.y - pillH / 2, w: o.pw, h: pillH };
       let v = 0;
-      for (const q of positions) {
+      for (const q of near) {
         const cxp = Math.max(rect.x, Math.min(q.x, rect.x + rect.w));
         const cyp = Math.max(rect.y, Math.min(q.y, rect.y + rect.h));
         const d = Math.hypot(q.x - cxp, q.y - cyp);
@@ -326,14 +341,26 @@ export function resolveEdgeBends(edges, positions, pillWFor) {
     // orb, the clearance, AND the pill rect — otherwise the pill placement
     // has nowhere clear to land and rests a few px off an orb.
     const pillHalf = ((pillWFor && pillWFor[key]) || 0) / 2;
+    // Cheap corridor prefilter: only repos whose CENTER lies inside the
+    // chord's expanded bounding box can interact with this curve (the bend
+    // never exceeds 220px off-chord, plus the clearance and the largest orb
+    // radius).  At scale this skips the sampling work for nearly every
+    // third-party repo — the old full scan made each resolver pass O(edges
+    // × repos × segments) and froze layouts of 50+ repos.
+    const hwC = Math.abs(b.x - a.x) / 2, hhC = Math.abs(b.y - a.y) / 2;
+    const cxC = (a.x + b.x) / 2, cyC = (a.y + b.y) / 2;
+    const mC = 220 + CURVE_CLEAR + pillHalf + 82;
+    const near = positions.filter((p) => p !== a && p !== b
+      && p.x >= cxC - hwC - mC && p.x <= cxC + hwC + mC
+      && p.y >= cyC - hhC - mC && p.y <= cyC + hhC + mC);
+    if (!near.length) continue;
     let scale = 1;
     for (let it = 0; it < 10; it++) {
       const curve = edgeCurve(a, b, side, scale);
       const pts = [];
       for (let s = 0; s <= SEGS; s++) pts.push(curvePoint(curve, s / SEGS));
       let pen = 0;
-      for (const p of positions) {
-        if (p === a || p === b) continue;
+      for (const p of near) {
         let nd = Infinity;
         for (let s = 0; s < SEGS; s++) {
           const q = segNearest(pts[s].x, pts[s].y, pts[s + 1].x, pts[s + 1].y, p.x, p.y);
@@ -697,16 +724,134 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
     const d = Math.hypot(px - cxp, py - cyp);
     return d < r ? r - d : 0;
   };
+  // Pill-vs-orb / pill-vs-label / pill-pill pushes for a given placement.
+  // Shared by the main resolver loop (cached placements) and the final
+  // pill-polish loop (fresh placements on the settled positions), so the
+  // pills the renderer will draw are exactly the pills the pushes account
+  // for.  Returns true when anything moved.
+  const pushPillConstraints = (pills) => {
+    let moved2 = false;
+    for (const pl of pills) {
+      // Pill vs every orb.  An isolated orb takes the whole push; a
+      // connected orb splits it with the pill's endpoints.  An ENDPOINT
+      // orb (placement fallback) lengthens the chord so the pill clears
+      // both ends.
+      for (let k = 0; k < n; k++) {
+        const ov = rectCircleOverlap(pl, positions[k].x, positions[k].y, postR[k]);
+        if (ov < 0.5) continue;
+        if (k === pl.i || k === pl.j) {
+          const pa = positions[pl.i], pb = positions[pl.j];
+          const dxc = pb.x - pa.x, dyc = pb.y - pa.y;
+          const dc = Math.hypot(dxc, dyc) || 1e-3;
+          const ux = dxc / dc, uy = dyc / dc;
+          const push = Math.max(0.5, ov * 0.6);
+          pa.x -= ux * push; pa.y -= uy * push;
+          pb.x += ux * push; pb.y += uy * push;
+          moved2 = true;
+          continue;
+        }
+        const dxk = positions[k].x - pl.cx, dyk = positions[k].y - pl.cy;
+        const dk = Math.hypot(dxk, dyk) || 1e-3;
+        const ux = dxk / dk, uy = dyk / dk;
+        if (isolated[k]) {
+          const push = Math.max(0.5, ov);
+          positions[k].x += ux * push; positions[k].y += uy * push;
+        } else {
+          const push = Math.max(0.5, ov * 0.6);
+          positions[k].x += ux * push; positions[k].y += uy * push;
+          positions[pl.i].x -= ux * push; positions[pl.i].y -= uy * push;
+          positions[pl.j].x -= ux * push; positions[pl.j].y -= uy * push;
+        }
+        moved2 = true;
+      }
+      // Pill vs every repo label (the label rect below each orb)
+      for (let k = 0; k < n; k++) {
+        const labTop = positions[k].y + postR[k] + LABEL_GAP;
+        const hwk = labelHalfWidth(positions[k].name);
+        const ox = Math.min(pl.cx + pl.hw, positions[k].x + hwk) - Math.max(pl.cx - pl.hw, positions[k].x - hwk);
+        const oy = Math.min(pl.cy + pl.hh, labTop + LABEL_H) - Math.max(pl.cy - pl.hh, labTop);
+        if (ox <= 0 || oy < 0.5) continue;
+        // Push the label's orb away from the pill vertically and the
+        // pill's endpoints the other way, so the pill clears the label.
+        // An isolated repo takes the whole push.
+        const dir = pl.cy < labTop ? 1 : -1;
+        if (isolated[k]) {
+          positions[k].y += Math.max(0.5, oy) * dir;
+        } else {
+          const push = Math.max(0.5, oy * 0.6);
+          positions[k].y += push * dir;
+          positions[pl.i].y -= push * dir; positions[pl.j].y -= push * dir;
+        }
+        moved2 = true;
+      }
+    }
+    // Residual pill-pill overlaps from placement fallbacks (no fully clear
+    // spot existed): push the endpoint pairs apart so the next placement
+    // pass finds room.  Same-pair pills lengthen their chord instead —
+    // pushing shared endpoints would cancel out.
+    for (let pi = 0; pi < pills.length; pi++) {
+      for (let pj = pi + 1; pj < pills.length; pj++) {
+        const A = pills[pi], B = pills[pj];
+        const ox = A.hw + B.hw - Math.abs(A.cx - B.cx);
+        const oy = A.hh + B.hh - Math.abs(A.cy - B.cy);
+        if (ox <= 0 || oy <= 0) continue;
+        if ((A.i === B.i && A.j === B.j) || (A.i === B.j && A.j === B.i)) {
+          const pa = positions[A.i], pb = positions[A.j];
+          const dxc = pb.x - pa.x, dyc = pb.y - pa.y;
+          const dc = Math.hypot(dxc, dyc) || 1e-3;
+          const ux = dxc / dc, uy = dyc / dc;
+          const push = Math.max(0.5, Math.max(ox, oy) * 0.6);
+          pa.x -= ux * push; pa.y -= uy * push;
+          pb.x += ux * push; pb.y += uy * push;
+          moved2 = true;
+          continue;
+        }
+        let push, ux = 0, uy = 0;
+        if (ox >= oy) {
+          push = Math.max(0.5, ox * 0.6);
+          ux = A.cx < B.cx ? 1 : -1;
+        } else {
+          push = Math.max(0.5, oy * 0.6);
+          uy = A.cy < B.cy ? 1 : -1;
+        }
+        positions[A.i].x -= ux * push; positions[A.i].y -= uy * push;
+        positions[A.j].x -= ux * push; positions[A.j].y -= uy * push;
+        positions[B.i].x += ux * push; positions[B.i].y += uy * push;
+        positions[B.j].x += ux * push; positions[B.j].y += uy * push;
+        moved2 = true;
+      }
+    }
+    return moved2;
+  };
   let moved = false;
-  const resolvePasses = () => {
-    for (let pass = 0; pass < RESOLVER_PASSES; pass++) {
+  // forceFresh: recompute the bends + pill placement EVERY pass (used for
+  // the short final polish run — the cached guides of the main loop are
+  // fine mid-resolution, but the settled state must match what renders).
+  const resolvePasses = (maxPasses = RESOLVER_PASSES, forceFresh = false) => {
+    // ── Oscillation guard ──
+    // Dense graphs can push forever without settling: every push fixes one
+    // violation and creates another, so `moved` stays true while the layout
+    // just shivers.  Track the per-pass drift; when it stops shrinking, the
+    // greedy state is as good as it will get — stop early instead of
+    // burning the full 200-pass budget (layouts of 50+ repos froze for
+    // seconds this way).
+    let prevX = null, prevY = null, bestDrift = Infinity, stalePasses = 0;
+    // The pills/bends only guide the endpoint pushes; the renderer re-places
+    // them on the FINAL positions anyway.  Recomputing them every pass was
+    // the dominant cost at scale (O(edges × repos) per pass), so they are
+    // re-placed only when the layout has drifted meaningfully since the last
+    // placement — stale-by-a-few-px guides push just as well.
+    let bendCache = null, pillCache = null, driftSince = Infinity;
+    for (let pass = 0; pass < maxPasses; pass++) {
       moved = false;
 
-      // Per-edge arc-over bends on the CURRENT positions: the rendered curve
-      // must clear every third-party orb/label (see resolveEdgeBends), and
-      // every curve-based check below (pills, island corridors) uses the
-      // same bent curves the renderer will draw.
-      const bends = resolveEdgeBends(edges, positions, pillWFor);
+      if (forceFresh || driftSince >= 48 || pass % 8 === 0 || !pillCache) {
+        bendCache = resolveEdgeBends(edges, positions, pillWFor);
+        pillCache = placeEdgePills(edges, positions, pillWFor, bendCache);
+        driftSince = 0;
+      }
+      const bends = bendCache;
+      const pills = pillCache;
 
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
@@ -808,102 +953,12 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
       }
     }
 
-    // Pill constraints: recompute the coordinated placement each pass —
-    // pills move with their endpoint pair and clear each other by
-    // construction (see placeEdgePills).  The remaining pushes resolve
-    // pill-vs-orb and pill-vs-label overlaps the slide could not avoid.
-    const pills = placeEdgePills(edges, positions, pillWFor, bends);
+    // Pill constraints: the coordinated placement (recomputed when the
+    // layout has drifted — see the cache at the top of the pass loop) clears
+    // each other by construction; the remaining pushes resolve pill-vs-orb
+    // and pill-vs-label overlaps the slide could not avoid.
+    moved = pushPillConstraints(pills) || moved;
 
-    for (const pl of pills) {
-      // Pill vs every orb.  An isolated orb takes the whole push; a
-      // connected orb splits it with the pill's endpoints.  An ENDPOINT
-      // orb (placement fallback) lengthens the chord so the pill clears
-      // both ends.
-      for (let k = 0; k < n; k++) {
-        const ov = rectCircleOverlap(pl, positions[k].x, positions[k].y, postR[k]);
-        if (ov < 0.5) continue;
-        if (k === pl.i || k === pl.j) {
-          const pa = positions[pl.i], pb = positions[pl.j];
-          const dxc = pb.x - pa.x, dyc = pb.y - pa.y;
-          const dc = Math.hypot(dxc, dyc) || 1e-3;
-          const ux = dxc / dc, uy = dyc / dc;
-          const push = Math.max(0.5, ov * 0.6);
-          pa.x -= ux * push; pa.y -= uy * push;
-          pb.x += ux * push; pb.y += uy * push;
-          moved = true;
-          continue;
-        }
-        const dxk = positions[k].x - pl.cx, dyk = positions[k].y - pl.cy;
-        const dk = Math.hypot(dxk, dyk) || 1e-3;
-        const ux = dxk / dk, uy = dyk / dk;
-        if (isolated[k]) {
-          const push = Math.max(0.5, ov);
-          positions[k].x += ux * push; positions[k].y += uy * push;
-        } else {
-          const push = Math.max(0.5, ov * 0.6);
-          positions[k].x += ux * push; positions[k].y += uy * push;
-          positions[pl.i].x -= ux * push; positions[pl.i].y -= uy * push;
-          positions[pl.j].x -= ux * push; positions[pl.j].y -= uy * push;
-        }
-        moved = true;
-      }
-      // Pill vs every repo label (the label rect below each orb)
-      for (let k = 0; k < n; k++) {
-        const labTop = positions[k].y + postR[k] + LABEL_GAP;
-        const hwk = labelHalfWidth(positions[k].name);
-        const ox = Math.min(pl.cx + pl.hw, positions[k].x + hwk) - Math.max(pl.cx - pl.hw, positions[k].x - hwk);
-        const oy = Math.min(pl.cy + pl.hh, labTop + LABEL_H) - Math.max(pl.cy - pl.hh, labTop);
-        if (ox <= 0 || oy < 0.5) continue;
-        // Push the label's orb away from the pill vertically and the
-        // pill's endpoints the other way, so the pill clears the label.
-        // An isolated repo takes the whole push.
-        const dir = pl.cy < labTop ? 1 : -1;
-        if (isolated[k]) {
-          positions[k].y += Math.max(0.5, oy) * dir;
-        } else {
-          const push = Math.max(0.5, oy * 0.6);
-          positions[k].y += push * dir;
-          positions[pl.i].y -= push * dir; positions[pl.j].y -= push * dir;
-        }
-        moved = true;
-      }
-    }
-    // Residual pill-pill overlaps from placement fallbacks (no fully clear
-    // spot existed): push the endpoint pairs apart so the next placement
-    // pass finds room.  Same-pair pills lengthen their chord instead —
-    // pushing shared endpoints would cancel out.
-    for (let pi = 0; pi < pills.length; pi++) {
-      for (let pj = pi + 1; pj < pills.length; pj++) {
-        const A = pills[pi], B = pills[pj];
-        const ox = A.hw + B.hw - Math.abs(A.cx - B.cx);
-        const oy = A.hh + B.hh - Math.abs(A.cy - B.cy);
-        if (ox <= 0 || oy <= 0) continue;
-        if ((A.i === B.i && A.j === B.j) || (A.i === B.j && A.j === B.i)) {
-          const pa = positions[A.i], pb = positions[A.j];
-          const dxc = pb.x - pa.x, dyc = pb.y - pa.y;
-          const dc = Math.hypot(dxc, dyc) || 1e-3;
-          const ux = dxc / dc, uy = dyc / dc;
-          const push = Math.max(0.5, Math.max(ox, oy) * 0.6);
-          pa.x -= ux * push; pa.y -= uy * push;
-          pb.x += ux * push; pb.y += uy * push;
-          moved = true;
-          continue;
-        }
-        let push, ux = 0, uy = 0;
-        if (ox >= oy) {
-          push = Math.max(0.5, ox * 0.6);
-          ux = A.cx < B.cx ? 1 : -1;
-        } else {
-          push = Math.max(0.5, oy * 0.6);
-          uy = A.cy < B.cy ? 1 : -1;
-        }
-        positions[A.i].x -= ux * push; positions[A.i].y -= uy * push;
-        positions[A.j].x -= ux * push; positions[A.j].y -= uy * push;
-        positions[B.i].x += ux * push; positions[B.i].y += uy * push;
-        positions[B.j].x += ux * push; positions[B.j].y += uy * push;
-        moved = true;
-      }
-    }
     // ── Islands vs bare edge curves ──
     // The pill checks above clear every pill, but the curve between a
     // pill and its endpoint orbs is unguarded — an isolated repo can sit
@@ -1083,6 +1138,21 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
         }
       }
     }
+      // ── Oscillation guard (per-pass drift) ──
+      if (pass > 0) {
+        let drift = 0;
+        for (let k = 0; k < n; k++) {
+          drift += Math.abs(positions[k].x - prevX[k]) + Math.abs(positions[k].y - prevY[k]);
+        }
+        driftSince += drift;
+        // Stop when drift stops meaningfully shrinking: genuine convergence
+        // reaches drift 0 (the !moved break below), while oscillation keeps
+        // drift flat forever.
+        if (drift < bestDrift - 1) { bestDrift = drift; stalePasses = 0; }
+        else if (++stalePasses >= 10) break;
+      }
+      prevX = positions.map((p) => p.x);
+      prevY = positions.map((p) => p.y);
       if (!moved) break;
     }
   };
@@ -1107,6 +1177,13 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
   resolvePasses();
   recenter(true);
   resolvePasses();
+  // ── Final pill/curve polish ──
+  // The resolver caches the pill/bend placement between passes — stale
+  // guides push just as well, but the FINAL state must account for the
+  // pills and curves the renderer will actually draw.  Run a short
+  // forced-fresh pass sequence on the settled positions so the final
+  // placement, the arc bends, and the pushes agree exactly.
+  resolvePasses(12, true);
   recenter(false);
 
   return positions;

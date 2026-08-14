@@ -2403,6 +2403,40 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
 
   const visible = stars.filter((s) => !hidden[s.ep.type]);
 
+  // ── Star labels ──────────────────────────────────────────────
+  // Pick the most meaningful descriptor: endpoints show verb + path, broker/
+  // event listeners show their channel, generic lifecycle/main entries use
+  // Class.method — and any label that would appear twice gets the class
+  // appended (e.g. two "order-events" consumers, two "configure" methods).
+  const starLabel = (ep) => {
+    const t = ep.type || "";
+    const ch = ep.channel || "";
+    const cls = (ep.class_name || "").split(".").pop() || "";
+    if (t === "rest-endpoint" || t === "servlet") {
+      return (((ep.method_type || "") + " " + ch).trim()) || ep.method || cls;
+    }
+    if (CONSUMER_TYPES.has(t)) return ch || ep.method || cls;
+    if (t === "grpc-service" && ch) return ch;
+    if (t === "main") return cls || "main";
+    if (t === "lifecycle") return (cls ? cls + "." : "") + (ep.method || "");
+    return ep.method || cls || ep.id.split(":").pop();
+  };
+  const labelFor = useMemo(() => {
+    const all = [...stars, ...removedStars];
+    const counts = {};
+    all.forEach((s) => {
+      const l = starLabel(s.ep);
+      counts[l] = (counts[l] || 0) + 1;
+    });
+    const m = {};
+    all.forEach((s) => {
+      const l = starLabel(s.ep);
+      const cls = (s.ep.class_name || "").split(".").pop() || "";
+      m[s.ep.id] = counts[l] > 1 && cls ? l + " · " + cls : l;
+    });
+    return m;
+  }, [stars, removedStars]);
+
   return (
     <div className="solar">
       <div className="view-top">
@@ -2485,12 +2519,12 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
         ))}
         {visible.map((s) => (
           <div key={"l" + s.ep.id} className="star-label" style={{ left: s.x, top: s.y + s.size / 2 + 8 }}>
-            <span className="star-label-name">{s.ep.method || s.ep.id.split(":").pop()}</span>
+            <span className="star-label-name">{labelFor[s.ep.id]}</span>
           </div>
         ))}
         {!hideRemoved && removedStars.map((s) => (
           <div key={"gl-" + s.ep.id} className="star-label ghost-label" style={{ left: s.x, top: s.y + s.size / 2 + 8 }}>
-            <span className="star-label-name">{s.ep.method || s.ep.id.split(":").pop()}</span>
+            <span className="star-label-name">{labelFor[s.ep.id]}</span>
           </div>
         ))}
         </div>

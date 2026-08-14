@@ -297,28 +297,33 @@ class ContextBuilder:
         return "\n\n".join(sections)
 
     def build_dead_code_prompt(self) -> str:
-        """System prompt for the Code Issues (dead-code) view chat.
+        """System prompt for the Code Issues (dead-code + gaps) view chat.
 
-        The user is looking at the dead-code view: unreachable methods, thin
-        (no-op) handlers, and isolated repos. Embeds the deterministic
-        dead-code analysis so the AI can explain *why* something is flagged
-        and what the options are, without re-deriving it from source.
+        The user is looking at the Code Issues view, a two-panel diptych:
+        dead code on the left (methods no entry point can reach, thin no-op
+        handlers, repos with no cross-repo links) and gaps on the right
+        (orphan producers/consumers on one-sided channels, repo dependency
+        cycles). Embeds the deterministic findings from both panels so the
+        AI can explain *why* something is flagged and what the options are,
+        without re-deriving them from source.
         """
-        from engine.graph_tools import find_dead_code
+        from engine.graph_tools import find_cycles, find_dead_code, find_orphans
 
         dc = find_dead_code(self.graph)
         summary = dc.get("summary", {})
 
         sections = [
             "You are a code quality assistant for Constellation's Code Issues "
-            "view. The user is looking at dead-code analysis: methods no entry "
-            "point can reach, suspiciously thin (no-op) handlers, and repos "
-            "with no cross-repo links. The findings below were extracted "
-            "deterministically from the codebase — trust them as fact. Help "
-            "the user understand each finding, why it is flagged, and what the "
-            "options are (remove, keep with justification, or revive via a new "
-            "call site). Be concrete: cite repo-relative file:line and "
-            "Class.method names."
+            "view. The user is looking at two panels of findings: DEAD CODE "
+            "(methods no entry point can reach, suspiciously thin no-op "
+            "handlers, and repos with no cross-repo links) and GAPS (channels "
+            "where only one side exists — a producer with no consumer or vice "
+            "versa — plus circular repo dependencies). The findings below "
+            "were extracted deterministically from the codebase — trust them "
+            "as fact. Help the user understand each finding, why it is "
+            "flagged, and what the options are (remove, keep with "
+            "justification, fix the wiring, or revive via a new call site). "
+            "Be concrete: cite repo-relative file:line and Class.method names."
         ]
 
         # ── The deterministic findings ──────────────────────────
@@ -350,13 +355,51 @@ class ContextBuilder:
         )
         sections.append("\n".join(um_lines))
 
+        # ── Gaps findings (right panel of the view) ─────────────
+        orph = find_orphans(self.graph)
+        orphan_producers = orph.get("orphan_producers", []) or []
+        orphan_consumers = orph.get("orphan_consumers", []) or []
+        gap_lines = ["GAPS ANALYSIS (one-sided channels + dependency cycles):"]
+        if not orphan_producers and not orphan_consumers:
+            gap_lines.append(
+                "  Orphan channels: none — every message channel has both a "
+                "producer and a consumer."
+            )
+        for p in orphan_producers:
+            gap_lines.append(
+                f"    - ORPHAN PRODUCER {p.get('channel', '?')}: "
+                f"{p.get('repo', '?')} → {p.get('method', '?')} "
+                f"({p.get('file', '?')}:{p.get('line', 0)}) — nothing "
+                "consumes this channel"
+            )
+        for c in orphan_consumers:
+            gap_lines.append(
+                f"    - ORPHAN CONSUMER {c.get('channel', '?')}: "
+                f"{c.get('repo', '?')} → {c.get('method', '?')} "
+                f"({c.get('file', '?')}:{c.get('line', 0)}) — nothing "
+                "produces to this channel"
+            )
+        cycles = find_cycles(self.graph).get("cycles", []) or []
+        if cycles:
+            gap_lines.append("  Dependency cycles:")
+            for cy in cycles:
+                gap_lines.append(
+                    f"    - CYCLE {' → '.join(cy.get('repos', []))} via "
+                    f"{', '.join(cy.get('channels', []))}"
+                )
+        else:
+            gap_lines.append("  Dependency cycles: none.")
+        sections.append("\n".join(gap_lines))
+
         # ── Caveats ─────────────────────────────────────────────
         sections.append(
             "IMPORTANT: dead-code analysis is *static*. An 'unreachable' method "
             "may still run via reflection, framework magic, or dynamic dispatch "
             "that AST analysis cannot see, so frame any removal as a "
             "recommendation with a confidence caveat — never a guaranteed-safe "
-            "deletion."
+            "deletion. Likewise an 'orphan' channel may be a legitimate "
+            "boundary to an external system (the other side lives in a repo "
+            "not part of this project) — surface it, don't assert it's a bug."
         )
 
         # ── Tools ───────────────────────────────────────────────

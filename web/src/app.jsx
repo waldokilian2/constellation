@@ -4647,16 +4647,21 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
       };
     }
 
-    // ── Code Issues (dead-code) mode ──
+    // ── Code Issues (dead-code + gaps) mode ──
     if (level === "dead") {
       const dc = detectDeadCode(graph);
+      const orphans = detectOrphans(graph);
+      const cyc = detectCycles(graph);
       const bits = [];
       if (dc.method_index_available) bits.push(`${dc.unreachable_methods.length} unreachable`);
       if (dc.thin_handlers.length) bits.push(`${dc.thin_handlers.length} thin`);
       if (dc.isolated_repos.length) bits.push(`${dc.isolated_repos.length} isolated`);
+      const gaps = orphans.summary.orphan_producers + orphans.summary.orphan_consumers;
+      if (gaps) bits.push(`${gaps} orphan${gaps === 1 ? "" : "s"}`);
+      if (cyc.summary.cycle_count) bits.push(`${cyc.summary.cycle_count} cycle${cyc.summary.cycle_count === 1 ? "" : "s"}`);
       return {
         payload: { entry_point_id: "", node: {}, dead: true },
-        label: bits.length ? `Dead code · ${bits.join(" · ")}` : "Dead code",
+        label: bits.length ? `Code issues · ${bits.join(" · ")}` : "Code issues",
         scope: "dead",
       };
     }
@@ -4779,6 +4784,37 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
       }
       out.push("What should I work on next? Suggest the highest-priority item.");
       return out;
+    }
+    if (ctx.scope === "dead") {
+      const dc = detectDeadCode(graph);
+      const orphans = detectOrphans(graph);
+      const cyc = detectCycles(graph);
+      const unreachable = dc.unreachable_methods || [];
+      if (!dc.method_index_available) {
+        out.push("What code quality issues does this system have?");
+      } else if (unreachable.length) {
+        const first = unreachable[0];
+        out.push("Why is " + first.class_name + "." + first.method + " unreachable — is it safe to delete?");
+        out.push("Summarize the unreachable methods: which look safe to remove?");
+      } else {
+        out.push("Is there any dead code in this system?");
+      }
+      if (orphans.orphan_producers.length) {
+        const first = orphans.orphan_producers[0];
+        out.push("Nothing consumes " + first.channel + " — dead contract, or a service not yet mapped?");
+      } else if (orphans.orphan_consumers.length) {
+        const first = orphans.orphan_consumers[0];
+        out.push("Nothing produces " + first.channel + " — dead listener or misnamed queue?");
+      }
+      if (cyc.cycles.length) {
+        out.push("How do I break the " + cyc.cycles[0].repos.join(" → ") + " dependency cycle?");
+      }
+      if (dc.thin_handlers.length) out.push("Which handlers are thin no-ops, and should I remove them?");
+      if (dc.isolated_repos.length && out.length < 4) {
+        out.push("Why is " + dc.isolated_repos[0] + " isolated from the other services?");
+      }
+      if (out.length < 3) out.push("What's the difference between dead code, orphans, and gaps?");
+      return out.slice(0, 5);
     }
     // system scope default
     out.push("What services are in this system?");
@@ -4926,8 +4962,16 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
                 </svg>
               </button>
             ) : (
-              <button className="chat-send" onClick={() => sendMsg(input)} disabled={!input.trim()}>
-                ↑
+              <button
+                className={"chat-send" + (input.trim() ? " active" : "")}
+                onClick={() => sendMsg(input)}
+                disabled={!input.trim()}
+                aria-label="Send message"
+                title="Send"
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+                  <path d="M3.4 20.4l17.45-7.48c.81-.35.81-1.49 0-1.84L3.4 3.6c-.66-.29-1.39.2-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
+                </svg>
               </button>
             )}
           </div>

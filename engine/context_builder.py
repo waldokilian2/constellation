@@ -281,10 +281,18 @@ class ContextBuilder:
         sections.append(
             "You have board tools you can call to inspect and change the board: "
             "``list_boards``, ``list_board_items``, ``move_board_item`` (move a "
-            "card to a different status column — this writes to GitHub), and "
-            "``add_board_comment`` (comment on an item's issue). Use them to act "
-            "on the board when the user asks (e.g. move an item, add a comment), "
-            "not just to describe it. After a move/comment, confirm what you did."
+            "card to a different status column — this writes to GitHub), "
+            "``add_board_comment`` (comment on an item's issue), and "
+            "``create_board_item`` (create a new issue and add it to the board, "
+            "optionally in a given Status lane). Use them to act on the board "
+            "when the user asks — not just to describe it. After any write, "
+            "confirm what you did (issue number, title, lane).\n"
+            "**Creating new issues requires confirmation.** Before calling "
+            "``create_board_item``, tell the user what you're about to create "
+            "(title, description, labels, starting lane) and ask for their go-ahead. "
+            "Only call the tool after they explicitly confirm. If an issue with "
+            "that title already exists, say so and ask whether they want a "
+            "duplicate before creating."
         )
         return "\n\n".join(sections)
 

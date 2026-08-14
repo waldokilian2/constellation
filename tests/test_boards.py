@@ -331,6 +331,137 @@ def test_board_tools_no_boards_returns_clear_error():
     assert "No boards are connected" in res["error"]
 
 
+def test_create_item_project_board_creates_issue_and_adds():
+    """create_item: duplicate search → issue_write create → add_project_item → lane by issue-ref."""
+    calls = []
+
+    def issue_write(args):
+        calls.append(("issue_write", args))
+        return _Result({"number": 99, "title": args.get("title"), "state": "open",
+                        "html_url": "https://github.com/waldokilian2/constellation/issues/99"})
+
+    def projects_write(args):
+        calls.append(("projects_write", args))
+        return _Result({"ok": True})
+
+    def projects_list(args):
+        calls.append(("projects_list", args))
+        if args.get("method") == "list_project_items":
+            return _Result({"items": [{
+                "id": 555001,
+                "content": {"number": 99, "title": "New thing", "state": "open",
+                            "html_url": "https://github.com/waldokilian2/constellation/issues/99"},
+                "fields": [{"name": "Status", "value": {"name": "Backlog"}}],
+            }], "pageInfo": {"hasNextPage": False}})
+        return _Result({"projects": []})
+
+    board = {"provider": "github-mcp", "kind": "project",
+             "config": {"owner": "waldokilian2", "project_number": 2},
+             # the repo is learned from an existing item's raw content
+             "items": [{"id": "x#1", "raw": {"content": {"repository": "waldokilian2/constellation"}}}]}
+    def search_issues(args):
+        calls.append(("search_issues", args))
+        return _Result({"items": []})  # no duplicate
+
+    session = _FakeSession({
+        "search_issues": search_issues,
+        "issue_write": issue_write,
+        "projects_write": projects_write,
+        "projects_list": projects_list,
+    })
+    item = asyncio.run(_provider(board, session).create_item(board, "New thing", body="desc", labels=["bug"], status="Backlog"))
+
+    tools = [(n, a) for (n, a) in calls]
+    # 1) duplicate guard searched first
+    assert tools[0][0] == "search_issues"
+    # 2) issue created in the repo derived from existing items
+    create = next(a for n, a in tools if n == "issue_write")
+    assert create["method"] == "create" and create["repo"] == "constellation"
+    assert create["labels"] == ["bug"]
+    # 3) added to the project
+    assert any(n == "projects_write" and a["method"] == "add_project_item" and a["issue_number"] == 99
+               for n, a in tools)
+    # 4) lane set by ISSUE REFERENCE (works with any add-response id format)
+    assert any(n == "projects_write" and a["method"] == "update_project_item"
+               and a.get("issue_number") == 99
+               and a["updated_field"] == {"name": "Status", "value": "Backlog"}
+               for n, a in tools)
+    # returns the canonical project item
+    assert item.number == "99" and item.status == "Backlog"
+
+
+def test_create_item_duplicate_title_returns_existing():
+    """The duplicate guard: an open issue with the same title is returned, not re-created."""
+    session = _FakeSession({
+        "search_issues": _Result({"items": [
+            {"number": 81, "title": "Add retry logic", "state": "open",
+             "html_url": "https://github.com/waldokilian2/constellation/issues/81"},
+        ]}),
+    })
+    board = {"provider": "github-mcp", "kind": "issues",
+             "config": {"owner": "waldokilian2", "repo": "constellation"},
+             "items": []}
+    item = asyncio.run(_provider(board, session).create_item(board, "Add retry logic"))
+    # returned the existing issue; issue_write (create) was never called
+    assert item.number == "81"
+    assert all(n != "issue_write" for n, _ in session.calls)
+
+
+def test_create_item_closed_duplicate_does_not_block():
+    """A CLOSED issue with the same title is not a duplicate — a new one is created
+    (and its status must not be the closed state, which would add a 'closed' lane)."""
+    calls = []
+
+    def issue_write(args):
+        calls.append(args)
+        return _Result({"number": 90, "title": args.get("title"), "state": "open",
+                        "html_url": "https://github.com/waldokilian2/constellation/issues/90"})
+
+    session = _FakeSession({
+        "search_issues": _Result({"items": [
+            {"number": 81, "title": "Add retry logic", "state": "closed",
+             "html_url": "https://github.com/waldokilian2/constellation/issues/81"},
+        ]}),
+        "issue_write": issue_write,
+    })
+    board = {"provider": "github-mcp", "kind": "issues",
+             "config": {"owner": "waldokilian2", "repo": "constellation"},
+             "items": []}
+    item = asyncio.run(_provider(board, session).create_item(board, "Add retry logic"))
+    # a new open issue was created, NOT the closed one
+    assert item.number == "90"
+    assert len(calls) == 1  # exactly one create
+
+
+def test_board_tools_create_item_caches_result():
+    from unittest.mock import patch
+    from engine.boards.tools import execute_board_tool
+    from engine.models import BoardItem
+
+    boards = [{
+        "id": "github-project:waldokilian2/2", "provider": "github-mcp", "kind": "project",
+        "name": "Constellation Board",
+        "items": [],
+    }]
+    state = {"boards": boards}
+
+    class Store:
+        def load_boards(self, pid): return state
+        def save_boards(self, pid, d): state["boards"] = d["boards"]
+
+    class FakeProvider:
+        async def create_item(self, board, title, body, labels, status):
+            return BoardItem(id="github-project:waldokilian2/2#777", number="100",
+                             title=title, status=status or "Backlog")
+
+    with patch("engine.boards.tools.provider_for", return_value=FakeProvider()):
+        res = execute_board_tool(Store(), "p", "create_board_item",
+                                 {"title": "AI-made issue", "status": "Backlog"})
+    assert res["ok"] is True and res["item"]["number"] == "100"
+    # cached onto the board
+    assert state["boards"][0]["items"][0]["id"].endswith("#777")
+
+
 def test_provider_for_unknown_raises():
     try:
         provider_for({"provider": "nope"})

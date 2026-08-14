@@ -38,6 +38,10 @@ services:
       GITHUB_MCP_TOOLSETS: ${GITHUB_MCP_TOOLSETS:-issues,projects}
       GITHUB_MCP_TIMEOUT: ${GITHUB_MCP_TIMEOUT:-120}
       GITHUB_MCP_CONNECT_TIMEOUT: ${GITHUB_MCP_CONNECT_TIMEOUT:-10}
+      # Wall-clock budget per board operation (sync/connect vs writes), covering
+      # the whole MCP call chain — not just one call.
+      BOARD_OP_TIMEOUT: ${BOARD_OP_TIMEOUT:-300}
+      BOARD_WRITE_TIMEOUT: ${BOARD_WRITE_TIMEOUT:-180}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/health', timeout=3)\""]

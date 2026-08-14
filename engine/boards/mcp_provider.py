@@ -569,6 +569,158 @@ class McpBoardProvider(BoardProvider):
         # Some deployments return only an ack — refetch the canonical state.
         return await self.get_item(board, item_id) or BoardItem(id=item_id)
 
+    async def create_item(
+        self, board: dict | None, title: str, body: str = "",
+        labels: list | None = None, status: str = "",
+    ) -> BoardItem:
+        """Create a new issue and add it to the board (project), or create an
+        issue directly (issues board). Returns the new board item."""
+        labels = labels or []
+        # The issue is created in the repo the board's items live in. Project
+        # boards aggregate items from a repo — derive it from an existing item;
+        # fall back to the board config's repo when the board is empty.
+        repo = self.repo
+        if self.kind == "project":
+            if not repo:
+                items = (board or self.board).get("items") or []
+                for it in items:
+                    r = (it.get("raw", {}).get("content") or {}).get("repository") or ""
+                    if r:
+                        repo = r
+                        break
+            if not repo:
+                raise BoardError(
+                    "Can't tell which repo to create the issue in — sync the board "
+                    "first (it learns the repo from existing items) or set 'repo' "
+                    "in the board config.",
+                    status=400,
+                )
+        if not self.owner or not repo:
+            raise BoardError("create needs an owner and repo", status=400)
+        if "/" in repo:
+            iowner, _, irepo = repo.partition("/")
+        else:
+            iowner, irepo = self.owner, repo
+
+        # Duplicate guard: if an OPEN issue with this exact title already exists,
+        # return it instead of creating another. The AI chat retries failed tool
+        # calls, so without this a timeout-after-success would mint duplicates.
+        # Only OPEN issues count as duplicates — a closed issue with the same
+        # title must not block a new issue (nor surface a stray "closed" lane).
+        try:
+            existing = await self._call(
+                "search_issues",
+                {"query": title, "owner": iowner, "repo": irepo, "perPage": 30},
+            )
+            hits = _extract_items(_result_json(existing))
+        except BoardError:
+            hits = []  # search unavailable — fall through to create
+        for hit in hits:
+            if str(hit.get("state") or "open").lower() != "open":
+                continue  # only an open issue is a real duplicate
+            if html.unescape(hit.get("title") or "").strip() == title.strip():
+                dup = _item_from_issue(f"{iowner}/{irepo}", hit)
+                # already on a project board? return the card form.
+                if self.kind == "project":
+                    refreshed = await self._list_project_items(board or self.board)
+                    for it in refreshed:
+                        if (it.raw.get("content") or {}).get("number") == dup.number:
+                            return it
+                return dup
+
+        # 1) create the issue
+        create_args: dict[str, Any] = {
+            "owner": iowner,
+            "repo": irepo,
+            "method": "create",
+            "title": title,
+        }
+        if body:
+            create_args["body"] = body
+        if labels:
+            create_args["labels"] = labels
+        result = await self._call("issue_write", create_args, retry_transient=False)
+        data = _result_json(result)
+        # The create response's envelope varies (flat issue / wrapped / ack) —
+        # resolve the new issue's number defensively.
+        issue_number = None
+        created = data if isinstance(data, dict) else {}
+        for candidate in (
+            created,                                  # flat: {"number": 99, ...}
+            created.get("issue") or {},               # wrapped: {"issue": {...}}
+            created.get("data") or {},                # {"data": {...}}
+            created.get("item") or {},
+        ):
+            if isinstance(candidate, dict) and candidate.get("number") is not None:
+                issue_number = candidate["number"]
+                created = candidate
+                break
+        if issue_number is None:
+            # Observed shape: {"id": "5151007331", "url": ".../issues/81"} —
+            # no number field, but the issue number is in the URL.
+            import re as _re
+            url = created.get("url") or created.get("html_url") or ""
+            m = _re.search(r"/issues/(\d+)", url)
+            if m:
+                issue_number = int(m.group(1))
+                created["number"] = issue_number  # for _item_from_issue below
+        if issue_number is None:
+            raise BoardError(
+                "Issue was created but its number couldn't be read from the "
+                f"response: {str(data)[:200]}",
+                status=502,
+            )
+
+        # 2) for a project board, add the issue to the project
+        if self.kind == "project":
+            add_result = await self._call(
+                "projects_write",
+                {
+                    "method": "add_project_item",
+                    "owner": self.owner,
+                    "project_number": int(self.project_number),
+                    "item_type": "issue",
+                    "item_owner": iowner,
+                    "item_repo": irepo,
+                    "issue_number": issue_number,
+                },
+                retry_transient=False,
+            )
+            add_data = _result_json(add_result)
+            add = add_data if isinstance(add_data, dict) else {}
+            node_id = add.get("node_id") or add.get("id") or ""
+            # The lane update accepts either the numeric item id or (better)
+            # the issue reference — the GraphQL node-id string can't be int()'d,
+            # so resolve by owner/repo/issue_number instead (format-independent).
+            if status:
+                await self._call(
+                    "projects_write",
+                    {
+                        "method": "update_project_item",
+                        "owner": self.owner,
+                        "project_number": int(self.project_number),
+                        "item_owner": iowner,
+                        "item_repo": irepo,
+                        "issue_number": issue_number,
+                        "updated_field": {"name": "Status", "value": str(status)},
+                    },
+                    retry_transient=False,
+                )
+            # Refresh from the board so the returned card reflects the project.
+            refreshed = await self._list_project_items(board or self.board)
+            for it in refreshed:
+                content = (it.raw.get("content") or {})
+                if content.get("number") == issue_number:
+                    return it
+            _ = node_id  # (kept for debugging; resolution no longer needs it)
+        # Fall-through (issues board, or the refresh missed the new card). A
+        # project board's card must never carry the issue's open/closed state as
+        # its swim-lane status — that would mint a stray "open"/"closed" column.
+        item = _item_from_issue(f"{iowner}/{irepo}", created)
+        if self.kind == "project":
+            item.status = status or ""  # requested lane, or none (not open/closed)
+        return item
+
     async def add_comment(self, board: dict | None, item_id: str, body: str) -> dict:
         if self.kind == "project":
             # Comments live on the underlying issue; resolve repo + number from the item.

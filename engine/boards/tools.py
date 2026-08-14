@@ -67,6 +67,31 @@ BOARD_TOOL_DEFINITIONS = [
             "required": ["item_id", "body"],
         },
     },
+    {
+        "name": "create_board_item",
+        "description": (
+            "Create a new issue and add it to the board. For project boards, the "
+            "issue is created in the repo the board's items live in, added to the "
+            "GitHub Project, and optionally placed in a Status lane. "
+            "CONFIRM BEFORE CREATING: present the title, description, labels, and "
+            "starting lane to the user and get their explicit confirmation FIRST; "
+            "only call this tool after they confirm. "
+            "DUPLICATES ARE GUARDED: if an OPEN issue with the same title already "
+            "exists it is returned instead of creating another — so do NOT retry "
+            "this tool after a timeout; call list_board_items first to check."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Issue title."},
+                "body": {"type": "string", "description": "Optional issue description (markdown)."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Optional labels."},
+                "status": {"type": "string", "description": "Optional starting Status lane (e.g. 'Backlog')."},
+                "board_id": {"type": "string", "description": "Optional board id (defaults to the first)."},
+            },
+            "required": ["title"],
+        },
+    },
 ]
 
 BOARD_TOOL_NAMES = {t["name"] for t in BOARD_TOOL_DEFINITIONS}
@@ -161,6 +186,22 @@ async def _execute(store, pid: str, tool_name: str, args: dict) -> dict:
     if tool_name == "add_board_comment":
         await provider.add_comment(board, args["item_id"], args["body"])
         return {"ok": True, "item_id": args["item_id"], "message": "Comment added."}
+
+    if tool_name == "create_board_item":
+        item = await provider.create_item(
+            board, args["title"], args.get("body", ""), args.get("labels") or [],
+            args.get("status", ""),
+        )
+        # cache the new item so list/sync and the UI show it
+        data = store.load_boards(pid)
+        for b in data.get("boards", []):
+            if b["id"] == board["id"]:
+                _upsert_item(b, item.to_dict())
+        store.save_boards(pid, data)
+        return {
+            "ok": True, "item": item.to_dict(),
+            "message": f"Created issue #{item.number} and added it to the board.",
+        }
 
     return {"error": f"Unknown board tool: {tool_name}"}
 

@@ -1979,6 +1979,8 @@ function BoardsView({ pid }) {
   const [adding, setAdding] = useState(false);  // show the connect form alongside existing boards
   const [collapsed, setCollapsed] = useState({});  // board id -> collapsed (only header shown)
   const [connecting, setConnecting] = useState(false);  // connect form in-flight
+  // New-issue composer: boardId -> { open, title, body, status, busy, error }
+  const [newIssue, setNewIssue] = useState({});
   const [syncing, setSyncing] = useState({});  // boardId -> true while that board syncs
   // Per-item write feedback: itemId -> { action: "move"|"comment", error, message }
   const [busy, setBusy] = useState({});
@@ -2030,7 +2032,7 @@ function BoardsView({ pid }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider: "github-mcp", config }),
-    }, 120000)
+    }, 330000)
       .then((res) => {
         if (res && res.board) {
           // merge (don't replace) so adding a 2nd board keeps the first
@@ -2048,7 +2050,7 @@ function BoardsView({ pid }) {
   const sync = (bid) => {
     setSyncing((s) => ({ ...s, [bid]: true }));
     setError("");
-    fetchJSON(projPath(pid, "/boards/" + encodeURIComponent(bid) + "/sync"), { method: "POST" })
+    fetchJSONTimeout(projPath(pid, "/boards/" + encodeURIComponent(bid) + "/sync"), { method: "POST" }, 330000)
       .then((res) => {
         setData((d) => ({ boards: ((d && d.boards) || []).map((b) => (b.id === bid && res.board) ? res.board : b) }));
       })
@@ -2078,7 +2080,7 @@ function BoardsView({ pid }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item_id: itemId, status }),
-    }, 120000)
+    }, 200000)
       .then((res) => {
         if (res && res.item) {
           // reconcile with the canonical server state
@@ -2108,12 +2110,42 @@ function BoardsView({ pid }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item_id: itemId, body }),
-    }, 60000)
+    }, 200000)
       .then(() => setBusy((b) => { const n = { ...b }; delete n[itemId]; return n; }))
       .catch((e2) => {
         setBusy((b) => ({ ...b, [itemId]: { action: "comment", error: true, message: e2.message } }));
         setError(e2.message);
       });
+  };
+
+  // Create a new issue on a board (creates the GitHub issue, adds it to the
+  // project board, optionally in a starting Status lane).
+  const createIssue = (bid, e) => {
+    e.preventDefault();
+    const ni = newIssue[bid] || {};
+    if (!ni.title || !ni.title.trim()) return;
+    setNewIssue((s) => ({ ...s, [bid]: { ...ni, busy: true, error: "" } }));
+    const optNames = ((data && data.boards.find((b) => b.id === bid)) || {}).status_options || [];
+    const labels = (ni.labels || "").split(",").map((l) => l.trim()).filter(Boolean);
+    fetchJSONTimeout(projPath(pid, "/boards/" + encodeURIComponent(bid) + "/items/create"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: ni.title.trim(), body: ni.body || "", labels, status: ni.status || "" }),
+    }, 200000)
+      .then((res) => {
+        if (res && res.item) {
+          setData((d) => ({
+            boards: ((d && d.boards) || []).map((b) => {
+              if (b.id !== bid) return b;
+              const existing = (b.items || []).filter((it) => it.id !== res.item.id);
+              return { ...b, items: [...existing, res.item] };
+            }),
+          }));
+        }
+        setNewIssue((s) => ({ ...s, [bid]: { open: false, title: "", body: "", status: "", labels: "", busy: false, error: "" } }));
+      })
+      .catch((e2) => setNewIssue((s) => ({ ...s, [bid]: { ...(s[bid] || {}), busy: false, error: e2.message } })));
+    void optNames;  // lane list read from the board map at render time
   };
 
   const boards = (data && data.boards) || [];
@@ -2227,14 +2259,70 @@ function BoardsView({ pid }) {
               </div>
               <div className="board-head-actions">
                 <button
-                  className="gaps-action board-sync-action"
+                  className="gaps-action"
                   disabled={!!syncing[b.id]}
                   onClick={() => sync(b.id)}
                   title="Pull the latest items and columns from GitHub via MCP"
                 >{syncing[b.id] ? <><span className="spinner" /> Syncing…</> : "⟳ Sync from GitHub"}</button>
+                <button
+                  className="gaps-action"
+                  onClick={() => setNewIssue((s) => ({ ...s, [b.id]: { open: !(s[b.id] || {}).open, title: (s[b.id] || {}).title || "", body: "", status: "", labels: "", busy: false, error: "" } }))}
+                  title="Create a new issue and add it to this board"
+                >＋ New issue</button>
                 <button className="gaps-action danger board-disconnect" onClick={() => disconnect(b.id)}>Disconnect</button>
               </div>
             </div>
+            {(newIssue[b.id] || {}).open && (
+              <form className="board-new-issue" onSubmit={(e) => createIssue(b.id, e)}>
+                <input
+                  className="boards-input board-new-title"
+                  placeholder="Issue title…"
+                  value={newIssue[b.id].title || ""}
+                  onChange={(e) => setNewIssue((s) => ({ ...s, [b.id]: { ...s[b.id], title: e.target.value } }))}
+                  required
+                  autoFocus
+                  disabled={newIssue[b.id].busy}
+                />
+                <textarea
+                  className="boards-input board-new-body"
+                  placeholder="Description (optional, markdown)…"
+                  value={newIssue[b.id].body || ""}
+                  onChange={(e) => setNewIssue((s) => ({ ...s, [b.id]: { ...s[b.id], body: e.target.value } }))}
+                  rows={3}
+                  disabled={newIssue[b.id].busy}
+                />
+                <div className="board-new-row">
+                  <input
+                    className="boards-input"
+                    placeholder="labels (comma-separated, optional)"
+                    value={newIssue[b.id].labels || ""}
+                    onChange={(e) => setNewIssue((s) => ({ ...s, [b.id]: { ...s[b.id], labels: e.target.value } }))}
+                    disabled={newIssue[b.id].busy}
+                  />
+                  {b.kind === "project" && (
+                    <BoardStatusSelect
+                      value={newIssue[b.id].status || ""}
+                      options={(b.status_options || []).map((o) => (typeof o === "string" ? o : o.name)).filter(Boolean)}
+                      disabled={newIssue[b.id].busy}
+                      disabledTitle="Creating…"
+                      onSelect={(v) => setNewIssue((s) => ({ ...s, [b.id]: { ...s[b.id], status: v } }))}
+                    />
+                  )}
+                  <button type="submit" className="gaps-action" disabled={newIssue[b.id].busy || !(newIssue[b.id].title || "").trim()}>
+                    {newIssue[b.id].busy ? <><span className="spinner" /> Creating…</> : "Create issue"}
+                  </button>
+                  <button
+                    type="button"
+                    className="gaps-action"
+                    disabled={newIssue[b.id].busy}
+                    onClick={() => setNewIssue((s) => ({ ...s, [b.id]: { open: false, title: "", body: "", status: "", labels: "", busy: false, error: "" } }))}
+                  >✕ Cancel</button>
+                </div>
+                {!!newIssue[b.id].error && (
+                  <div className="gaps-empty board-error">{newIssue[b.id].error}</div>
+                )}
+              </form>
+            )}
             {collapsed[b.id] ? (
               <div className="board-summary">
                 {items.length} item{items.length === 1 ? "" : "s"} ·{" "}

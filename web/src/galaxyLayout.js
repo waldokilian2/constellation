@@ -81,6 +81,11 @@ const SOFT_BAND = 1.15;
 // clears it, up to this multiplier of its natural bend.
 const MAX_BEND_SCALE = 2.5;
 
+// TOTAL bend cap (px) regardless of the multiplier: the arc and its label
+// pill must never swing so far from the chord that they visually detach
+// from their endpoints.  Beyond this, the resolver pushes repos instead.
+const MAX_BEND_PX = 220;
+
 // Strength of the pill-vs-third-party-orb repulsion during relaxation.
 const PILL_REPULSE = 0.1;
 
@@ -151,7 +156,7 @@ export function edgeBendSide(a, b, others, flip) {
 // label pill sits at the curve midpoint.  `bendScale` multiplies the natural
 // bend — arc-over routing (resolveEdgeBends) raises it per edge so a curve
 // clears third-party orbs/labels instead of running under them.  The TOTAL
-// bend is capped at 220px so an arc (and its label pill) never swings so far
+// bend is capped at MAX_BEND_PX so an arc (and its label pill) never swings so far
 // from the chord that it visually detaches from its endpoints — beyond the
 // cap, the resolver pushes repos instead of bending further.  The layout
 // resolver and the renderer must pass the same bendScale per directed edge.
@@ -163,7 +168,7 @@ export function edgeCurve(a, b, side, bendScale) {
   const s = side || 1;
   const start = { x: a.x + ux * (a.r + GAP), y: a.y + uy * (a.r + GAP) };
   const end = { x: b.x - ux * (b.r + GAP), y: b.y - uy * (b.r + GAP) };
-  const bend = Math.min(220, d * 0.26 * (bendScale || 1));
+  const bend = Math.min(MAX_BEND_PX, d * 0.26 * (bendScale || 1));
   const c = { x: (start.x + end.x) / 2 - s * uy * bend, y: (start.y + end.y) / 2 + s * ux * bend };
   const mid = {
     x: 0.25 * start.x + 0.5 * c.x + 0.25 * end.x,
@@ -342,17 +347,20 @@ export function resolveEdgeBends(edges, positions, pillWFor) {
     // has nowhere clear to land and rests a few px off an orb.
     const pillHalf = ((pillWFor && pillWFor[key]) || 0) / 2;
     // Cheap corridor prefilter: only repos whose CENTER lies inside the
-    // chord's expanded bounding box can interact with this curve (the bend
-    // never exceeds 220px off-chord, plus the clearance and the largest orb
-    // radius).  At scale this skips the sampling work for nearly every
-    // third-party repo — the old full scan made each resolver pass O(edges
-    // × repos × segments) and froze layouts of 50+ repos.
+    // chord's expanded bounding box can interact with this curve.  The curve
+    // stays within (MAX_BEND_PX + max orb radius + 3) of the chord box; a
+    // repo's orb reaches r ≤ 82 beyond its center and its label hangs up to
+    // 90px to the sides and (82 + LABEL_GAP + LABEL_H) below.  At scale this
+    // skips the sampling work for nearly every third-party repo — the old
+    // full scan made each resolver pass O(edges × repos × segments) and
+    // froze layouts of 50+ repos.
     const hwC = Math.abs(b.x - a.x) / 2, hhC = Math.abs(b.y - a.y) / 2;
     const cxC = (a.x + b.x) / 2, cyC = (a.y + b.y) / 2;
-    const mC = 220 + CURVE_CLEAR + pillHalf + 82;
+    const ex = MAX_BEND_PX + 85;
     const near = positions.filter((p) => p !== a && p !== b
-      && p.x >= cxC - hwC - mC && p.x <= cxC + hwC + mC
-      && p.y >= cyC - hhC - mC && p.y <= cyC + hhC + mC);
+      && p.x >= cxC - hwC - ex - LABEL_HALF_W && p.x <= cxC + hwC + ex + LABEL_HALF_W
+      && p.y >= cyC - hhC - ex - 82
+      && p.y <= cyC + hhC + ex + 82 + LABEL_GAP + LABEL_H);
     if (!near.length) continue;
     let scale = 1;
     for (let it = 0; it < 10; it++) {
@@ -388,9 +396,9 @@ export function resolveEdgeBends(edges, positions, pillWFor) {
         }
       }
       if (pen <= 0) break;
-      // The total bend is capped (220px): raising the multiplier can't help
+      // The total bend is capped (MAX_BEND_PX): raising the multiplier can't help
       // anymore — the resolver's arc-capped push handles the residual.
-      if (curve.bend >= 220 - 1e-6) break;
+      if (curve.bend >= MAX_BEND_PX - 1e-6) break;
       scale = Math.min(MAX_BEND_SCALE, scale * ((CURVE_CLEAR + pen) / CURVE_CLEAR + 0.05));
     }
     if (scale !== 1) out[key] = scale;
@@ -1107,10 +1115,10 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
         { x: positions[e.b].x, y: positions[e.b].y, r: postR[e.b] },
         side, bends[bendKey] || 1
       );
-      // Only when the RENDERED curve is at the total-bend cap (220px) can
+      // Only when the RENDERED curve is at the total-bend cap (MAX_BEND_PX) can
       // bending no longer help — the arc-over solver stopped early at the
       // cap for these edges and the pushes below finish the job.
-      if (curve.bend < 220 - 0.01) continue;
+      if (curve.bend < MAX_BEND_PX - 0.01) continue;
       const pillHalf = (pairPill.get(e.a < e.b ? e.a + "|" + e.b : e.b + "|" + e.a) || 0) / 2;
       const pts = [];
       for (let s = 0; s <= CURVE_SEGS; s++) pts.push(curvePoint(curve, s / CURVE_SEGS));
@@ -1138,24 +1146,24 @@ export function layoutGalaxy(repos, epCount, edges, W, H, pillWFor) {
         }
       }
     }
-      // ── Oscillation guard (per-pass drift) ──
-      if (pass > 0) {
-        let drift = 0;
-        for (let k = 0; k < n; k++) {
-          drift += Math.abs(positions[k].x - prevX[k]) + Math.abs(positions[k].y - prevY[k]);
-        }
-        driftSince += drift;
-        // Stop when drift stops meaningfully shrinking: genuine convergence
-        // reaches drift 0 (the !moved break below), while oscillation keeps
-        // drift flat forever.
-        if (drift < bestDrift - 1) { bestDrift = drift; stalePasses = 0; }
-        else if (++stalePasses >= 10) break;
+    // ── Oscillation guard (per-pass drift) ──
+    if (pass > 0) {
+      let drift = 0;
+      for (let k = 0; k < n; k++) {
+        drift += Math.abs(positions[k].x - prevX[k]) + Math.abs(positions[k].y - prevY[k]);
       }
-      prevX = positions.map((p) => p.x);
-      prevY = positions.map((p) => p.y);
-      if (!moved) break;
+      driftSince += drift;
+      // Stop when drift stops meaningfully shrinking: genuine convergence
+      // reaches drift 0 (the !moved break below), while oscillation keeps
+      // drift flat forever.
+      if (drift < bestDrift - 1) { bestDrift = drift; stalePasses = 0; }
+      else if (++stalePasses >= 10) break;
     }
-  };
+    prevX = positions.map((p) => p.x);
+    prevY = positions.map((p) => p.y);
+    if (!moved) break;
+  }
+};
   resolvePasses();
   // ── Re-center + round, then re-converge on the integer state ──
   // The resolver converges on fractional positions, but the final

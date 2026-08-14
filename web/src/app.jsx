@@ -11,11 +11,31 @@ import MarkdownContent from "./Markdown.jsx";
 import ReasoningBlock from "./ReasoningBlock.jsx";
 import ToolSteps from "./ToolSteps.jsx";
 import { useConversationChat } from "./useConversationChat.js";
+import { layoutGalaxy, edgeCurve, edgeBendSide, placeEdgePills, curvePoint, EDGE_PILL, resolveEdgeBends, labelHalfWidth, LABEL_GAP, LABEL_H } from "./galaxyLayout.js";
 import satImg from "./assets/broken-satellite.png";
 import "./styles.css";
 
 /* ---------------- helpers ---------------- */
 const repoFromId = (id) => (typeof id === "string" ? id.split(":")[0] : "");
+
+// Edge-label text for a bundled direction edge: single channel → its name
+// (HTTP links prefixed with the verb), multiple channels → counts.
+const edgeLabelText = (items) => {
+  const httpItems = items.filter((it) => it.kind === "http");
+  const messages = items.filter((it) => it.kind !== "http");
+  if (items.length === 1) {
+    const it = items[0];
+    return it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel;
+  }
+  return [
+    messages.length ? messages.length + " msg" + (messages.length > 1 ? "s" : "") : "",
+    httpItems.length ? httpItems.length + " HTTP" : "",
+  ].filter(Boolean).join(" · ");
+};
+
+// Rendered pill width incl. glow padding — the layout uses this exact
+// width for per-pair clearance, so the pill always clears both orbs.
+const edgePillWidth = (label) => label.length * 6.5 + 22 + 2 * EDGE_PILL.PAD;
 
 const DIFF_COLORS = { added: "#4ade80", changed: "#fbbf24", removed: "#f87171", same: "#64748b" };
 const DIFF_LABELS = { added: "new", changed: "changed", removed: "removed", same: "unchanged" };
@@ -278,15 +298,18 @@ function findRelations(root, target) {
 // { containerRef, viewport, animating, dragRef, handlers..., zoomControls }
 // - clickSelector: CSS selector for elements that should NOT trigger a pan (e.g. ".repo-node, .flow-card")
 //   clicks on these are passed through; clicks on empty space start a pan
-function usePanZoom(clickSelector) {
+// - initialViewport: optional starting {x, y, zoom} (e.g. a fit-to-content
+//   viewport); defaults to the plain 1:1 origin.  ⤢ (reset) returns here.
+function usePanZoom(clickSelector, initialViewport) {
   const containerRef = useRef(null);
-  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
+  const initialRef = useRef(initialViewport || { x: 0, y: 0, zoom: 1 });
+  const [viewport, setViewport] = useState(initialRef.current);
   const [animating, setAnimating] = useState(false);
   const dragRef = useRef({ active: false, startX: 0, startY: 0, vpX: 0, vpY: 0, moved: false });
 
   const reset = useCallback((vp) => {
     setAnimating(true);
-    setViewport(vp || { x: 0, y: 0, zoom: 1 });
+    setViewport(vp || initialRef.current);
     setTimeout(() => setAnimating(false), 400);
   }, []);
 
@@ -347,7 +370,7 @@ function usePanZoom(clickSelector) {
       <button onClick={() => zoomBy(0.15)} title="Zoom in">+</button>
       <span className="zoom-level">{Math.round(viewport.zoom * 100)}%</span>
       <button onClick={() => zoomBy(-0.15)} title="Zoom out">−</button>
-      <button onClick={() => reset({ x: 0, y: 0, zoom: 1 })} title="Reset view">⤢</button>
+      <button onClick={() => reset(null)} title="Reset view">⤢</button>
     </div>
   );
 
@@ -1147,7 +1170,6 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
   const repos = graph.repos || [];
   const entryPoints = graph.entry_points || [];
   const links = graph.cross_repo_links || [];
-  const pz = usePanZoom(".repo-wrap, .legend, .filter-chip");
 
   // Hovered direction edge → bundled message details shown in a popup
   const [hoverEdge, setHoverEdge] = useState(null); // { items, from, to, mid:{x,y} }
@@ -1194,30 +1216,10 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
   }, [graph]);
 
   const W = dims.w;
-  const H = dims.h;
-  const cx = W / 2, cy = H / 2;
-  const radius = Math.max(120, Math.min(W, H) * 0.34);
-
-  const positions = useMemo(() => {
-    const n = repos.length;
-    return repos.map((name, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(n, 1) - Math.PI / 2;
-      const count = epCount[name] || 0;
-      const r = Math.max(40, Math.min(82, 36 + count * 7));
-      return {
-        name, count, r,
-        x: cx + radius * Math.cos(angle),
-        y: cy + radius * Math.sin(angle),
-      };
-    });
-    // eslint-disable-next-line
-  }, [graph, W, H]);
-
-  const posMap = useMemo(() => {
-    const m = {};
-    positions.forEach((p) => (m[p.name] = p));
-    return m;
-  }, [positions]);
+  // The visible stage is the window minus the fixed topbar (--topbar-h: 72px
+  // in styles.css); the canvas must match it or the bottom 72px of the world
+  // is clipped by .stage's overflow and the camera centers ~36px low.
+  const H = Math.max(320, dims.h - 72);
 
   // Group links by direction (from-repo → to-repo): ONE line per direction, bundling
   // all of that direction's channels / HTTP calls (details shown in a hover popup).
@@ -1243,6 +1245,141 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
     return Object.values(map);
   }, [graph]);
 
+  // Constellation layout: connected repos cluster, isolated repos spiral
+  // outward, everything is collision-free and fit to the viewport
+  // (web/src/galaxyLayout.js — deterministic, no randomness).
+  // pillWFor hands the layout the rendered edge-label widths so linked
+  // pairs keep enough clearance for their label pills.
+  const pillWFor = useMemo(() => {
+    const m = {};
+    edges.forEach((e) => { m[e.from + ">>" + e.to] = edgePillWidth(edgeLabelText(e.items)); });
+    return m;
+  }, [edges]);
+
+  const positions = useMemo(() => layoutGalaxy(repos, epCount, edges, W, H, pillWFor),
+    // eslint-disable-next-line
+    [repos, epCount, edges, W, H, pillWFor]);
+
+  // Per-edge arc-over bends on the final positions — same pure function the
+  // layout resolver uses, so the curve that is drawn is the curve that was
+  // checked (an edge bows out to clear third-party orbs/labels).
+  const edgeBends = useMemo(() => resolveEdgeBends(edges, positions, pillWFor), [edges, positions, pillWFor]);
+
+  // Coordinated pill placement — the same function the layout resolver
+  // used (with the same bends), so every pill renders exactly where the
+  // layout placed it.
+  const pillPlacement = useMemo(() => {
+    const m = {};
+    placeEdgePills(edges, positions, pillWFor, edgeBends).forEach((pl) => { m[pl.from + ">>" + pl.to] = pl; });
+    return m;
+  }, [edges, positions, pillWFor, edgeBends]);
+
+  const posMap = useMemo(() => {
+    const m = {};
+    positions.forEach((p) => (m[p.name] = p));
+    return m;
+  }, [positions]);
+
+  // Bend side per directed edge, derived once from the final positions
+  // (away from the centroid of the other repos — the same rule the layout
+  // used, so the rendered pill sits where the layout reserved space).
+  // The reverse direction of a bidirectional pair flips to the opposite
+  // physical side, so the pair's two pills never share a midpoint.
+  // Returned as a getter so the fit bbox and the ghost-edge render share
+  // the same cached rule.
+  const getSide = useMemo(() => {
+    const m = {};
+    const bidir = new Set();
+    const seen = new Set();
+    edges.forEach((e) => {
+      const key = e.from < e.to ? e.from + "|" + e.to : e.to + "|" + e.from;
+      if (seen.has(key)) bidir.add(key);
+      seen.add(key);
+    });
+    return (from, to) => {
+      const a = posMap[from], b = posMap[to];
+      if (!a || !b) return 1;
+      const key = from + ">>" + to;
+      if (!(key in m)) {
+        const pairKey = from < to ? from + "|" + to : to + "|" + from;
+        const flip = bidir.has(pairKey) && from > to;
+        m[key] = edgeBendSide(a, b,
+          positions.filter((p) => p.name !== a.name && p.name !== b.name), flip);
+      }
+      return m[key];
+    };
+  }, [positions, posMap, edges]);
+
+  // Fit-to-content initial viewport (the flow view's pattern): show the
+  // whole world on first paint — orbs, labels (fixed px, per-repo width),
+  // edge pills, AND the bent edge curves themselves (sampled, so an arc
+  // never swings past the frame edge) — at ≤100% zoom.  Pill-bearing
+  // graphs render at scale 1 inside the layout and can overflow small
+  // viewports; this guarantees the initial view is complete instead of a
+  // cropped zoom-in on the densest part.  ⤢ (reset) returns here.
+  const fitViewport = useMemo(() => {
+    if (!positions.length) return { x: 0, y: 0, zoom: 1 };
+    let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity;
+    positions.forEach((p) => {
+      const lw = labelHalfWidth(p.name);
+      l = Math.min(l, p.x - lw); r = Math.max(r, p.x + lw);
+      l = Math.min(l, p.x - p.r - 24); r = Math.max(r, p.x + p.r + 24);
+      t = Math.min(t, p.y - p.r - 24);
+      b = Math.max(b, p.y + p.r + LABEL_GAP + LABEL_H);
+    });
+    Object.values(pillPlacement).forEach((pl) => {
+      l = Math.min(l, pl.cx - pl.hw); r = Math.max(r, pl.cx + pl.hw);
+      t = Math.min(t, pl.cy - pl.hh); b = Math.max(b, pl.cy + pl.hh);
+    });
+    edges.forEach((e) => {
+      const pa = posMap[e.from], pb = posMap[e.to];
+      if (!pa || !pb) return;
+      const key = e.from + ">>" + e.to;
+      const g = edgeCurve(pa, pb, getSide(e.from, e.to), edgeBends[key] || 1);
+      for (let s = 0; s <= 12; s++) {
+        const p = curvePoint(g, s / 12);
+        l = Math.min(l, p.x); r = Math.max(r, p.x);
+        t = Math.min(t, p.y); b = Math.max(b, p.y);
+      }
+    });
+    if (!isFinite(l)) return { x: 0, y: 0, zoom: 1 };
+    const cw = r - l, ch = b - t;
+    // Fit the whole world, then zoom IN a touch: small projects (the Java EE
+    // seed) hit the 100% cap and stay exactly as-is, while larger ones land
+    // closer to the constellation instead of tiny in a sea of starfield.
+    // Overflowing the frame is fine — the pan/zoom canvas covers it.
+    const DEFAULT_ZOOM_IN = 1.3;
+    const zoom = Math.min(1, Math.min(1, (W - 90 * 2) / cw, (H - 90 * 2) / ch) * DEFAULT_ZOOM_IN);
+    // Center on the ORB CENTROID (mass center), not the content bbox — the
+    // constellation should balance left/right and top/bottom.  Clamp so the
+    // full bbox (labels, pills, arc envelopes) stays within the margins only
+    // while it FITS on an axis; once zoomed in past the fit, keep the
+    // centroid centered and overflow both sides evenly.
+    let sx = 0, sy = 0;
+    positions.forEach((p) => { sx += p.x; sy += p.y; });
+    const ccx = sx / positions.length, ccy = sy / positions.length;
+    const xMin = 90 - l * zoom, xMax = (W - 90) - r * zoom;
+    const yMin = 90 - t * zoom, yMax = (H - 90) - b * zoom;
+    let x = W / 2 - ccx * zoom, y = H / 2 - ccy * zoom;
+    if (xMin <= xMax) x = Math.max(xMin, Math.min(xMax, x));
+    if (yMin <= yMax) y = Math.max(yMin, Math.min(yMax, y));
+    return { x, y, zoom };
+  }, [positions, pillPlacement, edges, posMap, edgeBends, getSide, W, H]);
+
+  const pz = usePanZoom(".repo-wrap, .legend, .filter-chip", fitViewport);
+
+  // Refit when the project changes (like the flow view refits per flow);
+  // resize does NOT refit — ⤢ is the reset.  The guard keeps this from
+  // fighting the user mid-session.
+  const lastGraphRef = useRef(graph);
+  useEffect(() => {
+    if (lastGraphRef.current === graph) return;
+    lastGraphRef.current = graph;
+    pz.setAnimating(true);
+    pz.setViewport(fitViewport);
+    setTimeout(() => pz.setAnimating(false), 400);
+  }, [graph, fitViewport]);
+
   // Ghost edges for channels that were removed since the last analysis.
   const ghostEdges = useMemo(() => {
     if (!cmp) return [];
@@ -1261,26 +1398,6 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
     });
     return out;
   }, [cmp, edges]);
-
-  // One curved line per direction pair. Opposite directions bend to opposite sides
-  // automatically (the control point offsets along the perpendicular, which flips
-  // when a→b becomes b→a), so the two directions stay visually separate.
-  const edgeGeom = (a, b) => {
-    const GAP = 3; // uniform clearance at both orb edges
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const d = Math.hypot(dx, dy) || 1;
-    const ux = dx / d, uy = dy / d;
-    const start = { x: a.x + ux * (a.r + GAP), y: a.y + uy * (a.r + GAP) };
-    const end = { x: b.x - ux * (b.r + GAP), y: b.y - uy * (b.r + GAP) };
-    const bend = Math.min(130, d * 0.26);
-    const c = { x: (start.x + end.x) / 2 - uy * bend, y: (start.y + end.y) / 2 + ux * bend };
-    const mid = {
-      x: 0.25 * start.x + 0.5 * c.x + 0.25 * end.x,
-      y: 0.25 * start.y + 0.5 * c.y + 0.25 * end.y,
-    };
-    const path = "M " + start.x + " " + start.y + " Q " + c.x + " " + c.y + " " + end.x + " " + end.y;
-    return { mid, path };
-  };
 
   return (
     <div className="galaxy">
@@ -1323,7 +1440,8 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
           {edges.map((e) => {
             const a = posMap[e.from], b = posMap[e.to];
             if (!a || !b) return null;
-            const g = edgeGeom(a, b);
+            const ekey = e.from + ">>" + e.to;
+            const g = edgeCurve(a, b, getSide(e.from, e.to), edgeBends[ekey] || 1);
             const httpItems = e.items.filter((it) => it.kind === "http");
             const messages = e.items.filter((it) => it.kind !== "http");
             // Three line colors: sync (HTTP-only), async (message-only), both (mixed)
@@ -1331,31 +1449,30 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
               : (httpItems.length > 0 ? "sync" : "async");
             const km = EDGE_KINDS[kind];
             const prominent = kind !== "async"; // sync/both lines are bolder
-            let label;
-            if (e.items.length === 1) {
-              const it = e.items[0];
-              label = (it.kind === "http" && it.verb) ? (it.verb + " " + it.channel) : it.channel;
-            } else {
-              label = [
-                messages.length ? messages.length + " msg" + (messages.length > 1 ? "s" : "") : "",
-                httpItems.length ? httpItems.length + " HTTP" : "",
-              ].filter(Boolean).join(" · ");
-            }
-            const pillW = label.length * 6.5 + 22;
-            const pillH = 20;
+            const label = edgeLabelText(e.items);
+            const bgW = label.length * 6.5 + 22;
+            const pillW = edgePillWidth(label);
+            const pillH = EDGE_PILL.H;
+            // Pill position comes from the shared coordinated placement
+            // (placeEdgePills) — the exact spot the layout resolver chose.
+            const pl = pillPlacement[e.from + ">>" + e.to];
+            const pillPos = pl ? { x: pl.cx, y: pl.cy } : curvePoint(g, 0.5);
             return (
               <g
                 className={"edge edge-" + kind}
                 key={e.from + ">>" + e.to}
-                onMouseEnter={() => setHoverEdge({ items: e.items, from: e.from, to: e.to, mid: g.mid })}
+                onMouseEnter={() => setHoverEdge({ items: e.items, from: e.from, to: e.to, mid: pillPos })}
                 onMouseLeave={() => setHoverEdge(null)}
               >
-                <path d={g.path} fill="none" stroke={km.color}
+                <path className="edge-line" d={g.path} fill="none" stroke={km.color}
                       strokeWidth={prominent ? 2.2 : 1.6}
                       opacity={prominent ? 0.95 : 0.5} markerEnd={"url(#arrow-" + kind + ")"}></path>
-                <g className="edge-label-pill" transform={"translate(" + g.mid.x + "," + g.mid.y + ")"}>
-                  <rect className={"edge-label-glow " + kind} x={-pillW / 2 - 4} y={-pillH / 2 - 4} width={pillW + 8} height={pillH + 8} rx={(pillH + 8) / 2}></rect>
-                  <rect className={"edge-label-bg " + kind} x={-pillW / 2} y={-pillH / 2} width={pillW} height={pillH} rx={pillH / 2}></rect>
+                {/* Invisible wide hit zone — the visible stroke is ~2px and hard
+                    to catch; this makes every edge highlight reliably. */}
+                <path className="edge-hit" d={g.path} fill="none" stroke="transparent" strokeWidth={16}></path>
+                <g className="edge-label-pill" transform={"translate(" + pillPos.x + "," + pillPos.y + ")"}>
+                  <rect className={"edge-label-glow " + kind} x={-pillW / 2} y={-pillH / 2 - EDGE_PILL.PAD} width={pillW} height={pillH + 2 * EDGE_PILL.PAD} rx={(pillH + 2 * EDGE_PILL.PAD) / 2}></rect>
+                  <rect className={"edge-label-bg " + kind} x={-bgW / 2} y={-pillH / 2} width={bgW} height={pillH} rx={pillH / 2}></rect>
                   <text className={"edge-label " + kind} x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
@@ -1364,14 +1481,24 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
           {ghostEdges.map((ge, i) => {
             const a = posMap[ge.from], b = posMap[ge.to];
             if (!a || !b) return null;
-            const g = edgeGeom(a, b);
+            const gkey = ge.from + ">>" + ge.to;
+            const g = edgeCurve(a, b, getSide(ge.from, ge.to), edgeBends[gkey] || 1);
             const label = (ge.kind === "http" && ge.verb) ? (ge.verb + " " + ge.channel) : ge.channel;
-            const pillW = label.length * 6.5 + 22;
+            const bgW = label.length * 6.5 + 22;
             return (
-              <g className="edge ghost-removed" key={"ghost-" + i}>
-                <path d={g.path} fill="none" stroke="#f87171" strokeWidth="2" strokeDasharray="7 5" opacity="0.25" />
+              <g
+                className="edge ghost-removed"
+                key={"ghost-" + i}
+                onMouseEnter={() => setHoverEdge({
+                  items: [{ channel: ge.channel, kind: ge.kind, verb: ge.verb }],
+                  from: ge.from, to: ge.to, mid: g.mid, status: "removed",
+                })}
+                onMouseLeave={() => setHoverEdge(null)}
+              >
+                <path className="edge-line" d={g.path} fill="none" stroke="#f87171" strokeWidth="2" strokeDasharray="7 5" opacity="0.25" />
+                <path className="edge-hit" d={g.path} fill="none" stroke="transparent" strokeWidth={16} />
                 <g className="edge-label-pill" transform={"translate(" + g.mid.x + "," + g.mid.y + ")"}>
-                  <rect className="edge-label-bg ghost-removed" x={-pillW/2} y={-10} width={pillW} height={20} rx={10} />
+                  <rect className="edge-label-bg ghost-removed" x={-bgW/2} y={-EDGE_PILL.H / 2} width={bgW} height={EDGE_PILL.H} rx={EDGE_PILL.H / 2} />
                   <text className="edge-label ghost-removed" x={0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
                 </g>
               </g>
@@ -1428,7 +1555,7 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
                   </div>
                 );
               })}
-              <div className="repo-label" style={{ top: p.r + 26 }}>{p.name}</div>
+              <div className="repo-label" style={{ top: p.r + 26 }} title={p.name}>{p.name}</div>
               {repoHasDiff && (
                 <span className="repo-diff-badge" title={repoDiffText(rc)}>
                   {rc.added > 0 && <span className="diff-chip added">+{rc.added}</span>}
@@ -1449,6 +1576,9 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
                 <span className="mono">{hoverEdge.from}</span>
                 <span className="edge-popup-arrow">→</span>
                 <span className="mono">{hoverEdge.to}</span>
+                {hoverEdge.status && (
+                  <span className={"edge-popup-status st-" + hoverEdge.status}>{hoverEdge.status}</span>
+                )}
               </div>
               {hoverEdge.items.map((it, i) => (
                 <div className="edge-popup-item" key={i}>
@@ -2511,7 +2641,9 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
   // The channels panel is docked to the right edge (340px + 12px gap); the
   // star field lays out in the remaining width so nothing hides under it.
   const PANEL_W = 352;
-  const W = dims.w - PANEL_W, H = dims.h;
+  // Visible stage height (window minus the fixed 72px topbar — see styles.css
+  // --topbar-h) so the canvas is never bottom-cropped by .stage's overflow.
+  const W = dims.w - PANEL_W, H = Math.max(320, dims.h - 72);
   const cx = W / 2, cy = H / 2;
   const typesPresent = Array.from(new Set(eps.map((e) => e.type)));
 
@@ -3602,7 +3734,9 @@ function DetailPanel({ node, entryPoint, onClose, pid, compare }) {
 function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
   const flows = useMemo(() => detectFlows(graph), [graph]);
   const cmp = useMemo(() => diffStatus(compare), [compare]);
-  const H = dims.h;
+  // Visible stage height (window minus the fixed 72px topbar) so the scroll
+  // area is never bottom-cropped by .stage's overflow.
+  const H = Math.max(320, dims.h - 72);
 
   // Type filter chips (mirrors the Solar view): toggle a flow's origin type
   // on/off. hidden maps originClass -> true when that type is filtered out.
@@ -3776,7 +3910,9 @@ function FlowIndexView({ graph, dims, onSelectFlow, compare }) {
 /* ---------------- Flows Mode: Flow View ---------------- */
 // Solar equivalent — shows repos in a single flow as a DAG with channel edges
 function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
-  const W = dims.w, H = dims.h;
+  // Visible stage height (window minus the fixed 72px topbar — see styles.css
+  // --topbar-h) so the canvas is never bottom-cropped by .stage's overflow.
+  const W = dims.w, H = Math.max(320, dims.h - 72);
   const cmp = useMemo(() => diffStatus(compare), [compare]);
 
   // ── Pan/zoom — path-view style, with fit-to-flow bounds ──────

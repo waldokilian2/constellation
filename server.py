@@ -193,6 +193,23 @@ async def delete_project(pid: str):
     return {"ok": True, "id": pid}
 
 
+class ProjectRenameRequest(BaseModel):
+    """Rename a project (display name only — id, repos and graph are unchanged)."""
+    name: str
+
+
+@app.patch("/api/projects/{pid}")
+async def rename_project(pid: str, req: ProjectRenameRequest):
+    """Rename a project's display name. Returns the updated project metadata."""
+    try:
+        meta = PROJECT_STORE.rename(pid, req.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"Project '{pid}' not found")
+    return meta
+
+
 @app.get("/api/projects/{pid}/graph")
 async def get_project_graph(pid: str):
     """Return the full graph for a project."""

@@ -3229,6 +3229,90 @@ code { font-family: var(--mono); color: var(--cyan); }
 /* Half-width columns get a slightly denser card grid. */
 .split-col .gaps-section-body { grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); }
 
+/* ── Signal cards (Code Issues findings) ── */
+/* Each finding is a transmission-log entry: glyph badge + kind microcopy up
+   top, primary identity in the middle, and a location footer under a hairline.
+   Every kind sets --sig, its accent: rose for dead code, amber/gold for gaps. */
+.signal-card {
+  --sig: var(--amber);
+  position: relative; display: flex; flex-direction: column; gap: 7px;
+  width: 100%; min-width: 0; text-align: left;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 11px 13px 10px; cursor: pointer;
+  transition: border-color .18s, box-shadow .18s, transform .18s, background .18s;
+}
+.sig-dead     { --sig: #fb7185; }
+.sig-thin     { --sig: #fda4af; }
+.sig-isolated { --sig: #94a3b8; }
+.sig-nocons   { --sig: var(--amber); }
+.sig-noprod   { --sig: #fcd34d; }
+.signal-card:hover {
+  border-color: color-mix(in srgb, var(--sig) 40%, var(--border));
+  background: color-mix(in srgb, var(--sig) 6%, var(--panel));
+  box-shadow: 0 10px 28px -14px color-mix(in srgb, var(--sig) 60%, transparent);
+  transform: translateY(-1px);
+}
+.signal-card:active { transform: translateY(0); }
+.signal-card:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+/* Non-interactive findings (isolated repos, cycles) keep a resting card. */
+.sig-isolated, .sig-cycle { cursor: default; }
+.sig-isolated:hover, .sig-cycle:hover {
+  border-color: var(--border); background: var(--panel);
+  box-shadow: none; transform: none;
+}
+
+.sig-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.sig-glyph {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 8px;
+  color: var(--sig);
+  background: color-mix(in srgb, var(--sig) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sig) 30%, transparent);
+}
+.sig-glyph-svg { width: 15px; height: 15px; display: block; }
+.sig-kind {
+  flex-shrink: 0;
+  font-size: 8.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--sig) 85%, var(--text-dim));
+}
+.sig-repo {
+  margin-left: auto; flex-shrink: 1; min-width: 0; max-width: 60%;
+  font-size: 10px; line-height: 1; color: var(--text-dim);
+  background: rgba(255, 255, 255, .035); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sig-name {
+  min-width: 0;
+  font-size: 12.5px; font-weight: 600; line-height: 1.35;
+  color: var(--sig); overflow-wrap: anywhere;
+}
+.sig-isolated .sig-name, .sig-cycle .sig-name { color: var(--text); }
+.sig-foot {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 2px; padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.sig-loc {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 10.5px; color: var(--text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sig-loc::before {
+  content: "⌖"; color: color-mix(in srgb, var(--sig) 70%, transparent);
+  margin-right: 5px;
+}
+.sig-open {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600; color: var(--sig);
+  opacity: 0; transform: translateX(-3px);
+  transition: opacity .15s, transform .15s;
+}
+.signal-card:hover .sig-open,
+.signal-card:focus-visible .sig-open { opacity: 1; transform: translateX(0); }
+/* Zero-size shell that only carries the cycle glyph's arrowhead marker defs. */
+.sig-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
 /* Rift divider: a 1px seam blending rose → amber, star node at the midpoint —
    the fault line between the dead quadrant and the half-wired one. */
 .split-rift {
@@ -3303,6 +3387,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 @media (prefers-reduced-motion: reduce) {
   .broken-satellite { animation: none; }
+  .signal-card, .sig-open { transition: none; }
 }
 
 /* ========== AI Change Planner ========== */

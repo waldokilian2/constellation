@@ -1634,6 +1634,93 @@ function BrokenSatellite() {
   );
 }
 
+/* ---------------- Signal glyphs — Code Issues finding icons ---------------- */
+// Stroke glyphs for each finding kind, drawn in currentColor so the card's
+// per-kind accent (--sig) drives them. 24×24 viewBox, consistent stroke style.
+function SignalGlyph({ kind }) {
+  const s = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" };
+  switch (kind) {
+    case "dead": // node severed from the constellation
+      return (
+        <svg className="sig-glyph-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.2" fill="currentColor" stroke="none" />
+          <path {...s} d="M6.1 6.1 L17.9 17.9" />
+          <path {...s} opacity=".5" d="M5.2 16.4 A 7.8 7.8 0 0 1 6.8 6.1" />
+          <path {...s} opacity=".5" d="M9.2 4.9 A 7.8 7.8 0 0 1 19 12.6" />
+        </svg>
+      );
+    case "thin": // pulse that never fires
+      return (
+        <svg className="sig-glyph-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="7.4" {...s} />
+          <circle cx="12" cy="12" r="3.4" {...s} strokeDasharray="2.4 2.6" />
+        </svg>
+      );
+    case "isolated": // lone star, dashed reach
+      return (
+        <svg className="sig-glyph-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <path {...s} opacity=".65" strokeDasharray="2.4 2.8" d="M4.6 12 A 7.4 7.4 0 0 1 19.4 12" />
+          <path fill="currentColor" stroke="none" d="M12 6.1 l1.5 3.2 3.5 1.2 -3.5 1.2 -1.5 3.2 -1.5 -3.2 -3.5 -1.2 3.5 -1.2 z" />
+        </svg>
+      );
+    case "nocons": // beacon broadcasting into silence
+      return (
+        <svg className="sig-glyph-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="9" cy="12" r="2.8" fill="currentColor" stroke="none" />
+          <path {...s} d="M13.4 9.6 A 3.1 3.1 0 0 1 13.4 14.4" />
+          <path {...s} opacity=".6" d="M16.8 7.6 A 6.3 6.3 0 0 1 16.8 16.4" />
+        </svg>
+      );
+    case "noprod": // dish listening to silence
+      return (
+        <svg className="sig-glyph-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="15" cy="12" r="2.8" fill="currentColor" stroke="none" />
+          <path {...s} d="M10.6 9.6 A 3.1 3.1 0 0 0 10.6 14.4" />
+          <path {...s} opacity=".6" d="M7.2 7.6 A 6.3 6.3 0 0 0 7.2 16.4" />
+        </svg>
+      );
+    case "cycle": // two nodes trading messages forever
+      return (
+        <svg className="sig-glyph-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="7.4" cy="12" r="2.1" fill="currentColor" stroke="none" />
+          <circle cx="16.6" cy="12" r="2.1" fill="currentColor" stroke="none" />
+          <path {...s} markerEnd="url(#sig-arrow)" d="M8.2 9.9 A 4.9 4.9 0 0 1 15.8 9.9" />
+          <path {...s} markerEnd="url(#sig-arrow)" d="M15.8 14.1 A 4.9 4.9 0 0 1 8.2 14.1" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
+/* ---------------- Signal card — one Code Issues finding ---------------- */
+// A transmission-log entry: glyph badge + kind microcopy, primary identity,
+// and a location footer. Clickable cards reveal a "view source" affordance.
+function SignalCard({ kind, kindLabel, name, repo, loc, onClick }) {
+  const body = (
+    <>
+      <span className="sig-head">
+        <span className="sig-glyph" aria-hidden="true"><SignalGlyph kind={kind} /></span>
+        <span className="sig-kind">{kindLabel}</span>
+        {repo && <span className="sig-repo">{repo}</span>}
+      </span>
+      <span className="sig-name mono">{name}</span>
+      {loc && (
+        <span className="sig-foot">
+          <span className="sig-loc mono" title={loc}>{loc}</span>
+          {onClick && <span className="sig-open" aria-hidden="true">view source ↗</span>}
+        </span>
+      )}
+    </>
+  );
+  if (!onClick) return <div className={"signal-card sig-" + kind}>{body}</div>;
+  return (
+    <button type="button" className={"signal-card sig-" + kind} onClick={onClick}>
+      {body}
+    </button>
+  );
+}
+
 function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
   const dc = useMemo(() => detectDeadCode(graph), [graph]);
   const orphans = useMemo(() => detectOrphans(graph), [graph]);
@@ -1649,6 +1736,15 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
   return (
     <div className="gaps dead split">
       <BrokenSatellite />
+      {/* Arrowhead marker shared by the cycle glyph's loop arrows. */}
+      <svg className="sig-defs" aria-hidden="true" focusable="false">
+        <defs>
+          <marker id="sig-arrow" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6.5" markerHeight="6.5" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="currentColor" />
+          </marker>
+        </defs>
+      </svg>
 
       {/* ── Left: dead code (rose) ── */}
       <section className="split-col dead-col" aria-label="Dead code">
@@ -1678,17 +1774,10 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
           dc.unreachable_methods.length === 0
             ? empty(dc.method_index_available ? "Every method is reachable from an entry point." : "—")
             : dc.unreachable_methods.map((m) => (
-              <button className="gaps-card" key={m.id}
-                onClick={() => onOpenSource(m.file, m.line)}>
-                <div className="gaps-card-top">
-                  <span className="gaps-channel mono dead-channel">{m.class_name}.{m.method}</span>
-                  <span className="gaps-repo">{m.repo}</span>
-                </div>
-                <div className="gaps-card-sub mono">
-                  {m.file ? fmtFile(m.file) + (m.line ? ":" + m.line : "") : "no location"}
-                </div>
-                <span className="gaps-card-tag prod">unreachable</span>
-              </button>
+              <SignalCard key={m.id} kind="dead" kindLabel="Unreachable"
+                name={m.class_name + "." + m.method} repo={m.repo}
+                loc={m.file ? fmtFile(m.file) + (m.line ? ":" + m.line : "") : "no location"}
+                onClick={() => onOpenSource(m.file, m.line)} />
             ))
         )}
 
@@ -1697,17 +1786,10 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
           dc.thin_handlers.length === 0
             ? empty("No entry point has an empty call tree.")
             : dc.thin_handlers.map((h) => (
-              <button className="gaps-card" key={h.id}
-                onClick={() => onOpenEntry(h.id)}>
-                <div className="gaps-card-top">
-                  <span className="gaps-channel mono dead-channel">{h.method}</span>
-                  <span className="gaps-repo">{h.repo}</span>
-                </div>
-                <div className="gaps-card-sub mono">
-                  {h.type}{h.channel ? " · " + h.channel : ""}{h.file ? " · " + fmtFile(h.file) : ""}
-                </div>
-                <span className="gaps-card-tag cons">no resolved calls</span>
-              </button>
+              <SignalCard key={h.id} kind="thin" kindLabel="Thin handler"
+                name={h.method} repo={h.repo}
+                loc={[h.type, h.channel, h.file ? fmtFile(h.file) : ""].filter(Boolean).join(" · ") || "no location"}
+                onClick={() => onOpenEntry(h.id)} />
             ))
         )}
 
@@ -1716,10 +1798,8 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
           dc.isolated_repos.length === 0
             ? empty("Every repo has at least one cross-repo link.")
             : dc.isolated_repos.map((r) => (
-              <div className="gaps-card cycle" key={r}>
-                <div className="gaps-cycle-chain mono">{r}</div>
-                <div className="gaps-cycle-chans">no cross-repo links</div>
-              </div>
+              <SignalCard key={r} kind="isolated" kindLabel="Isolated repo"
+                name={r} loc="no cross-repo links" />
             ))
         )}
       </section>
@@ -1745,16 +1825,10 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
           orphans.orphan_producers.length === 0
             ? empty("Every message producer has a consumer.")
             : orphans.orphan_producers.map((p) => (
-              <button className="gaps-card" key={p.id} onClick={() => onOpenSource(p.file, p.line)}>
-                <div className="gaps-card-top">
-                  <span className="gaps-channel mono">{p.channel}</span>
-                  <span className="gaps-repo">{p.repo}</span>
-                </div>
-                <div className="gaps-card-sub mono">
-                  {p.method}{p.file ? " · " + fmtFile(p.file) + (p.line ? ":" + p.line : "") : ""}
-                </div>
-                <span className="gaps-card-tag prod">no consumer</span>
-              </button>
+              <SignalCard key={p.id} kind="nocons" kindLabel="No consumer"
+                name={p.channel} repo={p.repo}
+                loc={[p.method, p.file ? fmtFile(p.file) + (p.line ? ":" + p.line : "") : ""].filter(Boolean).join(" · ") || "no location"}
+                onClick={() => onOpenSource(p.file, p.line)} />
             ))
         )}
 
@@ -1763,16 +1837,10 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
           orphans.orphan_consumers.length === 0
             ? empty("Every message consumer has a producer.")
             : orphans.orphan_consumers.map((c) => (
-              <button className="gaps-card" key={c.id} onClick={() => onOpenEntry(c.id)}>
-                <div className="gaps-card-top">
-                  <span className="gaps-channel mono">{c.channel}</span>
-                  <span className="gaps-repo">{c.repo}</span>
-                </div>
-                <div className="gaps-card-sub mono">
-                  {c.method}{c.file ? " · " + fmtFile(c.file) + (c.line ? ":" + c.line : "") : ""}
-                </div>
-                <span className="gaps-card-tag cons">no producer</span>
-              </button>
+              <SignalCard key={c.id} kind="noprod" kindLabel="No producer"
+                name={c.channel} repo={c.repo}
+                loc={[c.method, c.file ? fmtFile(c.file) + (c.line ? ":" + c.line : "") : ""].filter(Boolean).join(" · ") || "no location"}
+                onClick={() => onOpenEntry(c.id)} />
             ))
         )}
 
@@ -1781,10 +1849,9 @@ function DeadCodeView({ graph, onOpenEntry, onOpenSource }) {
           cyc.cycles.length === 0
             ? empty("No circular repo dependencies.")
             : cyc.cycles.map((cy, i) => (
-              <div className="gaps-card cycle" key={i}>
-                <div className="gaps-cycle-chain mono">{cy.repos.join(" → ")}</div>
-                <div className="gaps-cycle-chans mono">{cy.channels.join(", ")}</div>
-              </div>
+              <SignalCard key={i} kind="cycle" kindLabel="Dependency loop"
+                name={cy.repos.join(" → ")}
+                loc={"via " + cy.channels.join(", ")} />
             ))
         )}
       </section>

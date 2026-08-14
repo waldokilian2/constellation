@@ -1344,22 +1344,26 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
     });
     if (!isFinite(l)) return { x: 0, y: 0, zoom: 1 };
     const cw = r - l, ch = b - t;
-    const zoom = Math.min(1, (W - 90 * 2) / cw, (H - 90 * 2) / ch);
+    // Fit the whole world, then zoom IN a touch: small projects (the Java EE
+    // seed) hit the 100% cap and stay exactly as-is, while larger ones land
+    // closer to the constellation instead of tiny in a sea of starfield.
+    // Overflowing the frame is fine — the pan/zoom canvas covers it.
+    const DEFAULT_ZOOM_IN = 1.3;
+    const zoom = Math.min(1, Math.min(1, (W - 90 * 2) / cw, (H - 90 * 2) / ch) * DEFAULT_ZOOM_IN);
     // Center on the ORB CENTROID (mass center), not the content bbox — the
     // constellation should balance left/right and top/bottom.  Clamp so the
-    // full bbox (labels, pills, arc envelopes) stays within the margins;
-    // when the bbox is asymmetric, the centroid wins until a side would
-    // leave the frame.
+    // full bbox (labels, pills, arc envelopes) stays within the margins only
+    // while it FITS on an axis; once zoomed in past the fit, keep the
+    // centroid centered and overflow both sides evenly.
     let sx = 0, sy = 0;
     positions.forEach((p) => { sx += p.x; sy += p.y; });
     const ccx = sx / positions.length, ccy = sy / positions.length;
     const xMin = 90 - l * zoom, xMax = (W - 90) - r * zoom;
     const yMin = 90 - t * zoom, yMax = (H - 90) - b * zoom;
-    return {
-      x: Math.max(xMin, Math.min(xMax, W / 2 - ccx * zoom)),
-      y: Math.max(yMin, Math.min(yMax, H / 2 - ccy * zoom)),
-      zoom,
-    };
+    let x = W / 2 - ccx * zoom, y = H / 2 - ccy * zoom;
+    if (xMin <= xMax) x = Math.max(xMin, Math.min(xMax, x));
+    if (yMin <= yMax) y = Math.max(yMin, Math.min(yMax, y));
+    return { x, y, zoom };
   }, [positions, pillPlacement, edges, posMap, edgeBends, getSide, W, H]);
 
   const pz = usePanZoom(".repo-wrap, .legend, .filter-chip", fitViewport);

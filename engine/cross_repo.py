@@ -33,6 +33,7 @@ MESSAGE_CONSUMER_TYPES = {
     EntryPointType.SQS_CONSUMER,
     EntryPointType.EVENT_LISTENER,
     EntryPointType.WEBSOCKET,
+    EntryPointType.MESSAGE_HANDLER,  # in-house bus: channel = payload type
 }
 
 
@@ -77,12 +78,30 @@ class CrossRepoLinker:
                 channels[ch] = {"producers": [], "consumers": []}
             channels[ch]["producers"].append(prod.id)
 
-        # Build links — only include channels with both producers and consumers
+        # Build links — only include channels with both producers and consumers.
+        # A repo that both publishes and consumes the same channel is
+        # self-addressing on it (a re-queue/re-drive into its own subscription,
+        # or a broker-side loop): its own producers never form a cross-repo
+        # edge to its own consumers' peers — only EXTERNAL producers do. So
+        # drop each self-addressing repo's producers from the link's producer
+        # set; if no external producer remains, the channel links nothing.
+        consumer_repos = {
+            ch: {ep.repo for ep in eps}
+            for ch, eps in _consumers_by_channel(entry_points).items()
+        }
         for channel, data in channels.items():
-            if data["producers"] and data["consumers"]:
+            if not (data["producers"] and data["consumers"]):
+                continue
+            self_repos = consumer_repos.get(channel, set())
+            prod_lookup = {p.id: p.repo for p in producers}
+            external = [
+                pid for pid in data["producers"]
+                if prod_lookup.get(pid) not in self_repos
+            ]
+            if external:
                 links.append(CrossRepoLink(
                     channel=channel,
-                    producers=data["producers"],
+                    producers=external,
                     consumers=data["consumers"],
                 ))
 
@@ -173,3 +192,16 @@ def _entry_verb(ep: EntryPoint) -> str:
         if ch.startswith(v):
             return v
     return ""
+
+
+def _consumers_by_channel(entry_points: list[EntryPoint]) -> dict[str, list[EntryPoint]]:
+    """Map message-consumer channel → its entry points (for self-addressing)."""
+    out: dict[str, list[EntryPoint]] = {}
+    for ep in entry_points:
+        if ep.type not in MESSAGE_CONSUMER_TYPES:
+            continue
+        ch = ep.channel
+        if not ch or ch in ("unknown", "unknown-event"):
+            continue
+        out.setdefault(ch, []).append(ep)
+    return out

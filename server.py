@@ -12,6 +12,8 @@ import json
 import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import urllib.request
@@ -89,13 +91,18 @@ def _ai_model(model: str = "") -> str:
 
 
 from engine import git_hosts
-from engine.project_store import ProjectStore
+from engine.project_store import ProjectStore, _validate_url
 from engine.conversation_store import ConversationStore, Conversation
 
 PROJECT_STORE = ProjectStore(BASE_DIR)
 # Import a pre-multi-project graph.json (e.g. produced by start.sh) as a
 # "Default" project so the app isn't empty on first load.
 PROJECT_STORE.ensure_legacy_seed()
+# A server restart kills any in-flight analysis threads; their persisted
+# "analyzing" status would otherwise stick forever. Reap them up front.
+_stale = PROJECT_STORE.reap_stale_analyses(reason="interrupted by server restart")
+if _stale:
+    sys.stderr.write(f"Constellation: reaped stale analyzing status for: {', '.join(_stale)}\n")
 
 # Conversation persistence (multi-turn chat history). Project-scoped, like
 # ProjectStore, so each project's conversations live under its own directory.
@@ -278,8 +285,14 @@ def _classify_log(line: str) -> str:
         return "clone"
     if low.startswith("[scan]"):
         return "scan"
+    if low.startswith("[index]"):
+        return "index"
+    if low.startswith("[detect]"):
+        return "detect"
     if low.startswith("[link]"):
         return "link"
+    if low.startswith("[analyze]"):
+        return "analyze"
     if low.startswith("[done]"):
         return "done"
     if low.startswith("[graph]"):
@@ -355,7 +368,16 @@ async def _sse_run(pid: str, produce):
     threading.Thread(target=_worker, daemon=True).start()
     loop = asyncio.get_running_loop()
     while True:
-        ev = await loop.run_in_executor(None, q.get)
+        # Poll with a timeout and emit an SSE comment as keepalive during
+        # silent stretches (long phases can go minutes between log lines).
+        # Proxies/browsers reap idle connections (~60s); comment lines are
+        # ignored by EventSource and the UI's data:-only parser, but they
+        # keep the connection alive so a big scan doesn't look like a failure.
+        try:
+            ev = await loop.run_in_executor(None, lambda: q.get(timeout=15))
+        except queue.Empty:
+            yield ": keepalive\n\n"
+            continue
         if ev is SENTINEL:
             break
         yield "data: " + json.dumps(ev) + "\n\n"
@@ -715,6 +737,117 @@ async def remote_repos(link: str = ""):
         raise HTTPException(status_code=e.status if e.status else 400, detail=str(e))
     except Exception:
         raise HTTPException(status_code=502, detail="Failed to reach the git host API")
+
+
+@app.get("/api/local/repos")
+async def local_repos(path: str = "", url: str = ""):
+    """List candidate repos: a local folder's subdirs, or a monorepo's.
+
+    Pairs with the "Local folder / monorepo" import tab. Two modes:
+
+    * ``path`` — list a host directory's subfolders (e.g. the docker-compose
+      ``/repos`` mount) so each can be added as its own ``local:<path>`` repo.
+    * ``url`` — a git URL to a monorepo (e.g. github.com/org/app where the
+      services are subfolders, not separate repos). Shallow-cloned to a
+      scratch dir and its subfolders listed the same way; the services are
+      then added as local repos pointing into that clone, so cross-service
+      linking works like any multi-repo project.
+
+    Each entry reports whether it looks like a git repo and whether it looks
+    like a JVM project (marker files / src layout) so the picker can flag
+    non-code folders.
+    """
+    raw = (path or "").strip()
+    remote = (url or "").strip()
+    if not raw and not remote:
+        raise HTTPException(status_code=400, detail="A folder path or git URL is required")
+
+    if remote:
+        # Monorepo mode: shallow-clone to a scratch dir and list subfolders.
+        # The clone persists (not a temp dir) so the selected services can be
+        # added as local repos into it — re-importing the same URL reuses it.
+        try:
+            url_v = _validate_url(remote)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        scratch = BASE_DIR / "output" / "monorepo-clones"
+        scratch.mkdir(parents=True, exist_ok=True)
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", url_v.split("/")[-1].removesuffix(".git") or "monorepo")
+        dest = scratch / name
+        try:
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            subprocess.run(
+                ["git", "clone", "--depth", "1", url_v, str(dest)],
+                check=True, capture_output=True, text=True, timeout=300,
+            )
+        except subprocess.CalledProcessError as e:
+            tail = (e.stderr or e.stdout or "").strip().splitlines()
+            raise HTTPException(status_code=502, detail="Clone failed: " + (tail[-1] if tail else f"git exited {e.returncode}"))
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="Clone timed out (5 min) — the repo may be too large for this flow")
+        p = dest
+    else:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = (BASE_DIR / p).resolve()
+        if not p.is_dir():
+            raise HTTPException(status_code=400, detail=f"Not an existing directory: {p}")
+
+    def _has_java(d: Path) -> bool:
+        """Cheap 'looks like a JVM project' heuristic, no deep walk.
+
+        Maven/Gradle marker files plus the standard source roots cover the
+        normal layouts; a shallow *.java* peek catches the rest. Deep rglob
+        would defeat the point (this runs per subfolder on every scan).
+        """
+        try:
+            for marker in ("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle"):
+                if (d / marker).exists():
+                    return True
+            if (d / "src" / "main" / "java").is_dir() or (d / "src").is_dir():
+                return True
+            return any(
+                f.suffix == ".java"
+                for f in d.iterdir()
+                if f.is_file()
+            )
+        except OSError:
+            return False
+
+    def _list(p: Path) -> list[dict]:
+        out = []
+        try:
+            entries = sorted(p.iterdir(), key=lambda e: e.name)
+        except OSError:
+            return out
+        for e in entries:
+            if not e.is_dir() or e.name.startswith("."):
+                continue
+            out.append({
+                "name": e.name,
+                "path": str(e),
+                "is_git": (e / ".git").exists(),
+                "has_java": _has_java(e),
+            })
+        return out
+
+    repos = _list(p)
+    # Monorepos often keep services one level down (src/orders, services/api,
+    # …) with only docs/scripts/infra at the top. If nothing at the top looks
+    # like code, descend into container dirs (src, services, apps, packages)
+    # and list those instead — fall back to the raw listing when none match.
+    if repos and not any(r["has_java"] or r["is_git"] for r in repos):
+        for container in ("src", "services", "apps", "packages"):
+            sub = p / container
+            if sub.is_dir():
+                deeper = _list(sub)
+                if deeper and any(r["has_java"] or r["is_git"] for r in deeper):
+                    repos = deeper
+                    break
+    if not repos:
+        raise HTTPException(status_code=404, detail=f"No subfolders found in: {p}")
+    return {"root": str(p), "repos": repos}
 
 
 # ── AI proxy endpoints ─────────────────────────────────────────────
@@ -1780,6 +1913,36 @@ async def index():
             "api_docs": "/docs",
         },
         status_code=404,
+    )
+
+
+# App icons referenced from web/index.html. Vite copies web/public/ to
+# the dist root on build; only "/" and "/assets/*" are otherwise served,
+# so expose each icon explicitly.
+_ICON_FILES = {
+    "favicon.ico": "image/x-icon",
+    "favicon-32x32.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+    "android-chrome-192x192.png": "image/png",
+}
+
+
+def _serve_dist_file(file_name: str, media_type: str):
+    async def handler():
+        icon_file = DIST_DIR / file_name
+        if icon_file.exists():
+            return FileResponse(str(icon_file), media_type=media_type)
+        raise HTTPException(status_code=404, detail=f"{file_name} not found. Run: npm run build")
+
+    return handler
+
+
+for _name, _media in _ICON_FILES.items():
+    app.add_api_route(
+        f"/{_name}",
+        _serve_dist_file(_name, _media),
+        methods=["GET"],
+        include_in_schema=False,
     )
 
 

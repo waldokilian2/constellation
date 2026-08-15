@@ -6,6 +6,7 @@ knowledge is isolated and swappable. Behaviour is unchanged from the previous
 inlined implementation.
 """
 from __future__ import annotations
+from typing import Optional
 from tree_sitter import Node
 
 from ..languages import java_ast
@@ -120,6 +121,43 @@ FLUENT_HTTP_FIELD_TYPES = {"WebClient", "RestClient", "Builder"}
 
 # STOMP return-side producers (Spring messaging): the return value is brokered.
 STOMP_PRODUCER_ANN = {"SendTo", "SendToUser"}
+
+# ── In-house message-bus facades ────────────────────────────────────────────
+# Many estates route all messaging through an in-house abstraction: an injected
+# interface (``MessageBus``, ``EventBus``, …) whose send/publish methods take
+# the *payload object* — the destination is resolved from the payload's type at
+# runtime, not passed as a string. The payload type is therefore the join key
+# linking producer to consumer. We can't enumerate every estate's facade by
+# name, so the match is structural: a send/publish-style call whose first
+# argument is a message-shaped object (a ``new Payload(...)`` literal, a
+# ``Payload.builder()…build()`` chain, or an identifier whose declared type is
+# a known message type), on a receiver whose declared field type looks like a
+# bus. Bus-looking = the type name contains "bus"/"broker"/"gateway", or ends
+# with one of these suffixes — conservative so ordinary service calls named
+# ``send`` don't match.
+BUS_FIELD_TYPE_SUFFIXES = ("bus", "broker", "gateway", "messageproducer", "producer")
+BUS_FIELD_TYPE_CONTAINS = ("messagebus", "eventbus", "commandbus")
+BUS_SEND_METHODS = {"send", "sendAndAwait", "publish", "dispatch", "emit", "fire"}
+# Payload args that are clearly NOT message objects (byte[]/String transports,
+# contexts, timing args of the bus API itself).
+BUS_NON_PAYLOAD_TYPES = ("byte[]", "String", "MessageContext", "ZonedDateTime", "Instant", "Map")
+
+# Consumer-side counterpart: class marker + method annotation on handler
+# classes dispatched by payload type. In-house vocabulary — matched broadly
+# but BOTH must be present, so a stray @Handle on a non-handler class is
+# ignored, and a @MessageHandler class without annotated methods emits nothing.
+BUS_HANDLER_CLASS_ANN = {"MessageHandler", "BusHandler", "EventHandler", "Consumer", "Listener"}
+BUS_HANDLER_METHOD_ANN = {"Handle", "Handles", "OnMessage", "MessageHandler", "Consume", "Subscribe"}
+
+
+def _looks_like_bus_type(type_name: str) -> bool:
+    """Is this declared field type plausibly a message-bus facade interface?"""
+    if not type_name:
+        return False
+    t = type_name.rsplit(".", 1)[-1].lower()
+    if any(seg in t for seg in BUS_FIELD_TYPE_CONTAINS):
+        return True
+    return t.endswith(BUS_FIELD_TYPE_SUFFIXES)
 
 
 def _walk_nodes(node) -> iter:
@@ -373,7 +411,7 @@ class JvmProducerDetector:
         """
         verb = ""
         saw_build = False
-        node = inv.child_by_field_name("object")
+        node = inv
         depth = 0
         while node is not None and depth < 25:
             depth += 1
@@ -419,6 +457,20 @@ class JvmProducerDetector:
         else:
             message_type = self._extract_message_type_from_invocation(inv)
 
+        # `kafkaTemplate.send(message)` — the arg is a local variable, and the
+        # topic lives in the MessageBuilder chain that built it:
+        #   MessageBuilder.withPayload(p).setHeader(TOPIC, "order-topic").build()
+        # Resolve the variable to that chain and pull the topic string out.
+        if (
+            prod_type == ProducerType.KAFKA_PRODUCER
+            and len(args) == 1
+            and channel
+            and channel[0].islower()
+        ):
+            topic = self._topic_from_message_builder(inv, channel)
+            if topic:
+                channel = topic
+
         resolved = self.index.resolve_channel(channel, ci) if channel else "unknown"
 
         return [Producer(
@@ -431,6 +483,144 @@ class JvmProducerDetector:
             line=inv.start_point[0] + 1,
             message_type=message_type,
         )]
+
+    def bus_producer_from_invocation(self, ci, m_name, inv, local_types: dict, params: Optional[dict] = None) -> list[Producer]:
+        """Producer through an in-house message-bus facade (``bus.send(payload)``).
+
+        The facade carries no channel string — the destination is derived from
+        the payload's type at runtime — so the *payload type* is the channel.
+        Consumers keyed on the same type (``@Handle void m(Payload p)``) then
+        link through it. The key is the payload's FQN when the type can be
+        pinned down import-aware — sibling repos routinely declare
+        same-simple-named messages in different packages, and a simple-name
+        channel would falsely link them. Returns [] unless the receiver's
+        field type looks like a bus and a payload type can be extracted.
+        """
+        parsed = self.java.parse_method_invocation(inv)
+        receiver = parsed["receiver"]
+        method_called = parsed["method"]
+        if not receiver or method_called not in BUS_SEND_METHODS:
+            return []
+
+        field_type = self.index.field_type(ci, receiver)
+        if not _looks_like_bus_type(field_type):
+            return []
+
+        payload = self._bus_payload_type(inv, ci, local_types, params)
+        if not payload:
+            return []
+        payload = self.index.resolve_fqn(ci, payload) or payload
+
+        return [Producer(
+            id=f"{ci.repo}:{ci.simple_name}.{m_name}:{method_called}:{receiver}:{payload}",
+            repo=ci.repo,
+            type=ProducerType.MESSAGE_BUS_PRODUCER,
+            channel=payload,  # message type IS the routing key on a type-routed bus
+            method=f"{ci.simple_name}.{m_name}",
+            file=ci.file,
+            line=inv.start_point[0] + 1,
+            message_type=payload,
+        )]
+
+    def _bus_payload_type(self, invocation: Node, ci, local_types: dict, params: Optional[dict] = None) -> str:
+        """Payload type from a bus send/publish call's first argument.
+
+        Priority: ``new Payload(...)`` object creation → ``Payload.builder()``
+        chain root → identifier whose declared type (local var, method param,
+        or field) is a message-shaped class. Skips transport overloads whose
+        first arg is byte[]/String — those carry no type key. Returns the type
+        as written (simple or scoped) — the caller resolves it to an FQN.
+        """
+        arglist = next(
+            (c for c in invocation.children if c.type == "argument_list"), None
+        )
+        if arglist is None:
+            return ""
+        arg = next(
+            (c for c in arglist.children if c.type not in ("(", ")", ",", "comment")),
+            None,
+        )
+        if arg is None:
+            return ""
+
+        # 1) new Payload(...)
+        if arg.type == "object_creation_expression":
+            return self._payload_from_creation(arg)
+
+        # 2) Payload.builder()....build() chain — walk to the root identifier
+        if arg.type == "method_invocation":
+            root, _verb, saw_build = self._fluent_chain_root(arg)
+            if root and saw_build and root[0].isupper():
+                return root
+
+        # 3) plain identifier: local var, method param, or field of a
+        #    message-shaped type
+        if arg.type == "identifier":
+            name = arg.text.decode()
+            decl_type = (
+                local_types.get(name)
+                or (params or {}).get(name)
+                or self.index.field_type(ci, name)
+            )
+            if not decl_type or decl_type in BUS_NON_PAYLOAD_TYPES:
+                return ""
+            decl_type = decl_type.rsplit(".", 1)[-1]
+            # `var step = ...` (inferred) and lowercase primitives carry no
+            # usable type key — an inferred-name channel would be noise.
+            if not decl_type[:1].isupper():
+                return ""
+            # Generic type variables (``T extends Command``) and parameterized
+            # wrappers (``SoapEnvelopeBase<T>``) are not concrete message types
+            # — a type-routed bus keys on the concrete payload class, so these
+            # carry no usable routing key.
+            if len(decl_type) == 1 or "<" in decl_type:
+                return ""
+            return decl_type
+        return ""
+
+    def _payload_from_creation(self, node: Node) -> str:
+        """Simple payload type from ``new za.co.x.Payload(...)`` — last segment."""
+        for c in node.children:
+            if c.type in ("type_identifier", "scoped_identifier", "scoped_type_identifier"):
+                return self.java.last_seg(c)
+        return ""
+
+    def _topic_from_message_builder(self, invocation: Node, var_name: str) -> str:
+        """Topic string from the MessageBuilder chain assigned to ``var_name``.
+
+        Walks outward to the enclosing method body, finds
+        ``<type> var_name = MessageBuilder...setHeader(<...TOPIC|...>, "topic")…build()``
+        and returns the header's string literal. Empty when the variable
+        isn't found or carries no topic header (e.g. `send(topic, payload)`
+        overloads never reach here — they pass a url-ish first arg).
+        """
+        # 1) climb to the enclosing method body (invocation is nested inside it)
+        body = invocation
+        while body is not None and body.type != "block":
+            body = body.parent
+        if body is None:
+            return ""
+
+        # 2) find the local declaration whose declarator name matches var_name
+        for decl in _walk_nodes(body):
+            if decl.type != "local_variable_declaration":
+                continue
+            for vd in decl.children:
+                if vd.type != "variable_declarator":
+                    continue
+                idents = [c for c in vd.children if c.type == "identifier"]
+                if not idents or idents[0].text.decode() != var_name:
+                    continue
+                # 3) scan the initializer (or whole declarator) for setHeader
+                #    with a string-literal second arg
+                for inv2 in self.java.find_method_invocations(vd):
+                    parsed = self.java.parse_method_invocation(inv2)
+                    if parsed["method"] != "setHeader" or len(parsed["args"]) < 2:
+                        continue
+                    val = parsed["args"][1]
+                    if isinstance(val, str) and val:
+                        return val
+        return ""
 
     def _extract_event_type_from_args(self, invocation: Node) -> str:
         """For publishEvent(new OrderCreatedEvent(...)), extract 'OrderCreatedEvent'."""

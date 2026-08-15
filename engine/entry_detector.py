@@ -32,15 +32,23 @@ class EntryPointDetector:
         self.handlers = handlers if handlers is not None else HANDLERS
         self.producers = JvmProducerDetector(index)
 
-    def scan(self) -> tuple[list[EntryPoint], list[Producer]]:
+    def scan(self, on_progress=None) -> tuple[list[EntryPoint], list[Producer]]:
+        """Scan every indexed class for entry points and producers.
+
+        ``on_progress(done)`` is called after each class so callers can report
+        ``done/total`` progress — this phase can run minutes on large codebases
+        and otherwise emits nothing until it finishes.
+        """
         all_entries: list[EntryPoint] = []
         all_producers: list[Producer] = []
-        for ci in self.index.by_fqn.values():
+        for done, ci in enumerate(self.index.by_fqn.values(), 1):
             if ci.node is None:
                 continue
             entries, producers = self._scan_class(ci)
             all_entries.extend(entries)
             all_producers.extend(producers)
+            if on_progress:
+                on_progress(done)
         return all_entries, all_producers
 
     def _scan_class(self, ci) -> tuple[list[EntryPoint], list[Producer]]:
@@ -86,12 +94,16 @@ class EntryPointDetector:
 
             # Producers within the method body (type-based): message producers,
             # sync HTTP calls (method-based clients), fluent HTTP clients
-            # (WebClient/RestClient/Builder), and per-framework body handlers (Camel).
+            # (WebClient/RestClient/Builder), in-house bus facades
+            # (bus.send(payload)), and per-framework body handlers (Camel).
             body = java.get_method_body(m_node)
             if body:
                 apache_map = self.producers.apache_request_map(body)  # built once per method
+                local_types = java.get_local_variables(body)
+                param_types = {p["name"]: p["type"] for p in params if p.get("name")}
                 producers.extend(self.producers.fluent_http_calls(ci, m_name, body))
                 for inv in java.find_method_invocations(body):
+                    producers.extend(self.producers.bus_producer_from_invocation(ci, m_name, inv, local_types, param_types))
                     producers.extend(self.producers.producers_from_invocation(ci, m_name, inv))
                     producers.extend(self.producers.http_calls_from_invocation(ci, m_name, inv, apache_map))
                     for handler in self.handlers:

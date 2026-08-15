@@ -147,6 +147,7 @@ const TYPE_META = {
   "lifecycle":         { color: "#64748b", label: "Lifecycle", glow: "rgba(100,116,139,.55)" },
   "main":              { color: "#818cf8", label: "Main",      glow: "rgba(129,140,248,.55)" },
   "cloud-function":    { color: "#c084fc", label: "Function",  glow: "rgba(192,132,252,.55)" },
+  "message-handler":   { color: "#f59e0b", label: "Bus",       glow: "rgba(245,158,11,.55)" },
 };
 
 // Galaxy edge colors by link kind: async (message-only), sync (HTTP-only), both (mixed)
@@ -733,6 +734,7 @@ const ORIGIN_KINDS = {
   graphql:            { tag: "GRAPHQL",   cls: "graphql",   noun: "GraphQL resolver" },
   "grpc-service":     { tag: "GRPC",      cls: "grpc",      noun: "gRPC service method" },
   "cloud-function":   { tag: "FUNCTION",  cls: "function",  noun: "cloud function" },
+  "message-handler":  { tag: "BUS",       cls: "bus",       noun: "message bus handler" },
 };
 
 // Describe a flow's origin: rest vs. a specific external trigger type.
@@ -1005,6 +1007,7 @@ function detectFlows(graph) {
 // data. Message channels only; http-call producers are excluded on both sides.
 const MSG_CONSUMER_TYPES = new Set([
   "kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer", "event-listener",
+  "message-handler",
 ]);
 const CHANNEL_SENTINELS = new Set(["", "unknown", "unknown-event"]);
 const cleanChannel = (ch) => (typeof ch === "string" ? ch.trim() : "");
@@ -1583,7 +1586,10 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
               {hoverEdge.items.map((it, i) => (
                 <div className="edge-popup-item" key={i}>
                   <span className={"edge-popup-dot " + (it.kind === "http" ? "http" : "msg")} />
-                  <span className="edge-popup-channel mono">
+                  <span
+                    className="edge-popup-channel mono"
+                    title={it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel}
+                  >
                     {it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel}
                   </span>
                   <span className={"edge-popup-kind " + (it.kind === "http" ? "http" : "msg")}>
@@ -1834,7 +1840,7 @@ function SignalCard({ kind, kindLabel, name, repo, loc, onClick }) {
         <span className="sig-kind">{kindLabel}</span>
         {repo && <span className="sig-repo">{repo}</span>}
       </span>
-      <span className="sig-name mono">{name}</span>
+      <span className="sig-name mono" title={name}>{name}</span>
       {loc && (
         <span className="sig-foot">
           <span className="sig-loc mono" title={loc}>{loc}</span>
@@ -2825,12 +2831,12 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
 // like REST). Their `channel` field is the topic/queue they listen on.
 const CONSUMER_TYPES = new Set([
   "kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer",
-  "event-listener", "websocket",
+  "event-listener", "websocket", "message-handler",
 ]);
 // Producer types that PUBLISH to a message channel (vs a sync HTTP call).
 const PRODUCER_TYPES = new Set([
   "rabbitmq-producer", "kafka-producer", "jms-producer", "event-publisher",
-  "pulsar-producer", "nats-producer",
+  "pulsar-producer", "nats-producer", "message-bus-producer",
 ]);
 
 // Channel wiring for ONE repo: every channel it consumes (IN), emits (OUT), or
@@ -3000,7 +3006,7 @@ function ChannelCard({ c, onOpenFlow, status }) {
         <span className="cc-badge">
           {c.kind === "http" ? "REQUEST" : c.direction === "both" ? "IN+OUT" : c.direction.toUpperCase()}
         </span>
-        <span className="cc-name mono">
+        <span className="cc-name mono" title={c.kind === "http" && c.verb ? c.verb + " " + c.channel : c.channel}>
           {c.kind === "http" && c.verb ? c.verb + " " : ""}{c.channel}
         </span>
         {status && status !== "same" && (
@@ -3390,7 +3396,7 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
       <div className="view-top">
         <div className="view-hint">
           <span className="ep-tag" style={{ "--c": m.color }}>{m.label}</span>
-          <span className="mono">{entryPoint.channel}</span>
+          <span className="mono" title={entryPoint.channel}>{entryPoint.channel}</span>
           {entryPoint.metrics && (
             <>· depth {entryPoint.metrics.depth} · {entryPoint.metrics.total_nodes} nodes</>
           )}
@@ -3513,7 +3519,7 @@ function PathView({ entryPoint, graph, selectedNode, onSelectNode, chatOpen, com
                 const status = cmp ? (cmp.chStatus[oc.channel] || "same") : null;
                 return (
                 <div className={"exit-point-flow" + (status && status !== "same" ? " st-" + status : "")} key={i}>
-                  <span className="exit-point-channel">{oc.channel}</span>
+                  <span className="exit-point-channel" title={oc.channel}>{oc.channel}</span>
                   {status && status !== "same" && (
                     <span className={"edge-popup-status st-" + status}>
                       {status === "added" ? "+ new" : status === "removed" ? "− removed" : "~ changed"}
@@ -4319,7 +4325,9 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
             style={{ left: layout.externalPos[i].x - 80, top: layout.externalPos[i].y - 50 }}
           >
             <div className="flow-external-icon">{ei.kind === "rest" ? "⟶" : (ei.cls === "scheduled" ? "⏰" : "⌁")}</div>
-            <div className="flow-external-label">{ei.kind === "rest" ? (ei.verb + " " + ei.channel) : ei.channel}</div>
+            <div className="flow-external-label" title={ei.kind === "rest" ? (ei.verb + " " + ei.channel) : ei.channel}>
+              {ei.kind === "rest" ? (ei.verb + " " + ei.channel) : ei.channel}
+            </div>
             <div className="flow-external-sub">{ei.tag || (ei.kind === "rest" ? "REST" : "external")}</div>
           </div>
         ))}
@@ -4723,7 +4731,9 @@ function FlowTraceView({ flow, repo, graph, dims, onSelectNode, selectedNode, ch
               </div>
               {downstream.map((d, i) => (
                 <div key={i} className="exit-point-flow">
-                  <span className="exit-point-channel">{d.kind === "http"
+                  <span className="exit-point-channel" title={d.kind === "http"
+                    ? (d.verb ? d.verb + " " : "") + d.channel + (d.responseType ? " → " + d.responseType : "")
+                    : d.channel}>{d.kind === "http"
                     ? (d.verb ? d.verb + " " : "") + d.channel + (d.responseType ? " → " + d.responseType : "")
                     : d.channel}</span>
                   <span className="exit-point-arrow">→</span>
@@ -6011,42 +6021,92 @@ function ProjectsView({ projects, loading, onOpen, onNew, onDelete, onRename, up
 }
 
 // Derives progress-bar state purely from the ingested log stream.
-// Phases run clone → scan → graph → link → done; determinate counts come
-// from per-repo engine lines, indeterminate when no repo total is known
-// (rescan) or the phase has no countable steps.
-const INGEST_PHASE_ORDER = { clone: 0, scan: 1, graph: 2, link: 3, done: 4 };
+// Phases run clone → scan → index → detect → graph → link → analyze → done.
+// Each phase carries a weight (roughly its share of total runtime), and the
+// engine emits throttled `[phase] done/total` lines for the heavy phases, so
+// the bar advances through real work instead of parking at 100% after the
+// (fast) file-discovery step. Phases without countable steps (detect, link)
+// park at their floor weight — completion is implied by the next phase
+// appearing.
+const INGEST_PHASES = [
+  { key: "clone", weight: 15, label: "Cloning repositories" },
+  { key: "scan", weight: 5, label: "Scanning repositories" },
+  { key: "index", weight: 25, label: "Indexing symbols" },
+  { key: "detect", weight: 5, label: "Detecting entry points" },
+  { key: "graph", weight: 35, label: "Building call trees" },
+  { key: "link", weight: 5, label: "Finding cross-repo links" },
+  { key: "analyze", weight: 10, label: "Analyzing reachability" },
+];
+const INGEST_PHASE_KEYS = new Set(INGEST_PHASES.map((p) => p.key));
 const SCANNING_RE = /^\[scan\] .+: scanning /;
 const CLONE_DONE_RE = /^\[clone\] .+ ready at |^\[clone\] Using local repo /;
+const COUNTED_RE = /^\[(index|detect|graph|analyze)\] (\d+)\/(\d+)/;
+
+// Highest done/total seen in this phase's `[phase] n/m` lines (monotonic —
+// resends/older lines can't move the bar backwards).
+function countedFraction(logs, phaseKey) {
+  let best = null;
+  for (const l of logs) {
+    if (l.phase !== phaseKey) continue;
+    const m = COUNTED_RE.exec(l.message);
+    if (!m) continue;
+    const done = parseInt(m[2], 10);
+    const total = parseInt(m[3], 10);
+    if (total > 0) {
+      const frac = Math.min(1, done / total);
+      if (best == null || frac > best.frac) best = { frac, done, total };
+    }
+  }
+  return best;
+}
 
 function computeIngestProgress(logs, repoTotal) {
+  // Done beats any phase: the stream's final event means the whole ingest
+  // finished — never keep an indeterminate bar animating past it.
+  if (logs.some((l) => l.phase === "done")) {
+    return { determinate: true, pct: 100, label: "Complete" };
+  }
   let phase = "info";
+  let phaseIdx = -1;
   for (let i = logs.length - 1; i >= 0; i--) {
     const p = logs[i].phase;
-    if (INGEST_PHASE_ORDER[p] != null) { phase = p; break; }
+    if (INGEST_PHASE_KEYS.has(p)) {
+      phase = p;
+      phaseIdx = INGEST_PHASES.findIndex((x) => x.key === p);
+      break;
+    }
   }
-  let determinate = false;
-  let done = 0;
+  if (phase === "info" || phaseIdx < 0) {
+    return { determinate: false, pct: null, label: logs.length ? "Working…" : "Starting…" };
+  }
+
+  const entry = INGEST_PHASES[phaseIdx];
+  const before = INGEST_PHASES.slice(0, phaseIdx).reduce((sum, p) => sum + p.weight, 0);
   const cap = (n) => (repoTotal != null ? Math.min(n, repoTotal) : n);
-  let label = logs.length ? "Working…" : "Starting…";
+  let determinate = false;
+  let fraction = 0;
+  let label = entry.label + "…";
   if (phase === "clone") {
-    done = cap(logs.filter((l) => l.phase === "clone" && CLONE_DONE_RE.test(l.message)).length);
+    const done = cap(logs.filter((l) => l.phase === "clone" && CLONE_DONE_RE.test(l.message)).length);
     determinate = repoTotal != null && repoTotal > 0;
-    label = determinate ? "Cloning " + done + "/" + repoTotal + " repos" : "Syncing repositories…";
+    fraction = determinate ? done / repoTotal : 0;
+    if (determinate) label = "Cloning " + done + "/" + repoTotal + " repos";
+    else label = "Syncing repositories…";
   } else if (phase === "scan") {
-    done = cap(logs.filter((l) => l.phase === "scan" && SCANNING_RE.test(l.message)).length);
+    const done = cap(logs.filter((l) => l.phase === "scan" && SCANNING_RE.test(l.message)).length);
     determinate = repoTotal != null && repoTotal > 0;
-    label = determinate ? "Scanning " + done + "/" + repoTotal + " repos" : "Scanning repositories…";
-  } else if (phase === "graph") {
-    label = "Building call trees…";
-  } else if (phase === "link") {
-    label = "Finding cross-repo links…";
-  } else if (phase === "done") {
-    determinate = true;
-    done = repoTotal != null && repoTotal > 0 ? repoTotal : 1;
-    label = "Complete";
+    fraction = determinate ? done / repoTotal : 1;
+    if (determinate) label = "Scanning " + done + "/" + repoTotal + " repos";
+  } else if (phase === "index" || phase === "detect" || phase === "graph" || phase === "analyze") {
+    const counted = countedFraction(logs, phase);
+    if (counted) {
+      determinate = true;
+      fraction = counted.frac;
+      label = entry.label + " " + counted.done + "/" + counted.total;
+    }
   }
-  const total = determinate ? Math.max(done, repoTotal != null && repoTotal > 0 ? repoTotal : 1) : 0;
-  const pct = determinate && total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+
+  const pct = determinate ? Math.min(100, Math.round(before + entry.weight * fraction)) : null;
   return { determinate, pct, label };
 }
 
@@ -6067,13 +6127,20 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
 
   // Universal git-host import (create mode only): paste an org/workspace
   // link, pick repos with checkboxes + search, then create with those URLs.
-  const [importMode, setImportMode] = useState("urls"); // "urls" | "remote"
+  const [importMode, setImportMode] = useState("urls"); // "urls" | "remote" | "local"
   const [remoteLink, setRemoteLink] = useState("");
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [remoteError, setRemoteError] = useState("");
   const [remoteData, setRemoteData] = useState(null); // {provider, owner, repos}
   const [selected, setSelected] = useState({}); // full_name -> true
   const [search, setSearch] = useState("");
+  // Local-folder import (create mode only): paste a host folder containing
+  // many repos, pick subfolders with the same checkbox picker, each is added
+  // as its own `local:<path>` repo.
+  const [localPath, setLocalPath] = useState("");
+  const [localBusy, setLocalBusy] = useState(false);
+  const [localError, setLocalError] = useState("");
+  const [localData, setLocalData] = useState(null); // {root, repos}
 
   useEffect(() => {
     if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -6092,19 +6159,25 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
   const addRow = () => setUrls((prev) => [...prev, ""]);
   const removeRow = (i) => setUrls((prev) => prev.filter((_, idx) => idx !== i));
 
-  // ── Remote git-host import state helpers ──
-  const totalCount = remoteData ? remoteData.repos.length : 0;
+  // ── Remote git-host + local-folder picker state helpers ──
+  // Both pickers normalize their repos to {key, name, meta, desc, extra} rows
+  // so the shared checkbox list, search, and select-all work unchanged.
+  const pickerData = importMode === "local" ? localData : remoteData;
+  const pickerRepos = (pickerData && pickerData.repos ? pickerData.repos : []).map((r) =>
+    importMode === "local"
+      ? { key: r.path, name: r.name, meta: r.path, desc: "", is_git: r.is_git, has_java: r.has_java }
+      : { key: r.full_name, name: r.name, meta: r.full_name, desc: r.description || "", clone_url: r.clone_url }
+  );
+  const totalCount = pickerRepos.length;
   const selectedCount = Object.keys(selected).length;
   const allSelected = totalCount > 0 && selectedCount === totalCount;
-  const visibleRepos = remoteData
-    ? remoteData.repos.filter((r) => {
-        const q = search.trim().toLowerCase();
-        if (!q) return true;
-        return ((r.name || "") + " " + (r.full_name || "") + " " + (r.description || "")).toLowerCase().includes(q);
-      })
-    : [];
-  const repoUrls = importMode === "remote"
-    ? remoteData ? remoteData.repos.filter((r) => selected[r.full_name]).map((r) => r.clone_url) : []
+  const visibleRepos = pickerRepos.filter((r) => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return ((r.name || "") + " " + (r.meta || "") + " " + (r.desc || "")).toLowerCase().includes(q);
+  });
+  const repoUrls = importMode === "remote" || importMode === "local"
+    ? pickerRepos.filter((r) => selected[r.key]).map((r) => (importMode === "local" ? "local:" + r.key : r.clone_url))
     : validUrls;
 
   const loadRemote = async () => {
@@ -6141,11 +6214,43 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
       return next;
     });
 
+  const loadLocal = async () => {
+    const p = localPath.trim();
+    if (!p) return;
+    setLocalError("");
+    setLocalBusy(true);
+    setLocalData(null);
+    setSelected({});
+    try {
+      const isUrl = /^https?:\/\//i.test(p);
+      const qs = isUrl ? "url=" + encodeURIComponent(p) : "path=" + encodeURIComponent(p);
+      const res = await fetch("/api/local/repos?" + qs);
+      if (!res.ok) {
+        const t = await res.json().catch(() => null);
+        throw new Error((t && t.detail) || "Failed to read folder (HTTP " + res.status + ")");
+      }
+      const data = await res.json();
+      setLocalData(data);
+      // Pre-select git repos and folders with Java sources; leave others unchecked.
+      const pre = {};
+      (data.repos || []).forEach((r) => { if (r.is_git || r.has_java) pre[r.path] = true; });
+      setSelected(pre);
+      if (!(name || "").trim()) {
+        const leaf = (isUrl ? p : data.root).split(/[\\/]/).filter(Boolean).pop() || (isUrl ? "Monorepo" : "Local Project");
+        setName(leaf.replace(/\.git$/, ""));
+      }
+    } catch (e) {
+      setLocalError(e.message);
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
   const toggleAll = () => {
     if (allSelected) setSelected({});
     else {
       const all = {};
-      (remoteData ? remoteData.repos : []).forEach((r) => { all[r.full_name] = true; });
+      pickerRepos.forEach((r) => { all[r.key] = true; });
       setSelected(all);
     }
   };
@@ -6271,19 +6376,27 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
               >
                 Import from a git host
               </button>
+              <button
+                type="button"
+                className={"import-tab" + (importMode === "local" ? " active" : "")}
+                onClick={() => setImportMode("local")}
+                disabled={busy}
+              >
+                Folder or monorepo
+              </button>
             </div>
           )}
 
           {!isRescan && importMode === "urls" && (
             <label className="field">
-              <span className="field-label">Git repository URLs ({validUrls.length})</span>
+              <span className="field-label">Repository URLs or paths ({validUrls.length})</span>
               <div className="url-list">
                 {urls.map((u, i) => (
                   <div className="url-row" key={i}>
                     <input
                       className="text-input mono"
                       type="text"
-                      placeholder="https://github.com/org/repo.git  or  local:path/to/repo"
+                      placeholder="https://github.com/org/repo.git  or  local:C:\path\to\repo — one repo per row"
                       value={u}
                       onChange={(e) => setUrlAt(i, e.target.value)}
                       disabled={busy}
@@ -6317,20 +6430,50 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
             </label>
           )}
 
-          {remoteError && <div className="ingest-error">{remoteError}</div>}
+          {isCreate && importMode === "local" && (
+            <label className="field">
+              <span className="field-label">Folder containing multiple repos, or a monorepo URL</span>
+              <div className="url-row">
+                <input
+                  className="text-input mono remote-link"
+                  type="text"
+                  placeholder="https://github.com/org/monorepo  or  /path/to/repos (docker mount: /repos)"
+                  value={localPath}
+                  onChange={(e) => setLocalPath(e.target.value)}
+                  disabled={busy || localBusy}
+                />
+                <button className="btn-ghost" onClick={loadLocal} disabled={busy || localBusy || !localPath.trim()}>
+                  {localBusy ? "Loading…" : "Scan"}
+                </button>
+              </div>
+            </label>
+          )}
 
-          {isCreate && importMode === "remote" && remoteData && (
+          {(remoteError || localError) && (
+            <div className="ingest-error">{importMode === "local" ? localError : remoteError}</div>
+          )}
+
+          {isCreate && (importMode === "remote" || importMode === "local") && pickerData && (
             <div className="remote-picker">
               <div className="remote-picker-head">
-                <span className="remote-provider">{GIT_HOST_LABELS[remoteData.provider] || remoteData.provider}</span>
-                <span className="remote-owner">{remoteData.owner}</span>
-                <span className="remote-count">{totalCount} repo{totalCount === 1 ? "" : "s"}</span>
+                {importMode === "remote" ? (
+                  <>
+                    <span className="remote-provider">{GIT_HOST_LABELS[remoteData.provider] || remoteData.provider}</span>
+                    <span className="remote-owner">{remoteData.owner}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="remote-provider">Folder</span>
+                    <span className="remote-owner">{localData.root}</span>
+                  </>
+                )}
+                <span className="remote-count">{totalCount} folder{totalCount === 1 ? "" : "s"}</span>
               </div>
               <div className="remote-toolbar">
                 <input
                   className="text-input remote-search"
                   type="text"
-                  placeholder="Search repos…"
+                  placeholder={importMode === "local" ? "Search folders…" : "Search repos…"}
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                 />
@@ -6341,13 +6484,18 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
                 <span className="remote-selected">{selectedCount} of {totalCount} selected</span>
               </div>
               <div className="remote-list">
-                {visibleRepos.length === 0 && <div className="muted small remote-empty">No repos match "{search}".</div>}
+                {visibleRepos.length === 0 && <div className="muted small remote-empty">No folders match "{search}".</div>}
                 {visibleRepos.map((r) => (
-                  <label className={"remote-row" + (selected[r.full_name] ? " checked" : "")} key={r.full_name}>
-                    <input type="checkbox" checked={!!selected[r.full_name]} onChange={() => toggleRepo(r.full_name)} />
+                  <label className={"remote-row" + (selected[r.key] ? " checked" : "")} key={r.key}>
+                    <input type="checkbox" checked={!!selected[r.key]} onChange={() => toggleRepo(r.key)} />
                     <span className="remote-row-name">{r.name}</span>
-                    <span className="remote-row-full">{r.full_name}</span>
-                    {r.description && <span className="remote-row-desc">{r.description}</span>}
+                    <span className="remote-row-full">{r.meta}</span>
+                    {importMode === "local" && (
+                      <span className="remote-row-desc">
+                        {!r.is_git && !r.has_java ? "no git · no java" : [r.is_git ? "git" : null, r.has_java ? "java" : null].filter(Boolean).join(" · ")}
+                      </span>
+                    )}
+                    {importMode === "remote" && r.desc && <span className="remote-row-desc">{r.desc}</span>}
                   </label>
                 ))}
               </div>
@@ -6360,7 +6508,7 @@ function IngestionModal({ mode, pid, projectName, pull, onComplete, onClose, onS
                 ? "Only the checked repositories are cloned (shallow) and analysed together so cross-service links are detected."
                 : "Repos are cloned (shallow) and analysed together so cross-service links are detected."}
               {importMode === "urls" && (
-                <> Use <code>local:path</code> to add an existing folder on disk (git-backed ones are still tracked for updates).</>
+                <> For a folder containing many repos, use the <strong>Local folder</strong> tab to scan and pick them all at once.</>
               )}
               {!isCreate && " The project is re-analysed as a whole when you add a repo."}
             </p>

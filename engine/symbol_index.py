@@ -29,6 +29,7 @@ It then answers the questions the detector/builder actually need:
 Everything here stays deterministic and stdlib-only — no LLM, no execution.
 """
 from __future__ import annotations
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,43 @@ from tree_sitter import Node
 
 from .ast_parser import ASTParser
 from .languages import java_ast
+
+# Build/dependency output pruned from every filesystem walk (source discovery
+# *and* config loading). Maven `target/` can embed a full Liberty runtime —
+# hundreds of thousands of non-source files — and on Windows the deep
+# `workarea` paths inside it make a naive rglob raise FileNotFoundError
+# mid-walk, killing the whole analysis. `onerror=None` walks below also
+# tolerate directories vanishing mid-scan.
+SKIP_DIRS = {"node_modules", "build", "dist", "bin", ".git", ".gradle"}
+# Inside `target/` only these survive the prune: generated-sources holds real
+# analyzed code (jaxb2, mapstruct, querydsl, wsdl2java output). Everything
+# else in target (classes, Liberty workarea, jars) is skipped.
+KEEP_UNDER_TARGET = {"generated-sources"}
+
+
+def prune_dirnames(dirpath: str, dirnames: list[str]) -> None:
+    """In-place walk prune: skip build output, keep ``target/generated-sources``."""
+    if Path(dirpath).name == "target":
+        dirnames[:] = [d for d in dirnames if d in KEEP_UNDER_TARGET]
+    else:
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+
+
+def find_config_files(repo_root: Path) -> list[Path]:
+    """All ``application*.properties|yml|yaml`` under ``repo_root``, pruned.
+
+    Replaces an unpruned per-pattern ``rglob("**/application*")``, which
+    descends into build output and can crash on path-too-deep trees.
+    """
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(repo_root, topdown=True, onerror=None):
+        prune_dirnames(dirpath, dirnames)
+        for fn in filenames:
+            if fn.startswith("application") and fn.rpartition(".")[2] in (
+                "properties", "yml", "yaml",
+            ):
+                out.append(Path(dirpath) / fn)
+    return out
 
 
 @dataclass
@@ -90,11 +128,14 @@ class SymbolIndex:
     def build(
         self,
         files: list[tuple[str, Path, Path]],
+        on_progress=None,
     ) -> None:
         """Index every parsed Java file.
 
         ``files`` is a list of ``(repo_name, repo_root, file_path)``. Files are
         parsed here (single source of truth for the whole run).
+        ``on_progress(done)`` is called after each file is indexed so callers
+        can report ``done/len(files)`` progress.
         """
         parsed: list[tuple[str, Path, Path, Node]] = []
         for repo_name, repo_root, file_path in files:
@@ -103,8 +144,10 @@ class SymbolIndex:
                 continue
             parsed.append((repo_name, repo_root, file_path, root))
 
-        for repo_name, repo_root, file_path, root in parsed:
+        for i, (repo_name, repo_root, file_path, root) in enumerate(parsed, 1):
             self._index_file(repo_name, repo_root, file_path, root)
+            if on_progress:
+                on_progress(i)
 
         # Load application config from all repos (properties + yml).
         roots_seen: set[Path] = set()
@@ -171,10 +214,7 @@ class SymbolIndex:
     # ── config (application.properties / .yml) ─────────────────────
 
     def _load_config(self, repo_root: Path) -> None:
-        candidates = []
-        for pat in ("*.properties", "*.yml", "*.yaml"):
-            candidates.extend(repo_root.rglob(f"**/application{pat}"))
-            candidates.extend(repo_root.rglob(f"application{pat}"))
+        candidates = find_config_files(repo_root)
         for cfg in candidates:
             try:
                 text = cfg.read_text(errors="replace")
@@ -274,6 +314,36 @@ class SymbolIndex:
         ]
         self._impls_cache[interface_simple] = out
         return out
+
+    def resolve_fqn(self, ci: Optional[TypeInfo], simple: str) -> str:
+        """Best-effort FQN for a simple type name seen from ``ci``.
+
+        Unlike :meth:`find_class` this succeeds even when the class is NOT
+        indexed (a shared message library repo that wasn't scanned): an
+        explicit import or the enclosing package pins the FQN without the
+        class needing to exist. Returns ``""`` when nothing pins it down —
+        callers treat that as "keep the simple name" rather than guessing.
+        """
+        if not simple:
+            return ""
+        if ci:
+            for imp in ci.imports_explicit:
+                if imp.rsplit(".", 1)[-1] == simple:
+                    return imp
+            for wpkg in ci.imports_wildcard:
+                cand = [c for c in self.by_simple.get(simple, []) if c.fqn.startswith(wpkg + ".")]
+                if len(cand) == 1:
+                    return cand[0].fqn
+            if ci.package and simple[:1].isupper():
+                same = self.by_fqn.get(f"{ci.package}.{simple}")
+                if same:
+                    return same.fqn
+                # not indexed anywhere: same-package is the Java default
+                return f"{ci.package}.{simple}"
+        hit = self.by_simple.get(simple, [])
+        if len(hit) == 1:
+            return hit[0].fqn
+        return ""
 
     def field_type(self, ci: TypeInfo, field_name: str) -> str:
         """Declared type of a field, walking supertypes if not local."""

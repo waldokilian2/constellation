@@ -28,6 +28,7 @@ _MESSAGE_CONSUMER_TYPES = frozenset({
     "jms-consumer",
     "sqs-consumer",
     "event-listener",
+    "message-handler",  # in-house bus handler (channel = payload type)
 })
 
 

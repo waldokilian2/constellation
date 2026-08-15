@@ -34,6 +34,56 @@ def _is_test_file(path: Path) -> bool:
     return stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("IT")
 
 
+def _walk_java_files(repo_path: Path):
+    """Yield every non-test ``*.java`` under ``repo_path``, skipping build output.
+
+    Uses a pruned ``os.walk`` (shared with config discovery) instead of
+    ``rglob`` so that (a) Maven `target/` output is never descended into —
+    except ``target/generated-sources``, which holds real analyzed code — and
+    (b) a directory vanishing mid-walk or a path Windows refuses to stat
+    skips that subtree instead of killing the whole analysis (deep Liberty
+    `workarea` trees inside target make naive rglobs raise FileNotFoundError).
+    """
+    import os
+    from .symbol_index import prune_dirnames
+    for dirpath, dirnames, filenames in os.walk(repo_path, topdown=True, onerror=None):
+        prune_dirnames(dirpath, dirnames)
+        for fn in sorted(filenames):
+            if fn.endswith(".java"):
+                p = Path(dirpath) / fn
+                if not _is_test_file(p):
+                    yield p
+
+
+def _progress_printer(prefix: str, total: int, noun: str, max_lines: int = 20):
+    """Return an on_progress(done) callable printing ~max_lines `[pfx] n/total` lines.
+
+    The `[prefix] done/total` shape is machine-parseable by the server's
+    _classify_log and the web UI's computeIngestProgress, which derive the
+    ingestion progress bar from the log stream.
+    """
+    if total <= 0:
+        return lambda _done: None
+    # Print when `done` crosses the next of ~max_lines thresholds. Threshold-
+    # crossing (not `done % step == 0`) because callers report on their own
+    # cadence — e.g. compute_reachable fires every 500 pops — and a modulo
+    # can be *never* satisfied (every-500 vs step 3762) leaving a whole phase
+    # silent and the UI bar indeterminate.
+    thresholds = [round(total * (i + 1) / (max_lines + 1)) for i in range(max_lines)]
+
+    state = {"next": 0}
+
+    def report(done: int):
+        done = min(done, total)
+        if state["next"] < len(thresholds) and done >= thresholds[state["next"]]:
+            # One line per report call even when several thresholds are
+            # crossed at once (callers on coarse cadences jump multiples).
+            state["next"] = len([t for t in thresholds if t <= done])
+            print(f"[{prefix}] {done}/{total} {noun}")
+
+    return report
+
+
 class ConstellationEngine:
     """Main engine — orchestrates parsing, detection, and graph building."""
 
@@ -56,32 +106,34 @@ class ConstellationEngine:
         repo_names = []
         repo_roots: dict[str, str] = {}
 
-        # ── Phase 1: collect Java sources (skip tests) ─────────────
+        # ── Phase 1: collect Java sources (skip tests + build output) ─
         all_files: list[tuple[str, Path, Path]] = []
         for repo_name, repo_path in repo_dirs:
             repo_names.append(repo_name)
             repo_roots[repo_name] = str(repo_path)
             print(f"[scan] {repo_name}: scanning {repo_path}")
-            java_files = sorted(p for p in repo_path.rglob("*.java") if not _is_test_file(p))
-            for jf in java_files:
+            for jf in _walk_java_files(repo_path):
                 all_files.append((repo_name, repo_path, jf))
 
         # ── Phase 2: build the type-aware symbol index ──────────────
         index = SymbolIndex()
-        index.build(all_files)
-        print(f"[scan] indexed {len(index.by_fqn)} types, {len(index.methods)} methods, "
+        index.build(all_files, on_progress=_progress_printer("index", len(all_files), "files"))
+        print(f"[index] indexed {len(index.by_fqn)} types, {len(index.methods)} methods, "
               f"{len(index.constants)} constants across {len(repo_dirs)} repo(s)")
 
         # ── Phase 3: detect entry points + producers (type-based) ───
         detector = EntryPointDetector(index)
-        all_entry_points, all_producers = detector.scan()
-        print(f"[scan] {len(all_entry_points)} entry points, {len(all_producers)} producers")
+        all_entry_points, all_producers = detector.scan(
+            on_progress=_progress_printer("detect", len(index.by_fqn), "classes")
+        )
+        print(f"[detect] {len(all_entry_points)} entry points, {len(all_producers)} producers")
 
         # ── Phase 4: build call trees ───────────────────────────────
         print(f"\n[graph] Building call trees for {len(all_entry_points)} entry points...")
         builder = CallGraphBuilder(index)
+        report = _progress_printer("graph", len(all_entry_points), "entry points")
 
-        for ep in all_entry_points:
+        for i, ep in enumerate(all_entry_points, 1):
             # Find the entry method via the index and build its call tree.
             entry_methods = index.find_methods(ep.class_name, ep.method)
             entry_method = next((m for m in entry_methods if m.repo == ep.repo and m.file == ep.file), None)
@@ -101,6 +153,7 @@ class ConstellationEngine:
                     confidence=ConfidenceTag.EXTRACTED.value,
                 )
                 ep.metrics = {"depth": 0, "total_nodes": 1, "unique_files": 1, "branch_count": 0, "thin": False}
+            report(i)
 
         # ── Phase 5: cross-repo linking ─────────────────────────────
         print(f"\n[link] Finding cross-repo connections...")
@@ -111,7 +164,10 @@ class ConstellationEngine:
         # ── Phase 6: dead-code analysis (full method reachability) ──
         # Walk the ENTIRE call graph from every entry point (no depth/node cap,
         # unlike the display trees) so deep-but-reachable methods aren't flagged.
-        reached = builder.compute_reachable(all_entry_points)
+        reached = builder.compute_reachable(
+            all_entry_points,
+            on_progress=_progress_printer("analyze", len(index.methods), "methods reached"),
+        )
         # Candidate pool = indexed methods minus pure-contract declarations.
         # A method with no body is a contract (interface method, abstract
         # method in an abstract class, or a native method). Such methods are
@@ -141,7 +197,7 @@ class ConstellationEngine:
                 "file": m.file,
                 "line": m.line,
             })
-        print(f"[scan] {len(unreachable)} of {methods_total} methods unreachable "
+        print(f"[analyze] {len(unreachable)} of {methods_total} methods unreachable "
               f"(dead-code candidates)")
 
         # ── Phase 7: assemble graph ─────────────────────────────────

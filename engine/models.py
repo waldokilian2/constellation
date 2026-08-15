@@ -26,6 +26,7 @@ class EntryPointType(Enum):
     LIFECYCLE = "lifecycle"        # @PostConstruct / CommandLineRunner / ApplicationRunner / InitializingBean / @WebListener
     MAIN = "main"                  # public static void main(String[])
     CLOUD_FUNCTION = "cloud-function"  # @Bean Function/Supplier/Consumer (Spring Cloud Function)
+    MESSAGE_HANDLER = "message-handler"  # in-house bus: @Handle-style method dispatched by payload type
     UNKNOWN = "unknown"
 
 
@@ -37,6 +38,7 @@ class ProducerType(Enum):
     PULSAR_PRODUCER = "pulsar-producer"
     NATS_PRODUCER = "nats-producer"
     HTTP_CALL = "http-call"  # sync HTTP request (Feign/RestTemplate/WebClient/...)
+    MESSAGE_BUS_PRODUCER = "message-bus-producer"  # in-house bus facade: send/publish(payload)
     UNKNOWN = "unknown"
 
 

@@ -725,6 +725,29 @@ class ProjectStore:
         """Flag a project's status as ``error`` (used by the streaming ingest path)."""
         self.mark_status(pid, "error", message)
 
+    def reap_stale_analyses(self, reason: str = "interrupted") -> list[str]:
+        """Reconcile ``analyzing`` statuses left behind by a server restart.
+
+        Analysis runs on an in-process thread; if the server dies mid-scan the
+        persisted status stays ``analyzing`` forever (the UI then treats the
+        project as permanently busy). Called once on startup: a project whose
+        graph already exists (a rescan was interrupted) goes back to ``ready``
+        since the previous graph is still valid; one with no graph yet (the
+        initial ingest never finished) is marked ``error``. Returns the ids of
+        the projects that were reaped.
+        """
+        reaped: list[str] = []
+        for p in self.list_projects():
+            if p.get("status") != "analyzing":
+                continue
+            pid = p.get("id")
+            if self.graph_path(pid).exists():
+                self.mark_status(pid, "ready")
+            else:
+                self.mark_status(pid, "error", f"Analysis {reason}: no graph was produced. Re-run the analysis.")
+            reaped.append(pid)
+        return reaped
+
     # ── legacy seeding ─────────────────────────────────────────────
 
     # Legacy single-graph files (pre-multi-project) that get imported once as

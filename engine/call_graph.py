@@ -238,14 +238,16 @@ class CallGraphBuilder:
             "branch_count": branch_count,
         }
 
-    def compute_reachable(self, entry_points: list[EntryPoint]) -> set[str]:
+    def compute_reachable(self, entry_points: list[EntryPoint], on_progress=None) -> set[str]:
         """Full (unbounded) set of methods reachable from any entry point.
 
         Unlike :meth:`build_tree` (depth/node-limited for display), this walks
         the *entire* call graph so methods beyond the display depth limit
         aren't falsely flagged as dead. Returns keys of the form
         ``'{class}.{method}@{file}:{line}'`` (same scheme as :meth:`_key`).
-        Used for dead-code detection.
+        Used for dead-code detection. ``on_progress(processed)`` is called
+        roughly every 500 BFS pops so callers can report progress (the walk's
+        total size isn't known upfront — callers clamp against their own total).
         """
         reached: set[str] = set()
         # Work items: (method AST node, enclosing ClassInfo)
@@ -269,8 +271,12 @@ class CallGraphBuilder:
         # Unbounded BFS — the global reached set terminates cycles; no depth or
         # node cap. Resolution mirrors _expand_node so reachability and the
         # displayed trees agree on what counts as an edge.
+        processed = 0
         while queue:
             node, enclosing_ci = queue.pop()
+            processed += 1
+            if on_progress and processed % 500 == 0:
+                on_progress(processed)
             if enclosing_ci is None:
                 continue
             body = self.java.get_method_body(node)

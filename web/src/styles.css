@@ -307,7 +307,9 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 
 /* Bundled-edge hover popup (single line per direction).  pointer-events: none —
-   the popup is purely informational and must never block hovering nearby lines. */
+   the popup is purely informational and must never block hovering nearby lines.
+   The channel text re-enables pointer-events so the native title tooltip (full
+   FQN) can fire when hovering it — it wraps instead of truncating either way. */
 .edge-popup {
   position: absolute;
   transform: translate(-50%, calc(-100% - 14px));
@@ -322,7 +324,6 @@ code { font-family: var(--mono); color: var(--cyan); }
   box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  pointer-events: none;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -349,7 +350,7 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 .edge-popup-dot.msg { background: #00d4ff; box-shadow: 0 0 8px rgba(0, 212, 255, .7); }
 .edge-popup-dot.http { background: #00e0a8; box-shadow: 0 0 8px rgba(0, 224, 168, .7); }
-.edge-popup-channel { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edge-popup-channel { flex: 1; color: var(--text); min-width: 0; overflow-wrap: anywhere; word-break: break-all; white-space: normal; pointer-events: auto; cursor: help; }
 .edge-popup-kind {
   font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
   color: var(--text-faint); flex-shrink: 0;
@@ -2475,8 +2476,11 @@ code { font-family: var(--mono); color: var(--cyan); }
 .log-line { color: var(--text-dim); white-space: pre-wrap; word-break: break-word; }
 .log-line.phase-clone { color: #c4b5fd; }
 .log-line.phase-scan { color: #93c5fd; }
+.log-line.phase-index { color: #a5b4fc; }
+.log-line.phase-detect { color: #7dd3fc; }
 .log-line.phase-graph { color: #67e8f9; }
 .log-line.phase-link { color: #6ee7b7; }
+.log-line.phase-analyze { color: #fcd34d; }
 .log-line.phase-done { color: #34d399; font-weight: 600; }
 
 /* The ingest strip lives OUTSIDE the scrollable modal-body (between the form

@@ -12,6 +12,7 @@ import ReasoningBlock from "./ReasoningBlock.jsx";
 import ToolSteps from "./ToolSteps.jsx";
 import { useConversationChat } from "./useConversationChat.js";
 import { layoutGalaxy, edgeCurve, edgeBendSide, placeEdgePills, curvePoint, EDGE_PILL, resolveEdgeBends, labelHalfWidth, LABEL_GAP, LABEL_H } from "./galaxyLayout.js";
+import { layoutFlow } from "./flowLayout.js";
 import satImg from "./assets/broken-satellite.png";
 import "./styles.css";
 
@@ -4024,130 +4025,59 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
     return { repoNodes, flowEdges: edges, externalInputs: externals };
   }, [flow]);
 
-  // Layout: assign (x, y) positions using depth (x) + sibling offset (y).
-  // Horizontal spacing is FIXED (like the path view) rather than stretched to
-  // the viewport, so edges stay short and very large flows grow a wide world
-  // the user pans across — the fit-to-flow zoom range handles the rest.
-  const layout = useMemo(() => {
-    const hasExternal = externalInputs.length > 0;
-
-    const paddingX = 120;
-    const colStep = 440; // leaves ~270px between nodes — enough for edge labels
-    const cy = H / 2 - 30;
-
-    // Group repos by depth to vertically offset siblings at the same depth
-    const byDepth = {};
-    repoNodes.forEach((rn) => {
-      const d = rn.depth + (hasExternal ? 1 : 0); // shift for external col
-      if (!byDepth[d]) byDepth[d] = [];
-      byDepth[d].push(rn);
-    });
-
-    // Assign y positions: if multiple repos at same depth, stack them vertically
-    const NODE_GAP_Y = 160; // vertical gap between stacked repos
-    const positions = repoNodes.map((rn) => {
-      const d = rn.depth + (hasExternal ? 1 : 0);
-      const col = d;
-      const x = paddingX + col * colStep;
-      // If multiple repos at this depth, distribute around center
-      const siblings = byDepth[d] || [rn];
-      const idx = siblings.indexOf(rn);
-      const total = siblings.length;
-      const yOffset = (idx - (total - 1) / 2) * NODE_GAP_Y;
-      return { ...rn, x, y: cy + yOffset, w: 170, h: 110 };
-    });
-
-    const externalPos = externalInputs.map((ei, i) => ({
-      ...ei,
-      x: paddingX,
-      y: cy,
-      w: 170,
-      h: 110,
-    }));
-
-    return { positions, externalPos };
-  }, [repoNodes, externalInputs, W, H]);
-
-  const posMap = useMemo(() => {
+  // Deterministic layered layout + edge routing + on-curve pill placement
+  // (web/src/flowLayout.js — same philosophy as the galaxy view's layout:
+  // every edge is verified against the cards and other edges, and every
+  // label pill sits exactly on its edge line).
+  // pillWFor hands the layout the rendered pill widths so column spacing
+  // and placement are sized for the real labels (compare diff marks widen
+  // pills by 18px).
+  const flowEdgeKey = (e) => e.from + ">>" + e.to + "|" + e.channel + "|" + (e.kind || "message");
+  const pillWFor = useMemo(() => {
     const m = {};
-    layout.positions.forEach((p) => { m[p.repo] = p; });
+    flowEdges.forEach((e) => {
+      const isSync = e.kind === "http";
+      const isResp = e.kind === "http-response";
+      const st = cmp ? (cmp.chStatus[e.channel] || "same") : null;
+      const label = isResp
+        ? "← " + (e.responseType || "response")
+        : isSync
+          ? (e.verb ? e.verb + " " : "") + e.channel
+          : e.channel;
+      m[flowEdgeKey(e)] = label.length * 6.5 + 22 + (st && st !== "same" ? 18 : 0);
+    });
+    return m;
+  }, [flowEdges, cmp]);
+
+  const layout = useMemo(() => {
+    const st = layoutFlow({
+      repos: repoNodes.map((rn) => ({ repo: rn.repo, depth: rn.depth, methods: rn.methods })),
+      externals: externalInputs.map((ei, i) => ({ key: "ext-" + i, targetRepo: ei.targetRepo })),
+      edges: [
+        ...flowEdges.map((e) => ({ key: flowEdgeKey(e), from: e.from, to: e.to })),
+        ...externalInputs.map((ei, i) => ({ key: "ext-edge-" + i, from: "ext-" + i, to: ei.targetRepo })),
+      ],
+      pillWFor,
+      H,
+    });
+    // Merge the entry/method data the render needs back onto the positions.
+    const meta = {};
+    repoNodes.forEach((rn) => { meta[rn.repo] = rn; });
+    st.positions = st.positions.map((p) => ({ ...p, entryIds: (meta[p.repo] || {}).entryIds || [], methods: (meta[p.repo] || {}).methods || [] }));
+    return st;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoNodes, flowEdges, externalInputs, pillWFor, H]);
+
+  const routesByKey = useMemo(() => {
+    const m = {};
+    layout.routes.forEach((rt) => { m[rt.key] = rt; });
     return m;
   }, [layout]);
 
-  // Edge geometry: curved bezier between the inner-facing edges of the pair
-  // (an edge always attaches at the side of each node that faces the other,
-  // so a request + response pair share the same attachment points). Skip edges
-  // (spanning >1 depth) get a strong vertical arc to avoid intermediate nodes.
-  const edgeGeom = (a, b, edgeIndex, totalEdges, isSkip, positions) => {
-    const NODE_HALF_W = 85;
-    const forward = b.x >= a.x;
-    const start = { x: a.x + (forward ? NODE_HALF_W : -NODE_HALF_W), y: a.y };
-    const end = { x: b.x - (forward ? NODE_HALF_W : -NODE_HALF_W), y: b.y };
-    const dx = end.x - start.x;
-
-    if (isSkip) {
-      // Arc upward to clear intermediate repos — and raise further above any
-      // node stacked in the columns between the endpoints (siblings sit in the
-      // space above the row and would otherwise be crossed by the arc). The
-      // curve dips below its control y (bezier midpoint = 0.125*(y0+y1) +
-      // 0.75*arcY), so solve for arcY above the tallest intermediate node.
-      let arcY = start.y - Math.min(160, Math.max(90, Math.abs(dx) * 0.28));
-      if (positions) {
-        positions.forEach((p) => {
-          if (p === a || p === b) return;
-          const between = p.x > Math.min(a.x, b.x) - 85 && p.x < Math.max(a.x, b.x) + 85;
-          if (!between) return;
-          const dip = 0.125 * (start.y + end.y) + 0.75 * arcY;
-          if (p.y - 55 < dip + 20) {
-            arcY = Math.min(arcY, (p.y - 55 - 30 - 0.125 * (start.y + end.y)) / 0.75);
-          }
-        });
-      }
-      const cp1 = { x: start.x + dx * 0.25, y: arcY };
-      const cp2 = { x: end.x - dx * 0.25, y: arcY };
-      const path = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y} ${cp2.x} ${cp2.y} ${end.x} ${end.y}`;
-      // Label sits ON the curve at its apex (bezier midpoint), not at the
-      // control y — otherwise it floats above the arc.
-      const mid = { x: start.x + dx / 2, y: 0.125 * (start.y + end.y) + 0.75 * arcY };
-      return { mid, path };
-    }
-
-    // Parallel/opposite edges (request + response round-trips) bow apart
-    // vertically around the axis; single edges stay on it.
-    const sep = totalEdges > 1 ? (edgeIndex - (totalEdges - 1) / 2) * 2 : 0;
-    const bend = sep * Math.min(72, Math.max(30, Math.abs(dx) * 0.22));
-    const cp1 = { x: start.x + dx * 0.35, y: start.y + bend };
-    const cp2 = { x: end.x - dx * 0.35, y: end.y + bend };
-    const path = `M ${start.x} ${start.y} C ${cp1.x} ${cp1.y} ${cp2.x} ${cp2.y} ${end.x} ${end.y}`;
-    const mid = { x: start.x + dx / 2, y: (start.y + end.y) / 2 + bend * 0.75 };
-    return { mid, path };
-  };
-
-  // Group edges by unordered repo pair so opposite (request/response) edges
-  // share a group and separate vertically.
-  const edgePairCount = useMemo(() => {
-    const m = {};
-    flowEdges.forEach((e) => {
-      const key = e.from < e.to ? e.from + ">>" + e.to : e.to + ">>" + e.from;
-      m[key] = (m[key] || 0) + 1;
-    });
-    return m;
-  }, [flowEdges]);
-
-  // World-space bounds of every rendered node (repos 170×~110, externals 160×~110)
-  const flowBounds = useMemo(() => {
-    let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity;
-    const grow = (x0, y0, x1, y1) => {
-      if (x0 < l) l = x0;
-      if (x1 > r) r = x1;
-      if (y0 < t) t = y0;
-      if (y1 > b) b = y1;
-    };
-    layout.externalPos.forEach((p) => grow(p.x - 80, p.y - 50, p.x + 80, p.y + 60));
-    layout.positions.forEach((p) => grow(p.x - 85, p.y - 55, p.x + 85, p.y + 85));
-    if (!isFinite(l)) return { l: 0, r: W, t: 0, b: H };
-    return { l, r, t, b };
-  }, [layout, W, H]);
+  // World-space bounds of everything rendered (cards, externals, bent edge
+  // curves and label pills — computed inside the layout so an arc or a wide
+  // pill can never swing past the fitted frame).
+  const flowBounds = layout.bounds;
 
   // Viewport that fits the whole flow (capped at 100% — never zoom IN to fit),
   // with the flow's left edge pinned to a consistent starting spot.
@@ -4270,16 +4200,15 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
           </defs>
           {/* External input dashed edges — the origin node already labels the
               channel (with verb for REST), so the edge stays unlabeled to avoid
-              duplicating the text. */}
+              duplicating the text.  Routed by the same layout as internal
+              edges (distinct attachment fans, collision-verified). */}
           {externalInputs.map((ei, i) => {
-            const target = posMap[ei.targetRepo];
-            if (!target) return null;
-            const start = { x: layout.externalPos[i].x, y: layout.externalPos[i].y };
-            const end = { x: target.x, y: target.y };
+            const rt = routesByKey["ext-edge-" + i];
+            if (!rt) return null;
             return (
               <g key={"ext-" + i}>
                 <path
-                  d={`M ${start.x + 85} ${start.y} L ${end.x - 85} ${end.y}`}
+                  d={rt.path}
                   fill="none"
                   stroke="#94a3b8"
                   strokeWidth="1.5"
@@ -4290,21 +4219,13 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
               </g>
             );
           })}
-          {/* Internal flow edges */}
+          {/* Internal flow edges — paths and pill positions come from the
+              shared deterministic layout: pills always sit ON their edge
+              line (placed by sliding along the curve), never lifted off. */}
           {flowEdges.map((e, i) => {
-            const a = posMap[e.from], b = posMap[e.to];
-            if (!a || !b) return null;
-            // Skip edge = spans more than 1 depth level (jumps over a repo)
-            const isSkip = Math.abs(a.depth - b.depth) > 1;
-            const pairKey = e.from < e.to ? e.from + ">>" + e.to : e.to + ">>" + e.from;
-            const total = edgePairCount[pairKey] || 1;
-            // Index of this edge within its pair group, derived from array order
-            // (pure, so it stays stable across re-renders instead of accumulating).
-            const idx = flowEdges.slice(0, i).filter((pe) => {
-              const pk = pe.from < pe.to ? pe.from + ">>" + pe.to : pe.to + ">>" + pe.from;
-              return pk === pairKey;
-            }).length;
-            const g = edgeGeom(a, b, idx, total, isSkip, layout.positions);
+            const rt = routesByKey[flowEdgeKey(e)];
+            if (!rt) return null;
+            const pill = layout.pills[flowEdgeKey(e)];
             const isSync = e.kind === "http";
             const isResp = e.kind === "http-response";
             const st = cmp ? (cmp.chStatus[e.channel] || "same") : null;
@@ -4316,20 +4237,11 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
                 ? (e.verb ? e.verb + " " : "") + e.channel
                 : e.channel;
             const pillW = label.length * 6.5 + 22 + (st && st !== "same" ? 18 : 0);
-            // Keep the pill clear of node boxes: when the edge midpoint lands
-            // on a stacked sibling node (or a tight column), lift the pill
-            // above it so labels never sit on top of nodes.
-            let pillY = g.mid.y;
-            if (layout.positions.some((p) => Math.abs(p.x - g.mid.x) < 85 + pillW / 2 && Math.abs(p.y - pillY) < 55 + 14)) {
-              const above = layout.positions
-                .filter((p) => Math.abs(p.x - g.mid.x) < 85 + pillW / 2)
-                .map((p) => p.y - 55);
-              pillY = Math.min(...above) - 14 - 8;
-            }
+            const pillPos = pill || { x: rt.mid.x, y: rt.mid.y };
             return (
               <g key={"fe-" + i}>
-                <path d={g.path} fill="none" stroke={stroke} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={dash} opacity={st === "same" && cmp ? "0.3" : (isSkip ? "0.4" : "0.55")} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
-                <g className={"edge-label-pill" + (isSync || isResp ? " sync" : "")} transform={`translate(${g.mid.x}, ${pillY})`}>
+                <path d={rt.path} fill="none" stroke={stroke} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={dash} opacity={st === "same" && cmp ? "0.3" : (rt.skip ? "0.4" : "0.55")} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
+                <g className={"edge-label-pill" + (isSync || isResp ? " sync" : "")} transform={`translate(${pillPos.x}, ${pillPos.y})`}>
                   <rect className={"edge-label-glow" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
                   <rect className={"edge-label-bg" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />
                   <text className={"edge-label" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={st && st !== "same" ? -9 : 0} y={0} dominantBaseline="central" textAnchor="middle">{label}</text>
@@ -4349,7 +4261,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
           <div
             key={"ext-node-" + i}
             className={"flow-external-node " + (ei.cls ? ei.cls + "-origin" : (ei.kind === "rest" ? "rest-origin" : ""))}
-            style={{ left: layout.externalPos[i].x - 80, top: layout.externalPos[i].y - 50 }}
+            style={{ left: layout.externalPos[i].x - 80, top: layout.externalPos[i].y - 32 }}
           >
             <div className="flow-external-icon">{ei.kind === "rest" ? "⟶" : (ei.cls === "scheduled" ? "⏰" : "⌁")}</div>
             <div className="flow-external-label" title={ei.kind === "rest" ? (ei.verb + " " + ei.channel) : ei.channel}>
@@ -4368,7 +4280,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
           <div
             key={p.repo}
             className={"flow-repo-node" + (repoSt ? " st-" + repoSt : "")}
-            style={{ left: p.x - 85, top: p.y - 55, width: 170 }}
+            style={{ left: p.x - p.w / 2, top: p.y - p.h / 2, width: p.w }}
             onClick={(e) => onSelectRepoInFlow(p.repo, p.entryIds[0], e)}
           >
             <div className="flow-repo-glow" />

@@ -1,7 +1,7 @@
 """
 Cross-repo linker — finds connections between repos via shared channels.
 
-Two kinds of edges:
+Three kinds of edges:
 
 * **message** — a producer in one repo sends to a queue/topic/event that a
   consumer in another repo listens on (exact channel-name match).
@@ -9,6 +9,9 @@ Two kinds of edges:
   REST endpoint in another repo. Paths are matched in **normalized template
   form** (``/api/orders/123`` == ``/api/orders/{id}``) and the link records
   the HTTP verb when both sides know it.
+* **grpc** — a ``ProducerType.GRPC_CALL`` (generated ``*Stub`` invocation) in
+  one repo calls a ``GRPC_SERVICE`` entry in another. Both sides use the same
+  canonical ``/Service/method`` channel format, so the match is exact.
 """
 from __future__ import annotations
 from . import http_paths
@@ -31,9 +34,12 @@ MESSAGE_CONSUMER_TYPES = {
     EntryPointType.KAFKA_CONSUMER,
     EntryPointType.JMS_CONSUMER,
     EntryPointType.SQS_CONSUMER,
+    EntryPointType.PULSAR_CONSUMER,
+    EntryPointType.MQTT_CONSUMER,
     EntryPointType.EVENT_LISTENER,
     EntryPointType.WEBSOCKET,
     EntryPointType.MESSAGE_HANDLER,  # in-house bus: channel = payload type
+    EntryPointType.REACTIVE_INCOMING,  # SmallRye @Incoming (Quarkus)
 }
 
 
@@ -83,20 +89,29 @@ class CrossRepoLinker:
         # self-addressing on it (a re-queue/re-drive into its own subscription,
         # or a broker-side loop): its own producers never form a cross-repo
         # edge to its own consumers' peers — only EXTERNAL producers do. So
-        # drop each self-addressing repo's producers from the link's producer
-        # set; if no external producer remains, the channel links nothing.
+        # A repo that both publishes and consumes a channel is
+        # self-addressing (a re-drive into its own subscription, or a
+        # broker-side loop). Its producers are dropped — but ONLY when every
+        # consuming repo also produces (a closed re-drive loop between peers:
+        # two self-consumers must not link to each other). When a PURE
+        # consumer exists (Axon/event-sourcing shape: the source projects its
+        # own event while other services consume it), the publish is a real
+        # broadcast and the source's producer forms the edge — per-pair
+        # same-repo edges are already skipped downstream (UI edge builder).
         consumer_repos = {
             ch: {ep.repo for ep in eps}
             for ch, eps in _consumers_by_channel(entry_points).items()
         }
+        prod_lookup = {p.id: p.repo for p in producers}
         for channel, data in channels.items():
             if not (data["producers"] and data["consumers"]):
                 continue
             self_repos = consumer_repos.get(channel, set())
-            prod_lookup = {p.id: p.repo for p in producers}
+            prod_repos = {prod_lookup.get(pid) for pid in data["producers"]}
+            closed_loop = self_repos <= prod_repos
             external = [
                 pid for pid in data["producers"]
-                if prod_lookup.get(pid) not in self_repos
+                if prod_lookup.get(pid) not in self_repos or not closed_loop
             ]
             if external:
                 links.append(CrossRepoLink(
@@ -148,6 +163,39 @@ class CrossRepoLinker:
                     kind="http",
                     verb=bucket["verb"],
                 ))
+
+        # ── grpc pass: *Stub calls → GRPC_SERVICE entries, exact /Svc/method ──
+        grpc_by_channel: dict[str, list[EntryPoint]] = {}
+        for ep in entry_points:
+            if ep.type == EntryPointType.GRPC_SERVICE and ep.channel:
+                grpc_by_channel.setdefault(ep.channel, []).append(ep)
+        if grpc_by_channel:
+            grpc_index: dict[str, dict] = {}
+            for prod in producers:
+                if prod.type != ProducerType.GRPC_CALL:
+                    continue
+                ch = prod.channel or ""
+                if not ch:
+                    continue
+                for ep in grpc_by_channel.get(ch, []):
+                    if ep.repo == prod.repo:
+                        continue  # intra-repo — call tree already shows it
+                    bucket = grpc_index.setdefault(ch, {
+                        "channel": ch, "producers": [], "consumers": [],
+                    })
+                    if prod.id not in bucket["producers"]:
+                        bucket["producers"].append(prod.id)
+                    if ep.id not in bucket["consumers"]:
+                        bucket["consumers"].append(ep.id)
+            for bucket in grpc_index.values():
+                if bucket["producers"] and bucket["consumers"]:
+                    links.append(CrossRepoLink(
+                        channel=bucket["channel"],
+                        producers=bucket["producers"],
+                        consumers=bucket["consumers"],
+                        kind="grpc",
+                        verb="GRPC",
+                    ))
 
         return links
 

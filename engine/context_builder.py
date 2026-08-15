@@ -844,7 +844,8 @@ class ContextBuilder:
         # Check if this entry point itself consumes from a channel
         ep_channel = entry_point.get("channel", "")
         ep_type = entry_point.get("type", "")
-        if ep_type in ("kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer", "event-listener"):
+        if ep_type in ("kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer",
+                       "pulsar-consumer", "mqtt-consumer", "reactive-incoming", "event-listener"):
             for link in links:
                 if link.get("channel") == ep_channel:
                     prod_repos = self._repos_from_ids(link.get("producers", []))

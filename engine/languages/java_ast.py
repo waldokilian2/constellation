@@ -79,6 +79,20 @@ def find_methods(class_node: Node) -> list[Node]:
     return results
 
 
+def find_constructors(class_node: Node) -> list[Node]:
+    """All constructor_declaration nodes within a type (recursive)."""
+    results: list[Node] = []
+
+    def walk(node: Node):
+        if node.type == "constructor_declaration":
+            results.append(node)
+        for child in node.children:
+            walk(child)
+
+    walk(class_node)
+    return results
+
+
 def get_method_name(method_node: Node) -> str:
     for child in method_node.children:
         if child.type == "identifier":
@@ -312,9 +326,9 @@ def get_method_signature(method_node: Node) -> dict:
 
 
 def get_method_body(method_node: Node) -> Optional[Node]:
-    """Get the block (body) of a method, or None if abstract/interface."""
+    """Get the block (body) of a method or constructor, or None if abstract/interface."""
     for child in method_node.children:
-        if child.type == "block":
+        if child.type in ("block", "constructor_body"):
             return child
     return None
 

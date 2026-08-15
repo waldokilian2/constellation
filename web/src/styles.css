@@ -350,12 +350,14 @@ code { font-family: var(--mono); color: var(--cyan); }
 }
 .edge-popup-dot.msg { background: #00d4ff; box-shadow: 0 0 8px rgba(0, 212, 255, .7); }
 .edge-popup-dot.http { background: #00e0a8; box-shadow: 0 0 8px rgba(0, 224, 168, .7); }
+.edge-popup-dot.grpc { background: #14b8a6; box-shadow: 0 0 8px rgba(20, 184, 166, .7); }
 .edge-popup-channel { flex: 1; color: var(--text); min-width: 0; overflow-wrap: anywhere; word-break: break-all; white-space: normal; pointer-events: auto; cursor: help; }
 .edge-popup-kind {
   font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
   color: var(--text-faint); flex-shrink: 0;
 }
 .edge-popup-kind.http { color: #00e0a8; }
+.edge-popup-kind.grpc { color: #14b8a6; }
 .edge-popup-kind.msg { color: #00d4ff; }
 
 /* ---------- Galaxy view ---------- */
@@ -1897,6 +1899,18 @@ code { font-family: var(--mono); color: var(--cyan); }
   background: rgba(232, 121, 249, .15);
   color: #e879f9;
 }
+.flow-origin-tag.pulsar {
+  background: rgba(134, 227, 206, .15);
+  color: #86e3ce;
+}
+.flow-origin-tag.mqtt {
+  background: rgba(125, 211, 252, .15);
+  color: #7dd3fc;
+}
+.flow-origin-tag.reactive {
+  background: rgba(74, 222, 128, .15);
+  color: #4ade80;
+}
 .flow-origin-label {
   font-size: 11px;
   color: rgba(255, 255, 255, .5);
@@ -2091,6 +2105,15 @@ code { font-family: var(--mono); color: var(--cyan); }
 .flow-external-node.sqs-origin .flow-external-icon,
 .flow-external-node.sqs-origin .flow-external-sub { color: rgba(232, 121, 249, .65); }
 .flow-external-node.sqs-origin .flow-external-label { color: rgba(232, 121, 249, .75); }
+.flow-external-node.pulsar-origin .flow-external-icon,
+.flow-external-node.pulsar-origin .flow-external-sub { color: rgba(134, 227, 206, .65); }
+.flow-external-node.pulsar-origin .flow-external-label { color: rgba(134, 227, 206, .75); }
+.flow-external-node.mqtt-origin .flow-external-icon,
+.flow-external-node.mqtt-origin .flow-external-sub { color: rgba(125, 211, 252, .65); }
+.flow-external-node.mqtt-origin .flow-external-label { color: rgba(125, 211, 252, .75); }
+.flow-external-node.reactive-origin .flow-external-icon,
+.flow-external-node.reactive-origin .flow-external-sub { color: rgba(74, 222, 128, .65); }
+.flow-external-node.reactive-origin .flow-external-label { color: rgba(74, 222, 128, .75); }
 
 /* ================================================================
    FLOW TRACE VIEW (path equivalent — repo's trace in a flow)

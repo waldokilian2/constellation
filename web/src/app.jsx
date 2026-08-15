@@ -22,14 +22,17 @@ const repoFromId = (id) => (typeof id === "string" ? id.split(":")[0] : "");
 // (HTTP links prefixed with the verb), multiple channels → counts.
 const edgeLabelText = (items) => {
   const httpItems = items.filter((it) => it.kind === "http");
-  const messages = items.filter((it) => it.kind !== "http");
+  const grpcItems = items.filter((it) => it.kind === "grpc");
+  const messages = items.filter((it) => it.kind !== "http" && it.kind !== "grpc");
   if (items.length === 1) {
     const it = items[0];
+    if (it.kind === "grpc") return "gRPC " + it.channel;
     return it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel;
   }
   return [
     messages.length ? messages.length + " msg" + (messages.length > 1 ? "s" : "") : "",
     httpItems.length ? httpItems.length + " HTTP" : "",
+    grpcItems.length ? grpcItems.length + " gRPC" : "",
   ].filter(Boolean).join(" · ");
 };
 
@@ -139,6 +142,8 @@ const TYPE_META = {
   "websocket":         { color: "#a855f7", label: "WebSocket", glow: "rgba(168,85,247,.55)" },
   "jms-consumer":      { color: "#2dd4bf", label: "JMS",       glow: "rgba(45,212,191,.55)" },
   "sqs-consumer":      { color: "#e879f9", label: "SQS",       glow: "rgba(232,121,249,.55)" },
+  "pulsar-consumer":   { color: "#86e3ce", label: "Pulsar",    glow: "rgba(134,227,206,.55)" },
+  "mqtt-consumer":     { color: "#7dd3fc", label: "MQTT",      glow: "rgba(125,211,252,.55)" },
   // Extra framework entry kinds (deterministic detection).
   "servlet":           { color: "#38bdf8", label: "Servlet",   glow: "rgba(56,189,248,.55)" },
   "soap-service":      { color: "#d4a373", label: "SOAP",      glow: "rgba(212,163,115,.55)" },
@@ -148,6 +153,7 @@ const TYPE_META = {
   "main":              { color: "#818cf8", label: "Main",      glow: "rgba(129,140,248,.55)" },
   "cloud-function":    { color: "#c084fc", label: "Function",  glow: "rgba(192,132,252,.55)" },
   "message-handler":   { color: "#f59e0b", label: "Bus",       glow: "rgba(245,158,11,.55)" },
+  "reactive-incoming": { color: "#4ade80", label: "Reactive",  glow: "rgba(74,222,128,.55)" },
 };
 
 // Galaxy edge colors by link kind: async (message-only), sync (HTTP-only), both (mixed)
@@ -726,6 +732,8 @@ const ORIGIN_KINDS = {
   "rabbitmq-consumer":{ tag: "RABBITMQ",  cls: "rabbitmq",  noun: "RabbitMQ queue" },
   "jms-consumer":     { tag: "JMS",       cls: "jms",       noun: "JMS queue" },
   "sqs-consumer":     { tag: "SQS",       cls: "sqs",       noun: "SQS queue" },
+  "pulsar-consumer":  { tag: "PULSAR",    cls: "pulsar",    noun: "Pulsar topic" },
+  "mqtt-consumer":    { tag: "MQTT",      cls: "mqtt",      noun: "MQTT topic" },
   // Extra framework origins.
   main:               { tag: "MAIN",      cls: "main",      noun: "application bootstrap" },
   lifecycle:          { tag: "LIFECYCLE", cls: "lifecycle", noun: "lifecycle hook" },
@@ -735,6 +743,7 @@ const ORIGIN_KINDS = {
   "grpc-service":     { tag: "GRPC",      cls: "grpc",      noun: "gRPC service method" },
   "cloud-function":   { tag: "FUNCTION",  cls: "function",  noun: "cloud function" },
   "message-handler":  { tag: "BUS",       cls: "bus",       noun: "message bus handler" },
+  "reactive-incoming":{ tag: "REACTIVE",  cls: "reactive",  noun: "reactive messaging channel" },
 };
 
 // Describe a flow's origin: rest vs. a specific external trigger type.
@@ -757,6 +766,9 @@ const FLOW_ORIGIN_META = {
   websocket:  { color: "#a855f7", label: "WebSocket" },
   jms:        { color: "#2dd4bf", label: "JMS" },
   sqs:        { color: "#e879f9", label: "SQS" },
+  pulsar:     { color: "#86e3ce", label: "Pulsar" },
+  mqtt:       { color: "#7dd3fc", label: "MQTT" },
+  reactive:   { color: "#4ade80", label: "Reactive" },
   servlet:    { color: "#38bdf8", label: "Servlet" },
   soap:       { color: "#d4a373", label: "SOAP" },
   graphql:    { color: "#f472b6", label: "GraphQL" },
@@ -776,32 +788,33 @@ function detectFlows(graph) {
   const entryById = {};
   entries.forEach((e) => { entryById[e.id] = e; });
 
-  // Index producers by link kind: message/broker vs sync HTTP. Producer id
-  // format: "repo:ClassName.method:publishMethod".
+  // Index producers by link kind: message/broker vs sync (HTTP / gRPC).
+  // Producer id format: "repo:ClassName.method:publishMethod".
   const msgProducersByRepo = {};  // repo -> [{ channel, producerId, verb }]
-  const httpProducersByRepo = {}; // repo -> [{ channel, producerId, verb }]
+  const httpProducersByRepo = {}; // repo -> [{ channel, producerId, verb }] (HTTP + gRPC)
   links.forEach((link) => {
-    const isHttp = link.kind === "http";
-    const bucket = isHttp ? httpProducersByRepo : msgProducersByRepo;
+    const isSync = link.kind === "http" || link.kind === "grpc";
+    const bucket = isSync ? httpProducersByRepo : msgProducersByRepo;
     (link.producers || []).forEach((prodId) => {
       const repo = repoFromId(prodId);
       (bucket[repo] = bucket[repo] || []).push({
         channel: link.channel,
         producerId: prodId,
-        verb: isHttp ? (link.verb || "") : "",
+        verb: isSync ? (link.verb || "") : "",
       });
     });
   });
 
   // Index consumers by channel. Broker/event entries consume message channels;
-  // REST endpoints consume HTTP paths — kept in SEPARATE maps so a topic named
-  // like a path can never collide with it.
+  // REST/gRPC endpoints consume their own path spaces — kept in SEPARATE maps
+  // so a topic named like a path can never collide with it.
   const msgConsumersByChannel = {};  // channel -> [entryId]
-  const restConsumersByChannel = {}; // path -> [entryId]
+  const restConsumersByChannel = {}; // path -> [entryId] (REST + gRPC /Svc/method)
   entries.forEach((e) => {
     const ch = e.channel || "";
     if (!ch) return;
-    const bucket = e.type === "rest-endpoint" ? restConsumersByChannel : msgConsumersByChannel;
+    const bucket = (e.type === "rest-endpoint" || e.type === "grpc-service")
+      ? restConsumersByChannel : msgConsumersByChannel;
     (bucket[ch] = bucket[ch] || []).push(e.id);
   });
 
@@ -924,10 +937,12 @@ function detectFlows(graph) {
     return 1 + Math.max(...step.children.map((c) => stepDepth(c.step)));
   }
 
-  // Does the flow contain any sync HTTP hop?
+  // Does the flow contain any sync (HTTP / gRPC) hop?
   function hasSyncHop(step) {
     if (!step) return false;
-    return step.children.some((c) => c.kind === "http" || hasSyncHop(c.step));
+    return step.children.some(
+      (c) => c.kind === "http" || c.kind === "grpc" || hasSyncHop(c.step)
+    );
   }
 
   // Find origins: REST endpoints + external event channels
@@ -1007,7 +1022,7 @@ function detectFlows(graph) {
 // data. Message channels only; http-call producers are excluded on both sides.
 const MSG_CONSUMER_TYPES = new Set([
   "kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer", "event-listener",
-  "message-handler",
+  "message-handler", "pulsar-consumer", "mqtt-consumer", "reactive-incoming",
 ]);
 const CHANNEL_SENTINELS = new Set(["", "unknown", "unknown-event"]);
 const cleanChannel = (ch) => (typeof ch === "string" ? ch.trim() : "");
@@ -1446,10 +1461,14 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
             const ekey = e.from + ">>" + e.to;
             const g = edgeCurve(a, b, getSide(e.from, e.to), edgeBends[ekey] || 1);
             const httpItems = e.items.filter((it) => it.kind === "http");
-            const messages = e.items.filter((it) => it.kind !== "http");
-            // Three line colors: sync (HTTP-only), async (message-only), both (mixed)
-            const kind = (httpItems.length > 0 && messages.length > 0) ? "both"
-              : (httpItems.length > 0 ? "sync" : "async");
+            const grpcItems = e.items.filter((it) => it.kind === "grpc");
+            const messages = e.items.filter((it) => it.kind !== "http" && it.kind !== "grpc");
+            // Three line colors: sync (HTTP-only), async (message-only), both (mixed).
+            // gRPC rides with sync (it is a synchronous RPC style) unless mixed
+            // with async messages, in which case "both" applies.
+            const syncItems = httpItems.length > 0 || grpcItems.length > 0;
+            const kind = (syncItems && messages.length > 0) ? "both"
+              : (syncItems ? "sync" : "async");
             const km = EDGE_KINDS[kind];
             const prominent = kind !== "async"; // sync/both lines are bolder
             const label = edgeLabelText(e.items);
@@ -1583,20 +1602,24 @@ function GalaxyView({ graph, dims, onSelectRepo, onOpenGaps, compare }) {
                   <span className={"edge-popup-status st-" + hoverEdge.status}>{hoverEdge.status}</span>
                 )}
               </div>
-              {hoverEdge.items.map((it, i) => (
+              {hoverEdge.items.map((it, i) => {
+                const isHttp = it.kind === "http";
+                const isGrpc = it.kind === "grpc";
+                const dotCls = isHttp ? "http" : (isGrpc ? "grpc" : "msg");
+                const kindTxt = isHttp ? "HTTP" : (isGrpc ? "gRPC" : "msg");
+                const label = isHttp && it.verb ? it.verb + " " + it.channel : it.channel;
+                return (
                 <div className="edge-popup-item" key={i}>
-                  <span className={"edge-popup-dot " + (it.kind === "http" ? "http" : "msg")} />
-                  <span
-                    className="edge-popup-channel mono"
-                    title={it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel}
-                  >
-                    {it.kind === "http" && it.verb ? it.verb + " " + it.channel : it.channel}
+                  <span className={"edge-popup-dot " + dotCls} />
+                  <span className="edge-popup-channel mono" title={label}>
+                    {label}
                   </span>
-                  <span className={"edge-popup-kind " + (it.kind === "http" ? "http" : "msg")}>
-                    {it.kind === "http" ? "HTTP" : "msg"}
+                  <span className={"edge-popup-kind " + dotCls}>
+                    {kindTxt}
                   </span>
                 </div>
-              ))}
+                );
+              })}
             </div>
           );
         })()}
@@ -2831,12 +2854,14 @@ function SolarSystemView({ graph, repo, dims, onSelectEntry, flows, onOpenFlow, 
 // like REST). Their `channel` field is the topic/queue they listen on.
 const CONSUMER_TYPES = new Set([
   "kafka-consumer", "rabbitmq-consumer", "jms-consumer", "sqs-consumer",
-  "event-listener", "websocket", "message-handler",
+  "event-listener", "websocket", "message-handler", "pulsar-consumer",
+  "mqtt-consumer", "reactive-incoming",
 ]);
 // Producer types that PUBLISH to a message channel (vs a sync HTTP call).
 const PRODUCER_TYPES = new Set([
   "rabbitmq-producer", "kafka-producer", "jms-producer", "event-publisher",
-  "pulsar-producer", "nats-producer", "message-bus-producer",
+  "pulsar-producer", "nats-producer", "message-bus-producer", "sqs-producer",
+  "sns-producer",
 ]);
 
 // Channel wiring for ONE repo: every channel it consumes (IN), emits (OUT), or
@@ -2896,9 +2921,11 @@ function buildRepoChannels(repo, graph) {
     peerRepos(p.channel, "consumers").forEach((r) => c.outPeers.push(r));
   });
 
-  // HTTP — sync outbound calls (verb + path as the "channel", return type as the payload analog)
+  // HTTP + gRPC — sync outbound calls (verb + path as the "channel", return
+  // type as the payload analog)
   prods.forEach((p) => {
-    if (p.type !== "http-call" || !p.channel) return;
+    if (p.type !== "http-call" && p.type !== "grpc-call") return;
+    if (!p.channel) return;
     const c = card("http|" + p.channel, "http");
     c.verb = p.message_type || "";
     c.outMethods.push({ m: p.method, t: p.response_type || "" });

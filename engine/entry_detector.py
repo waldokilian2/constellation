@@ -18,7 +18,7 @@ from .languages import java_ast
 from .symbol_index import SymbolIndex
 from .models import EntryPoint, Producer
 from .frameworks import HANDLERS, ScanContext
-from .producers import JvmProducerDetector, FEIGN_ANNOTATION
+from .producers import JvmProducerDetector, FEIGN_ANNOTATIONS
 from . import http_paths
 
 
@@ -56,10 +56,11 @@ class EntryPointDetector:
         class_node = ci.node
         ctx = ScanContext(index=self.index, java=java, ci=ci, class_node=class_node, producers=self.producers)
 
-        # Feign client interface? Its REST-annotated methods are OUTBOUND HTTP
-        # calls, never server-side entry points.
+        # Declarative HTTP-client interface (@FeignClient / @HttpExchange)?
+        # Its REST-annotated methods are OUTBOUND HTTP calls, never
+        # server-side entry points.
         is_feign = any(
-            java.get_annotation_name(a) == FEIGN_ANNOTATION
+            java.get_annotation_name(a) in FEIGN_ANNOTATIONS
             for a in java.get_class_annotations(class_node)
         )
 
@@ -78,40 +79,68 @@ class EntryPointDetector:
             m_name = java.get_method_name(m_node)
             if not m_name:
                 continue
-            annotations = java.get_method_annotations(m_node)
-            params = java.get_method_parameters(m_node)
+            self._scan_callable(ctx, ci, is_feign, entries, producers, m_node, m_name)
 
-            # Feign client interface: every REST-annotated method is an outbound
-            # HTTP call — never a server-side entry point.
-            if is_feign:
-                producers.extend(self.producers.feign_calls(ci, m_node, m_name, annotations))
-                continue
-
-            # Per-framework method-level entries + annotation producers (STOMP).
+        # Constructors too — Axon's aggregate-creation idiom: a @CommandHandler
+        # constructor consumes the command AND publishes events
+        # (AggregateLifecycle.apply(new OrderCreatedEvent(…))). Entries run as
+        # well (the only constructor annotation any handler table matches is
+        # Axon's @CommandHandler); the call-graph/dead-code method pool stays
+        # method-only (constructor semantics differ: no override/return).
+        for c_node in java.find_constructors(class_node):
+            c_name = "<init>"
+            annotations = java.get_method_annotations(c_node)
+            params = java.get_method_parameters(c_node)
             for handler in self.handlers:
-                entries.extend(handler.method_entries(ctx, m_node, m_name, annotations, params))
-                producers.extend(handler.method_producers(ctx, m_node, m_name, annotations))
-
-            # Producers within the method body (type-based): message producers,
-            # sync HTTP calls (method-based clients), fluent HTTP clients
-            # (WebClient/RestClient/Builder), in-house bus facades
-            # (bus.send(payload)), and per-framework body handlers (Camel).
-            body = java.get_method_body(m_node)
+                entries.extend(handler.method_entries(ctx, c_node, c_name, annotations, params))
+            body = java.get_method_body(c_node)
             if body:
-                apache_map = self.producers.apache_request_map(body)  # built once per method
                 local_types = java.get_local_variables(body)
                 param_types = {p["name"]: p["type"] for p in params if p.get("name")}
-                producers.extend(self.producers.fluent_http_calls(ci, m_name, body))
                 for inv in java.find_method_invocations(body):
-                    producers.extend(self.producers.bus_producer_from_invocation(ci, m_name, inv, local_types, param_types))
-                    producers.extend(self.producers.producers_from_invocation(ci, m_name, inv))
-                    producers.extend(self.producers.http_calls_from_invocation(ci, m_name, inv, apache_map))
+                    producers.extend(self.producers.bus_producer_from_invocation(ci, c_name, inv, local_types, param_types))
+                    producers.extend(self.producers.producers_from_invocation(ci, c_name, inv, local_types))
                     for handler in self.handlers:
-                        h_entries, h_producers = handler.body_invocation(ctx, m_name, inv)
-                        entries.extend(h_entries)
+                        _h_entries, h_producers = handler.body_invocation(ctx, c_name, inv)
                         producers.extend(h_producers)
 
         return entries, producers
+
+    def _scan_callable(self, ctx, ci, is_feign, entries, producers, m_node, m_name) -> None:
+        """Shared per-method scan (entries + producers + body invocations)."""
+        java = self.java
+        annotations = java.get_method_annotations(m_node)
+        params = java.get_method_parameters(m_node)
+
+        # Feign client interface: every REST-annotated method is an outbound
+        # HTTP call — never a server-side entry point.
+        if is_feign:
+            producers.extend(self.producers.feign_calls(ci, m_node, m_name, annotations))
+            return
+
+        # Per-framework method-level entries + annotation producers (STOMP).
+        for handler in self.handlers:
+            entries.extend(handler.method_entries(ctx, m_node, m_name, annotations, params))
+            producers.extend(handler.method_producers(ctx, m_node, m_name, annotations))
+
+        # Producers within the method body (type-based): message producers,
+        # sync HTTP calls (method-based clients), fluent HTTP clients
+        # (WebClient/RestClient/Builder), in-house bus facades
+        # (bus.send(payload)), and per-framework body handlers (Camel).
+        body = java.get_method_body(m_node)
+        if body:
+            apache_map = self.producers.apache_request_map(body)  # built once per method
+            local_types = java.get_local_variables(body)
+            param_types = {p["name"]: p["type"] for p in params if p.get("name")}
+            producers.extend(self.producers.fluent_http_calls(ci, m_name, body))
+            for inv in java.find_method_invocations(body):
+                producers.extend(self.producers.bus_producer_from_invocation(ci, m_name, inv, local_types, param_types))
+                producers.extend(self.producers.producers_from_invocation(ci, m_name, inv, local_types))
+                producers.extend(self.producers.http_calls_from_invocation(ci, m_name, inv, apache_map))
+                for handler in self.handlers:
+                    h_entries, h_producers = handler.body_invocation(ctx, m_name, inv)
+                    entries.extend(h_entries)
+                    producers.extend(h_producers)
 
     # ── retained static helpers (delegates; some tests/callers use them) ──
 

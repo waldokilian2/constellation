@@ -27,8 +27,11 @@ _MESSAGE_CONSUMER_TYPES = frozenset({
     "rabbitmq-consumer",
     "jms-consumer",
     "sqs-consumer",
+    "pulsar-consumer",
+    "mqtt-consumer",
     "event-listener",
     "message-handler",  # in-house bus handler (channel = payload type)
+    "reactive-incoming",  # SmallRye @Incoming (Quarkus)
 })
 
 
@@ -66,7 +69,7 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search term (matches method names, class names, channels, files)"},
-                "type": {"type": "string", "enum": ["rest-endpoint", "kafka-consumer", "rabbitmq-consumer", "event-listener", "jms-consumer", "sqs-consumer"], "description": "Optional: filter by entry point type"},
+                "type": {"type": "string", "enum": ["rest-endpoint", "kafka-consumer", "rabbitmq-consumer", "event-listener", "jms-consumer", "sqs-consumer", "pulsar-consumer", "mqtt-consumer", "reactive-incoming"], "description": "Optional: filter by entry point type"},
                 "search_type": {"type": "string", "enum": ["entry_points", "producers", "files", "all"], "description": "What to search. Default: all"},
             },
             "required": ["query"],

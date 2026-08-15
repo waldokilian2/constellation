@@ -20,13 +20,12 @@
       - forward/backward adjacent columns: cubic bezier with
         horizontal-ish tangents at the faces; same-pair edges fan
         into vertically separated lanes (request/response pairs).
-      - same-column edges: the curve bows HORIZONTALLY into the
-        corridor beside the column (or open space past the last
-        column), so it can never run through the cards stacked
-        between its endpoints.  Multiple same-column pairs in one
-        column get separate bow lanes.
-      - skip edges (spanning >1 column): vertical arc above/below
-        the intermediate columns, escalated until clear.
+      - same-column edges: one smooth cubic per edge bowing out of
+        the column; distinct lane widths keep nested bows apart.
+      - skip edges (spanning >1 column): a smooth arch over the
+        intermediate columns, escalated until clear; when no single
+        arch can serve (corner-to-corner across fully stacked
+        columns) a rounded rise/run/drop is the fallback.
    4. Collision resolution: each route gets a fixed, deterministic
       candidate list (increasing bow/bend/arc height, both sides).
       The candidate with zero curve↔card crossings is chosen; a
@@ -109,6 +108,34 @@ const segPointDist = (a, b, p) => {
 };
 
 // Do segments (a,b) and (c,d) cross?
+// Closest point on segment (a,b) to segment (c,d).
+const segSegClosestPoint = (a, b, c, d) => {
+  const d1 = { x: b.x - a.x, y: b.y - a.y };
+  const d2 = { x: d.x - c.x, y: d.y - c.y };
+  const r = { x: a.x - c.x, y: a.y - c.y };
+  const l1 = d1.x * d1.x + d1.y * d1.y || 1e-9;
+  const l2 = d2.x * d2.x + d2.y * d2.y || 1e-9;
+  const f = d2.x * r.x + d2.y * r.y;
+  let s = 0, t = 0;
+  if (l1 <= 1e-9 && l2 <= 1e-9) return { x: a.x, y: a.y };
+  if (l1 <= 1e-9) {
+    t = Math.max(0, Math.min(1, f / l2));
+    return { x: c.x + d2.x * t, y: c.y + d2.y * t };
+  }
+  const c1 = d1.x * r.x + d1.y * r.y;
+  if (l2 <= 1e-9) {
+    s = Math.max(0, Math.min(1, -c1 / l1));
+    return { x: a.x + d1.x * s, y: a.y + d1.y * s };
+  }
+  const bnum = d1.x * d2.x + d1.y * d2.y;
+  const denom = l1 * l2 - bnum * bnum;
+  s = denom ? Math.max(0, Math.min(1, (bnum * f - c1 * l2) / denom)) : 0;
+  t = (bnum * s + f) / l2;
+  if (t < 0) { t = 0; s = Math.max(0, Math.min(1, -c1 / l1)); }
+  else if (t > 1) { t = 1; s = Math.max(0, Math.min(1, (bnum - c1) / l1)); }
+  return { x: a.x + d1.x * s, y: a.y + d1.y * s };
+};
+
 const segsCross = (a, b, c, d) => {
   const o = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
   const o1 = o(a, b, c), o2 = o(a, b, d), o3 = o(c, d, a), o4 = o(c, d, b);
@@ -315,7 +342,8 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
   };
 
   // Geometry for a given candidate; returns { start, cp1, cp2, end }.
-  const geomFor = (rt, kind, sign, magnitude) => {
+  const geomFor = (rt, cand) => {
+    const { kind, sign, magnitude } = cand;
     const o = offsets[rt.key] || {};
     const aOff = o.aOff || 0, bOff = o.bOff || 0;
     if (kind === "fwd" || kind === "back") {
@@ -332,49 +360,68 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
       return { start, end, segs: [{ p0: start, c1: cp1, c2: cp2, p3: end }] };
     }
     if (kind === "same") {
-      // Same-column edge: corner out of the face, a vertical run at this
-      // edge's own lane x, and a corner back into the target face.  Each
-      // same-column edge in a column gets its own lane, so runs are
-      // parallel and can never cross (two symmetric bows of different size
-      // share a face line and always intersect on the return leg).
+      // Same-column edge: one smooth cubic bowing out of the column into
+      // the corridor (or open space) beside it — the same curved language
+      // as the adjacent-column edges.  Each same-column edge in a column
+      // gets its own lane width, so nested same-side bows stay ≥20px apart
+      // (two bows of the same size on a shared face line always intersect
+      // on the return leg; distinct lane widths never do).
       const faceX = rt.a.x + (sign > 0 ? rt.a.w / 2 : -rt.a.w / 2);
       const start = { x: faceX, y: rt.a.y + aOff };
       const end = { x: faceX, y: rt.b.y + bOff };
       const lane = sameColLane[rt.key] || 0;
-      const runX = faceX + sign * (24 + lane * 28 + magnitude);
-      const kick = sign * 16;
-      const segs = [
-        { p0: start, c1: { x: start.x + kick, y: start.y }, c2: { x: runX, y: start.y }, p3: { x: runX, y: start.y } },
-        { p0: { x: runX, y: start.y }, c1: { x: runX, y: (start.y + end.y) / 2 }, c2: { x: runX, y: (start.y + end.y) / 2 }, p3: { x: runX, y: end.y } },
-        { p0: { x: runX, y: end.y }, c1: { x: runX, y: end.y }, c2: { x: end.x - kick, y: end.y }, p3: end },
-      ];
+      const bow = 80 + lane * 70 + magnitude;
+      const pull = bow * 0.4;
+      const segs = [{
+        p0: start,
+        c1: { x: faceX + sign * pull, y: start.y },
+        c2: { x: faceX + sign * pull, y: end.y },
+        p3: end,
+      }];
       return { start, end, segs };
     }
-    // skip — orthogonal rise / level run / drop
-    // Three segments: a rounded corner leaving the side face, a perfectly
-    // level run at arcY (above or below the intermediate cards), and a
-    // rounded corner dropping into the target face.  The vertical parts
-    // live in the corridors BESIDE the endpoint columns, so the arc can
-    // never sweep through a stacked sibling card.
+    // skip — smooth arch over the intermediate columns (the original flow
+    // view's curved shape).  When no single arch can clear (corner-to-
+    // corner skips across fully stacked columns) the rounded rise/run/drop
+    // below is the fallback: the vertical parts stay in the corridors
+    // beside the endpoint columns and 60px corner radii keep it curved
+    // instead of a sharp 90° bend.
     const forward = rt.b.x >= rt.a.x;
-    const insetA = 24 + (skipLaneA[rt.key] || 0) * 26;
-    const insetB = 24 + (skipLaneB[rt.key] || 0) * 26;
     const start = forward
       ? { x: rt.a.x + rt.a.w / 2, y: rt.a.y + aOff }
       : { x: rt.a.x - rt.a.w / 2, y: rt.a.y + aOff };
     const end = forward
       ? { x: rt.b.x - rt.b.w / 2, y: rt.b.y + bOff }
       : { x: rt.b.x + rt.b.w / 2, y: rt.b.y + bOff };
-    const riseX = start.x + (forward ? insetA : -insetA);
-    const dropX = end.x + (forward ? -insetB : insetB);
-    const base = Math.min(ARC_MAX, Math.max(ARC_MIN, Math.abs(end.x - start.x) * 0.28));
+    const dx = end.x - start.x;
+    const base = Math.min(ARC_MAX, Math.max(ARC_MIN, Math.abs(dx) * 0.28));
     const arcY = sign > 0
       ? Math.min(start.y, end.y) - (base + magnitude)
       : Math.max(start.y, end.y) + (base + magnitude);
+    if (cand.smooth) {
+      // Steep controls (like the original flow view's skip arcs): the edge
+      // launches upward out of the face and crosses corridor edges at a
+      // steep angle instead of running alongside them.
+      const segs = [{
+        p0: start,
+        c1: { x: start.x + dx * 0.15, y: arcY },
+        c2: { x: end.x - dx * 0.15, y: arcY },
+        p3: end,
+      }];
+      return { start, end, segs };
+    }
+    const dir = forward ? 1 : -1;
+    const insetA = 24 + (skipLaneA[rt.key] || 0) * 26;
+    const insetB = 24 + (skipLaneB[rt.key] || 0) * 26;
+    const R = 60;
+    const riseX = start.x + dir * insetA;
+    const dropX = end.x - dir * insetB;
+    const run0 = riseX + dir * R;
+    const run1 = dropX - dir * R;
     const segs = [
-      { p0: start, c1: { x: riseX, y: start.y }, c2: { x: riseX, y: arcY }, p3: { x: riseX, y: arcY } },
-      { p0: { x: riseX, y: arcY }, c1: { x: (riseX + dropX) / 2, y: arcY }, c2: { x: (riseX + dropX) / 2, y: arcY }, p3: { x: dropX, y: arcY } },
-      { p0: { x: dropX, y: arcY }, c1: { x: dropX, y: arcY }, c2: { x: end.x, y: end.y }, p3: end },
+      { p0: start, c1: { x: riseX, y: start.y }, c2: { x: riseX, y: arcY }, p3: { x: run0, y: arcY } },
+      { p0: { x: run0, y: arcY }, c1: { x: (run0 + run1) / 2, y: arcY }, c2: { x: (run0 + run1) / 2, y: arcY }, p3: { x: run1, y: arcY } },
+      { p0: { x: run1, y: arcY }, c1: { x: dropX, y: arcY }, c2: { x: dropX, y: end.y }, p3: end },
     ];
     return { start, end, segs };
   };
@@ -392,25 +439,28 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
       baseBend, candidates: [], chosen: null,
     };
     if (rt.kind === "same") {
-      // Lane insets: the base lane (24 + lane*28) plus extra rungs outward
-      // for crowded corridors.  Capped by the corridor width so the run
-      // never leaves the space beside the column (open space past the last
-      // column gets the generous cap).
+      // Smooth bow: each same-column edge has its own lane width (80 + 70
+      // per lane) so nested same-side bows stay ≥20px apart, plus outward
+      // escalation rungs for crowded corridors (capped by the corridor
+      // width; open space past the last column gets the generous cap).
       const cap = bowCapFor(e.a.depth);
-      const base = 24 + (sameColLane[e.key] || 0) * 28;
+      const bowBase = 80 + (sameColLane[e.key] || 0) * 70;
       const mags = [];
       for (let k = 0; k < 4; k++) {
         const m = k * 56;
-        if (base + m <= cap) mags.push(m);
+        if (bowBase + m <= cap) mags.push(m);
       }
       mags.forEach((m) => rt.candidates.push({ kind: "same", sign: 1, magnitude: m }));
       mags.forEach((m) => rt.candidates.push({ kind: "same", sign: -1, magnitude: m }));
     } else if (rt.kind === "skip") {
-      // The run sits exactly at arcY = minY - (base + mag) (above) — so the
-      // magnitude needed to clear every intermediate card's top/bottom by
-      // pill + margin is exact (no bezier-apex approximation): add it to
-      // the fixed ladder, plus two higher rungs so the router can dodge
-      // other edges' pills by flying higher.
+      // Two families, smooth arch first — the router picks the first
+      // zero-penalty candidate, so smooth curves win whenever they clear —
+      // then the rounded rise/run/drop fallback for skips a single arch
+      // cannot serve (corner-to-corner across fully stacked columns).
+      // The smooth arch's apex sits at 0.125*(y0+y1) + 0.75*arcY; the
+      // orthogonal run sits exactly at arcY — each family solves its own
+      // exact clearance magnitude, plus the fixed ladder and two higher
+      // rungs so the router can dodge other edges' pills by flying higher.
       const y0 = rt.a.y + (offsets[rt.key]?.aOff || 0);
       const y1 = rt.b.y + (offsets[rt.key]?.bOff || 0);
       const dxAbs = Math.abs(rt.b.x - rt.a.x);
@@ -419,22 +469,27 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
         && c.depth > Math.min(rt.a.depth, rt.b.depth)
         && c.depth < Math.max(rt.a.depth, rt.b.depth));
       const CLEAR = PILL_H / 2 + PILL_MARGIN + CARD_MARGIN;
-      let needAbove = 0, needBelow = 0;
+      const apexBase = 0.125 * (y0 + y1);
+      const minY = Math.min(y0, y1), maxY = Math.max(y0, y1);
+      let needAbove = 0, needBelow = 0, needAboveSmooth = 0, needBelowSmooth = 0;
       if (between.length) {
         const minTop = Math.min(...between.map((c) => c.y - c.h / 2));
         const maxBot = Math.max(...between.map((c) => c.y + c.h / 2));
-        const minY = Math.min(y0, y1), maxY = Math.max(y0, y1);
         needAbove = Math.max(0, Math.ceil(minY - base - (minTop - CLEAR)));
         needBelow = Math.max(0, Math.ceil((maxBot + CLEAR) - maxY - base));
+        needAboveSmooth = Math.max(0, Math.ceil((apexBase + 0.75 * (minY - base) - (minTop - CLEAR)) / 0.75));
+        needBelowSmooth = Math.max(0, Math.ceil((maxBot + CLEAR - apexBase) / 0.75 - maxY - base));
       }
-      const mags = (need) => {
+      const ladder = (need) => {
         const list = [];
         for (let k = 0; k < ARC_TRIES; k++) list.push(k * ARC_STEP);
         list.push(need, need + 80, need + 160);
         return Array.from(new Set(list)).sort((a, b) => a - b);
       };
-      mags(needAbove).forEach((m) => rt.candidates.push({ kind: "skip", sign: 1, magnitude: m }));
-      mags(needBelow).forEach((m) => rt.candidates.push({ kind: "skip", sign: -1, magnitude: m }));
+      ladder(needAboveSmooth).forEach((m) => rt.candidates.push({ kind: "skip", sign: 1, magnitude: m, smooth: true }));
+      ladder(needBelowSmooth).forEach((m) => rt.candidates.push({ kind: "skip", sign: -1, magnitude: m, smooth: true }));
+      ladder(needAbove).forEach((m) => rt.candidates.push({ kind: "skip", sign: 1, magnitude: m, smooth: false }));
+      ladder(needBelow).forEach((m) => rt.candidates.push({ kind: "skip", sign: -1, magnitude: m, smooth: false }));
     } else {
       const sign = baseBend >= 0 ? 1 : -1;
       const mag0 = Math.max(BEND_MIN, Math.abs(baseBend));
@@ -449,7 +504,7 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
   });
 
   const applyCandidate = (rt, cand) => {
-    const g = geomFor(rt, cand.kind, cand.sign, cand.magnitude);
+    const g = geomFor(rt, cand);
     rt.start = g.start; rt.cp1 = g.cp1; rt.cp2 = g.cp2; rt.end = g.end;
     rt.segs = g.segs;
     rt.chosen = cand;
@@ -518,9 +573,14 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
           const d = segSegDist(pts[i], pts[i + 1], opts[j], opts[j + 1]);
           if (d >= CURVE_GAP) continue;
           // Legitimate meeting at a shared card face: both curves within
-          // ATTACH_R of their own endpoints near that card.
-          const dSelf = Math.min(dist(pts[i], rt.start), dist(pts[i], rt.end));
-          const dOther = Math.min(dist(opts[j], o.start), dist(opts[j], o.end));
+          // ATTACH_R of their own endpoints near that card.  Measure from
+          // the actual closest point between the two segments — the crossing
+          // often sits deep inside the last sampled segment, whose start
+          // point lies beyond the attachment radius even though the crossing
+          // itself is at the face.
+          const cp = segSegClosestPoint(pts[i], pts[i + 1], opts[j], opts[j + 1]);
+          const dSelf = Math.min(dist(cp, rt.start), dist(cp, rt.end));
+          const dOther = Math.min(dist(cp, o.start), dist(cp, o.end));
           if (shareCard && dSelf < ATTACH_R && dOther < ATTACH_R) continue;
           // Perpendicular point-crossings (a horizontal lane corner crossing
           // another lane's vertical run, circuit-board style) are visually

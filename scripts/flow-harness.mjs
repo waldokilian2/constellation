@@ -92,7 +92,10 @@ function verify(name, flow) {
   const issues = [];
   const pillByKey = L.pills;
 
-  // 1. pill on its own curve (routes may be multi-segment)
+  // 1. pill on its own curve (routes may be multi-segment): measure the
+  // distance at the pill's own t — if the route changed after placement
+  // this diverges; fixed sample grids alone would report artifacts from
+  // sampling spacing on long segments.
   const pointOnRoute = (rt, t) => {
     const n = rt.segs.length;
     const idx = Math.min(n - 1, Math.floor(t * n));
@@ -102,12 +105,9 @@ function verify(name, flow) {
   L.routes.forEach((rt) => {
     const pl = pillByKey[rt.key];
     if (!pl) return;
-    let best = Infinity;
-    for (let i = 0; i <= 512; i++) {
-      const q = pointOnRoute(rt, i / 512);
-      best = Math.min(best, dist(q, { x: pl.x, y: pl.y }));
-    }
-    if (best > 0.5) issues.push(`pill-off-curve ${rt.key} by ${best.toFixed(2)}px`);
+    const q = pointOnRoute(rt, pl.t);
+    const d = dist(q, { x: pl.x, y: pl.y });
+    if (d > 0.05) issues.push(`pill-off-curve ${rt.key} by ${d.toFixed(2)}px at its own t`);
   });
 
   // 2. pill vs cards and pill vs pill (renderer geometry: bg pillW + 8 glow)

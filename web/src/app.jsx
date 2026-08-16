@@ -4220,8 +4220,9 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
             const rt = routesByKey["ext-edge-" + i];
             if (!rt) return null;
             return (
-              <g key={"ext-" + i}>
+              <g className="edge" key={"ext-" + i}>
                 <path
+                  className="edge-line"
                   d={rt.path}
                   fill="none"
                   stroke="#94a3b8"
@@ -4230,6 +4231,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
                   opacity="0.5"
                   markerEnd="url(#flow-arrow)"
                 />
+                <path className="edge-hit" d={rt.path} fill="none" stroke="transparent" strokeWidth={16} />
               </g>
             );
           })}
@@ -4253,8 +4255,9 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
             const pillW = label.length * 6.5 + 22 + (st && st !== "same" ? 18 : 0);
             const pillPos = pill || { x: rt.mid.x, y: rt.mid.y };
             return (
-              <g key={"fe-" + i}>
-                <path d={rt.path} fill="none" stroke={stroke} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={dash} opacity={st === "same" && cmp ? "0.3" : (rt.skip ? "0.4" : "0.55")} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
+              <g className="edge" key={"fe-" + i}>
+                <path className="edge-line" d={rt.path} fill="none" stroke={stroke} strokeWidth={isResp ? 1.6 : isSync ? 2.2 : 2} strokeDasharray={dash} opacity={st === "same" && cmp ? "0.3" : (rt.skip ? "0.4" : "0.55")} markerEnd={isSync || isResp ? "url(#flow-arrow-sync)" : "url(#flow-arrow)"} />
+                <path className="edge-hit" d={rt.path} fill="none" stroke="transparent" strokeWidth={16} />
                 <g className={"edge-label-pill" + (isSync || isResp ? " sync" : "")} transform={`translate(${pillPos.x}, ${pillPos.y})`}>
                   <rect className={"edge-label-glow" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2 - 4} y={-12} width={pillW + 8} height={24} rx={12} />
                   <rect className={"edge-label-bg" + (isSync || isResp ? " sync" : "") + (st && st !== "same" ? " st-" + st : "")} x={-pillW / 2} y={-10} width={pillW} height={20} rx={10} />

@@ -82,18 +82,70 @@ docker compose run --rm --entrypoint python constellation \
 
 ---
 
-## What It Does
+## Features
 
-### Ingestion
+### Projects — one map per system
+Every project is its own isolated map of the repositories that make up a system, ready to enter and explore.
 
-Point Constellation at any mix of repos:
+<img src="assets/screenshots/00-landing.jpg" width="720" alt="Project list"/>
 
-- **Git URLs** — cloned server-side; browse an org or user's repo list straight from GitHub, GitLab, or Bitbucket (`/api/remotes/repos`)
-- **Local paths** — `local:/path/to/repo`, analyzed in place
+### Ingestion — point it at your repositories
+Bring in a project from git URLs, a local folder, or an entire git-host organization (GitHub · GitLab · Bitbucket · Azure DevOps). Repositories are analyzed together so cross-service links are found across the whole set.
 
-Projects are multi-repo by design: repos are scanned independently, then linked through their message channels.
+<img src="assets/screenshots/12-import.jpg" width="720" alt="Git-host import"/>
 
-### Entry Point Detection
+### Galaxy view — the system in one screen
+Every repository is a cluster; message channels and sync HTTP calls are links with their contract labels visible. Entry-point counts, type badges, and a "repos with gaps" health signal sit right on the overview.
+
+<img src="assets/screenshots/01-galaxy.jpg" width="720" alt="Galaxy view"/>
+
+### Solar System — one service at a time
+Entry points orbit as stars sized by call-tree complexity and colored by type. The docked panel shows everything a service consumes, sends, bridges, and requests over HTTP — with deep links to the flows behind them.
+
+<img src="assets/screenshots/02-solar.jpg" width="720" alt="Solar System view"/>
+
+### Call paths — from handler to side effect
+Every entry point has a call tree built by a depth-limited, cycle-safe breadth-first walk, resolved to concrete definitions — with `file:line` on every node and honest confidence tags (`EXTRACTED` vs `INFERRED`).
+
+<img src="assets/screenshots/03-path.jpg" width="720" alt="Call path view"/>
+
+### Source detail — the code behind the graph
+Click any node to see the source it came from with the relevant line highlighted — no round-trip to the repository.
+
+<img src="assets/screenshots/04-detail.jpg" width="720" alt="Source detail panel"/>
+
+### Flows — end-to-end journeys
+Message hops and sync HTTP calls chain into complete business flows. The index is searchable and filterable; each trace shows the full path across services. Cross-repo links are found by deterministic channel-name matching — no AI, no inference.
+
+<img src="assets/screenshots/05-flows-index.jpg" width="720" alt="Flows index"/>
+<img src="assets/screenshots/06-flow-trace.jpg" width="720" alt="Flow trace"/>
+
+### Code Issues — dead code & broken contracts
+Unreachable methods, thin handlers, orphan producers/consumers, and dependency cycles — every finding with its source location and a deep link.
+
+<img src="assets/screenshots/07-code-issues.jpg" width="720" alt="Code Issues view"/>
+
+### Compare — what changed since the last scan
+Every rescan keeps a snapshot; compare mode paints added/changed/removed entry points and links directly onto the topology.
+
+<img src="assets/screenshots/10-compare.jpg" width="720" alt="Compare mode"/>
+
+### AI Change Planner — plan changes, rendered
+AI works from the extracted graph and renders plan documents and diagrams into a preview panel — with reasoning and tool steps visible. The API key is proxied server-side and never reaches the frontend.
+
+<img src="assets/screenshots/08-planner.jpg" width="720" alt="AI Change Planner"/>
+
+### Architecture assistant — grounded Q&A
+Ask anything about the project; answers are backed by live queries over the graph, with the evidence visible in the transcript.
+
+<img src="assets/screenshots/09-chat.jpg" width="720" alt="Architecture assistant"/>
+
+### Boards — your issue tracker, inside the map
+Connect a GitHub Project and work appears as a live kanban next to the code it affects — move cards, comment, and jump to the issue.
+
+<img src="assets/screenshots/11-boards.jpg" width="720" alt="Boards view"/>
+
+### Detection reference
 
 Framework-specific annotation and interface-contract scanning:
 
@@ -108,8 +160,6 @@ Framework-specific annotation and interface-contract scanning:
 | **Custom bus facades** | `@MessageHandler`-style classes dispatched by payload type (`bus.send(...)`) |
 
 Channels are resolved through the symbol index: string literals, `Class.CONST` / bare constant references, `${...}` placeholders (from `application.properties`/`.yml`), and `#{...}` SpEL (dynamic — preserved for display). Array arguments (`topics = {"a", "b"}`) produce one entry point per element.
-
-### Producer Detection
 
 Message producers are matched by **declared field type** of the receiver (not variable names — a plain `template.send(...)` doesn't false-match):
 
@@ -129,46 +179,7 @@ Message producers are matched by **declared field type** of the receiver (not va
 | HTTP clients (Feign, `RestTemplate`, `WebClient`, …) | request methods | HTTP calls |
 | Custom bus facade | `bus.send(payload)` | in-house bus |
 
-### Cross-Repo Message Flow
-
-When Repo A produces to `"order-events"` and Repo B consumes from `"order-events"`, Constellation links them. This is deterministic string matching on queue/topic names across parsed repos — no AI, no inference.
-
-### Call Tree Extraction
-
-For each entry point, Constellation builds a call tree by:
-1. Parsing the handler method body with tree-sitter ASTs
-2. Finding all method invocations
-3. Resolving each call to its definition in the codebase
-4. Recursing, depth-limited with cycle prevention
-5. Marking each node with confidence: `EXTRACTED` (resolved) or `INFERRED` (unresolved)
-
-### Graph Diff
-
-Snapshot a project's graph and compare later runs (`/api/projects/{pid}/diff`, the `diff_graphs` tool, and the UI's compare toggle): added/removed/changed entry points and producers, with per-entry-point change summaries and a legend — so you can see exactly what an integration changed.
-
-### AI Integration (Optional)
-
-When an API key is configured, the web UI provides conversational AI:
-- **Topology chat** — multi-turn conversations with a structured system prompt (architecture overview, call tree, cross-repo connections) and graph-tool access
-- **Change planner** — a planning chat that can render validated Mermaid diagrams alongside the graph, with automatic repair for invalid syntax
-
-The key is proxied server-side and never reaches the frontend.
-
----
-
-## The Web UI
-
-One screen, five modes (plus the compare overlay):
-
-| Mode | What You See |
-|------|-------------|
-| **Topology** | Galaxy view (repos as clusters, message channels as curved links) → Solar System (entry points as stars, sized by complexity, colored by type) → Path (full call tree for one entry point) |
-| **Flows** | Message-flow index and per-channel flow traces (producer → channel → consumer chains) |
-| **Planner** | AI change-planning chat with Mermaid diagram preview |
-| **Boards** | GitHub Projects kanban sync — connect a project board, two-way issue/card sync, comment and create cards from Constellation |
-| **Dead Code** | Unreachable methods, thin handlers, isolated repos, half-wired channels (orphans), and repo-level cycles |
-
-The detail panel shows source code with line highlighting, relationships, and the AI chat window. A compare pill in the header toggles baseline diff highlighting across the topology views.
+*Screenshots are from the bundled Spring Boot demo project.*
 
 ## Architecture
 
@@ -251,7 +262,7 @@ The graph tools are pure functions in `engine/graph_tools.py`. They're exposed t
 
 ### 1. Web UI
 
-See [The Web UI](#the-web-ui) above.
+See [Features](#features) above.
 
 ### 2. REST API
 

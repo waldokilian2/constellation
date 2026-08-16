@@ -91,6 +91,10 @@ const BEND_ESCALATE = 60;
 const BEND_ESCALATE_MAX = 240;
 const BEND_TRIES = 4;
 
+// Adjacent cards whose centres are within this many px of each other are
+// "straight in front" of one another and connect with a straight line.
+const ALIGN_EPS = 1.5;
+
 // ── Small geometry helpers ──
 
 const cubicPoint = (p0, c1, c2, p3, t) => {
@@ -353,13 +357,29 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
     const o = offsets[rt.key] || {};
     const aOff = o.aOff || 0, bOff = o.bOff || 0;
     if (kind === "fwd" || kind === "back") {
+      // Cards sitting straight across from one another (same row height)
+      // connect with a straight horizontal line — the pre-refactor look —
+      // instead of an unnecessary bend.  Cards at different heights keep the
+      // smooth bend.
+      const aligned = Math.abs(rt.a.y - rt.b.y) < ALIGN_EPS;
       const start = kind === "fwd"
-        ? { x: rt.a.x + rt.a.w / 2, y: rt.a.y + aOff }
-        : { x: rt.a.x - rt.a.w / 2, y: rt.a.y + aOff };
+        ? { x: rt.a.x + rt.a.w / 2, y: rt.a.y + (aligned ? 0 : aOff) }
+        : { x: rt.a.x - rt.a.w / 2, y: rt.a.y + (aligned ? 0 : aOff) };
       const end = kind === "fwd"
-        ? { x: rt.b.x - rt.b.w / 2, y: rt.b.y + bOff }
-        : { x: rt.b.x + rt.b.w / 2, y: rt.b.y + bOff };
+        ? { x: rt.b.x - rt.b.w / 2, y: rt.b.y + (aligned ? 0 : bOff) }
+        : { x: rt.b.x + rt.b.w / 2, y: rt.b.y + (aligned ? 0 : bOff) };
       const dx = end.x - start.x;
+      if (aligned) {
+        // Straight horizontal line: collinear controls give a uniform cubic
+        // (the pill at t=0.5 lands exactly on the midpoint).
+        const segs = [{
+          p0: start,
+          c1: { x: start.x + dx / 3, y: start.y },
+          c2: { x: end.x - dx / 3, y: end.y },
+          p3: end,
+        }];
+        return { start, end, segs };
+      }
       const bend = sign * magnitude;
       const cp1 = { x: start.x + dx * 0.35, y: start.y + bend };
       const cp2 = { x: end.x - dx * 0.35, y: end.y + bend };

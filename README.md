@@ -1,4 +1,6 @@
-# ⚡ Constellation
+<p align="center">
+  <img src="assets/title-banner.png" width="100%" alt="Constellation">
+</p>
 
 **Deterministically map JVM microservice architectures. Find every entry point, trace execution paths, and see how messages flow between services — all from static analysis, zero AI required.**
 

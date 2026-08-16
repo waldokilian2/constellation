@@ -190,3 +190,34 @@ The 11 tools: `search_code`, `get_node`, `find_callers`, `trace_path`, `get_chan
 - Planned: TypeScript/Express, Go, C#; dynamic queue-name resolution; Anthropic tool-use; SSE streaming.
 
 When implementing anything on the roadmap, prefer extending the existing deterministic pipeline (new detector entries, new tools) and keep the "no LLM in the core" principle intact.
+
+## Framework coverage discipline (learned the hard way)
+
+The Tier-1 gaps (issue #116) were all found *retroactively* by scanning real projects,
+not by the detector tests - the tests shared the author's assumptions. When adding a
+framework:
+
+1. **Both sides before "covered".** A framework counts as covered only when producer
+   AND consumer are detected AND link on a real sample repo. One-sided coverage is how
+   Pulsar (producer without consumer) and Quarkus (@Outgoing without @Channel Emitter)
+   shipped broken.
+2. **Check all five declaration sites** - method annotations, class annotations,
+   **constructors** (Axon @CommandHandler aggregate creation), **field annotations**
+   (@Channel, injected emitters/gateways), and **DSL/config** (mp.messaging.*, Spring
+   XML). A framework ticked on 2 of 5 is not covered; write down why a site is N/A.
+3. **Validate against someone else's ground truth.** Clone one canonical open-source
+   sample per framework into ../java-test-repos/, read ITS readme/config for the flows
+   it documents, and assert those exact channels/links appear. A documented flow
+   missing from the graph = failure. Never validate a detector only against fixtures
+   you wrote yourself.
+4. **Edge-dropping linker rules get a topology matrix.** Any rule that suppresses
+   links (self-addressing, intra-repo, sentinel channels) is tested against every
+   topology it can meet: pure pub/sub, broadcast-with-self-consume (event sourcing),
+   closed re-drive loop, request/reply. The self-addressing rule originally encoded
+   "self-consume = re-drive loop", which silently deleted every Axon broadcast edge.
+5. **Orphans are the tripwire.** After any detection change, run
+   engine.graph_tools.find_orphans over the sample corpus - a producer/consumer with
+   no counterpart is either a detection gap (fix the detector) or a real
+   architectural boundary (document it). Eyeballed "supposedly unconsumed" messages
+   are how both the Axon constructor gap and the SnsTemplate convertAndSend gap were
+   caught.

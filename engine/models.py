@@ -14,6 +14,8 @@ class EntryPointType(Enum):
     KAFKA_CONSUMER = "kafka-consumer"
     JMS_CONSUMER = "jms-consumer"
     SQS_CONSUMER = "sqs-consumer"
+    PULSAR_CONSUMER = "pulsar-consumer"
+    MQTT_CONSUMER = "mqtt-consumer"
     REST_ENDPOINT = "rest-endpoint"
     EVENT_LISTENER = "event-listener"
     SCHEDULED_TASK = "scheduled-task"
@@ -27,6 +29,7 @@ class EntryPointType(Enum):
     MAIN = "main"                  # public static void main(String[])
     CLOUD_FUNCTION = "cloud-function"  # @Bean Function/Supplier/Consumer (Spring Cloud Function)
     MESSAGE_HANDLER = "message-handler"  # in-house bus: @Handle-style method dispatched by payload type
+    REACTIVE_INCOMING = "reactive-incoming"  # SmallRye/MicroProfile @Incoming (Quarkus)
     UNKNOWN = "unknown"
 
 
@@ -37,7 +40,10 @@ class ProducerType(Enum):
     EVENT_PUBLISHER = "event-publisher"
     PULSAR_PRODUCER = "pulsar-producer"
     NATS_PRODUCER = "nats-producer"
+    SQS_PRODUCER = "sqs-producer"      # AWS SQS (SqsTemplate / SqsClient / AmazonSQS)
+    SNS_PRODUCER = "sns-producer"      # AWS SNS (SnsTemplate / SnsClient / AmazonSNS)
     HTTP_CALL = "http-call"  # sync HTTP request (Feign/RestTemplate/WebClient/...)
+    GRPC_CALL = "grpc-call"  # gRPC client call (a generated *Stub method invocation)
     MESSAGE_BUS_PRODUCER = "message-bus-producer"  # in-house bus facade: send/publish(payload)
     UNKNOWN = "unknown"
 

@@ -28,7 +28,48 @@ PRODUCER_TYPES: dict[str, set[str]] = {
     "StreamBridge": {"send"},          # Spring Cloud Stream
     "PulsarTemplate": {"send", "sendAsync"},   # Apache Pulsar (topic = first arg)
     "Connection": {"publish"},         # NATS / nats.java (subject = first arg)
+    # Apache RocketMQ (rocketmq-spring): destination as "topic:tag" or "topic".
+    "RocketMQTemplate": {"syncSend", "asyncSend", "sendOneway", "syncSendOrderly", "convertAndSend"},
+    # Spring Cloud AWS 3.x / AWS SDK v2 (queue URL, name, or ARN = first arg).
+    "SqsTemplate": {"send"},
+    "SqsClient": {"sendMessage"},
+    # AWS SDK v1 (queue URL/name = first arg).
+    "AmazonSQS": {"sendMessage", "sendMessageBatch"},
+    "AmazonSQSAsync": {"sendMessage", "sendMessageBatch"},
+    # SNS (topic ARN or name = first arg). Spring Cloud AWS SnsTemplate offers
+    # both send() and convertAndSend().
+    "SnsTemplate": {"send", "convertAndSend"},
+    "SnsClient": {"publish"},
+    "AmazonSNS": {"publish", "publishBatch"},
+    "AmazonSNSAsync": {"publish", "publishBatch"},
+    # JMS 2.0 simplified API: context.createProducer().send(dest, payload).
+    "JMSProducer": {"send"},
+    # Eclipse Paho MQTT (topic = first arg).
+    "MqttClient": {"publish"},
+    "MqttAsyncClient": {"publish"},
+    # Spring Data Redis pub/sub (channel = first arg).
+    "RedisTemplate": {"convertAndSend"},
+    "StringRedisTemplate": {"convertAndSend"},
 }
+
+# Payload-routed dispatch APIs (Axon-style): the destination is derived from
+# the payload's type at runtime, exactly like the in-house bus facade. The
+# payload type (FQN when resolvable) IS the channel — args[0] is the payload,
+# never a destination string.
+PAYLOAD_ROUTED_TYPES: dict[str, set[str]] = {
+    "CommandGateway": {"send", "sendAndWait", "sendAndWaitForMessage"},
+    "CommandBus": {"dispatch"},
+    "EventGateway": {"publish"},
+    "EventBus": {"publish"},
+    "QueryGateway": {"query", "scatterGather", "subscriptionQuery"},
+    "QueryBus": {"query"},
+}
+
+# gRPC client stubs: the generated type name encodes both the service and the
+# stub flavor — OrderServiceGrpc.OrderServiceBlockingStub → service
+# "OrderService". Channel = "/<Service>/<method>", the exact format the
+# server-side detector emits for *ImplBase overrides, so the two link for free.
+GRPC_STUB_SUFFIXES = ("BlockingStub", "FutureStub", "Stub")
 
 EVENT_PUBLISHER_TYPES = {"ApplicationEventPublisher"}
 
@@ -69,17 +110,38 @@ PRODUCER_TYPE_LABEL: dict[str, ProducerType] = {
     "StreamBridge": ProducerType.UNKNOWN,  # links by channel; broker-agnostic
     "PulsarTemplate": ProducerType.PULSAR_PRODUCER,
     "Connection": ProducerType.NATS_PRODUCER,  # NATS publish(subject, …)
+    "RocketMQTemplate": ProducerType.KAFKA_PRODUCER,  # Kafka-style log broker
+    "SqsTemplate": ProducerType.SQS_PRODUCER,
+    "SqsClient": ProducerType.SQS_PRODUCER,
+    "AmazonSQS": ProducerType.SQS_PRODUCER,
+    "AmazonSQSAsync": ProducerType.SQS_PRODUCER,
+    "SnsTemplate": ProducerType.SNS_PRODUCER,
+    "SnsClient": ProducerType.SNS_PRODUCER,
+    "AmazonSNS": ProducerType.SNS_PRODUCER,
+    "AmazonSNSAsync": ProducerType.SNS_PRODUCER,
+    "JMSProducer": ProducerType.JMS_PRODUCER,
+    "MqttClient": ProducerType.UNKNOWN,          # broker-agnostic topic
+    "MqttAsyncClient": ProducerType.UNKNOWN,
+    "RedisTemplate": ProducerType.UNKNOWN,       # Redis pub/sub channel
+    "StringRedisTemplate": ProducerType.UNKNOWN,
 }
 
 
 # ── Sync HTTP client detection tables ─────────────────────────────────────
 
-# Feign client interfaces: outbound HTTP calls, NOT REST entry points.
-FEIGN_ANNOTATION = "FeignClient"
+# Declarative HTTP client interfaces: outbound HTTP calls, NOT REST entry
+# points. Spring Cloud OpenFeign (@FeignClient) and Spring 6 declarative HTTP
+# interfaces (@HttpExchange, the built-in Feign alternative proxied via
+# WebClient/RestTemplate) share the identical detection shape.
+FEIGN_ANNOTATIONS = {"FeignClient", "HttpExchange", "HttpExchangeInterface"}
+FEIGN_ANNOTATION = "FeignClient"  # legacy single-name alias (tests/imports)
 # Method-level REST annotations on a Feign client interface → the HTTP verb.
 REST_VERB_BY_ANN = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
     "DeleteMapping": "DELETE", "PatchMapping": "PATCH",
+    # Spring 6 declarative HTTP interface annotations.
+    "GetExchange": "GET", "PostExchange": "POST", "PutExchange": "PUT",
+    "DeleteExchange": "DELETE", "PatchExchange": "PATCH",
 }
 # RestTemplate method → HTTP verb (exchange/execute take the verb as an arg).
 HTTP_METHOD_BY_TEMPLATE_CALL = {
@@ -175,6 +237,27 @@ def _is_urlish(val: str) -> bool:
     return val.startswith("/") or val.startswith("http") or "${" in val or "#{" in val
 
 
+def _sqs_queue_name(dest: str) -> str:
+    """Bare queue name from an SQS destination (URL / ARN / bare name).
+
+    ``https://sqs.eu-west-1.amazonaws.com/123456789012/orders`` and
+    ``arn:aws:sqs:eu-west-1:123456789012:orders`` both → ``orders`` — the
+    form ``@SqsListener`` uses, so both sides of the channel join exactly.
+    """
+    if not dest:
+        return dest
+    if dest.startswith("arn:"):
+        return dest.rsplit(":", 1)[-1]
+    if dest.startswith("http"):
+        return dest.rstrip("/").rsplit("/", 1)[-1]
+    return dest
+
+
+# Destination-factory methods: JMSContext.createQueue("q") / createTopic("t")
+# (JMS 2.0) and analogous helpers — the channel is the factory's string arg.
+DESTINATION_FACTORY_METHODS = {"createQueue", "createTopic"}
+
+
 class JvmProducerDetector:
     """Detects message producers and sync HTTP calls across an indexed codebase.
 
@@ -187,17 +270,19 @@ class JvmProducerDetector:
         self.index = index
         self.java = java_ast
 
-    # ── Feign (declarative HTTP clients) ────────────────────────────
+    # ── Feign / declarative HTTP clients ────────────────────────────
 
     def feign_calls(self, ci: TypeInfo, m_node, m_name, annotations) -> list[Producer]:
-        """Outbound HTTP calls declared by a @FeignClient interface method.
+        """Outbound HTTP calls declared by a declarative HTTP-client interface.
 
-        Channel = base url (from @FeignClient url attr, resolved) + method path.
+        Covers @FeignClient (Spring Cloud OpenFeign) and @HttpExchange
+        interfaces (Spring 6 declarative HTTP, proxied via WebClient). Channel
+        = base url (from the class annotation's url attr, resolved) + method path.
         """
         out: list[Producer] = []
         base = ""
         for ann in self.java.get_class_annotations(ci.node):
-            if self.java.get_annotation_name(ann) != FEIGN_ANNOTATION:
+            if self.java.get_annotation_name(ann) not in FEIGN_ANNOTATIONS:
                 continue
             args = self.java.get_annotation_args(ann)
             raw_url = (args.get("url") or args.get("value") or [""])[0]
@@ -431,9 +516,23 @@ class JvmProducerDetector:
                 return "", verb, saw_build
         return "", verb, saw_build
 
-    # ── Message producers (Kafka/Rabbit/JMS/Event/Pulsar/NATS) ──────
+    # ── Message producers (Kafka/Rabbit/JMS/Event/Pulsar/NATS/…) ────
 
-    def producers_from_invocation(self, ci, m_name, inv) -> list[Producer]:
+    @staticmethod
+    def grpc_stub_service(field_type: str) -> str:
+        """gRPC service name from a generated stub field type, else ``""``.
+
+        ``OrderServiceGrpc.OrderServiceBlockingStub`` → ``OrderService``. The
+        raw text of a scoped_type_identifier field is kept verbatim by the
+        index, so both scoped and simple forms reduce correctly.
+        """
+        t = (field_type or "").rsplit(".", 1)[-1]
+        for suf in GRPC_STUB_SUFFIXES:
+            if t.endswith(suf) and len(t) > len(suf):
+                return t[: -len(suf)]
+        return ""
+
+    def producers_from_invocation(self, ci, m_name, inv, local_types: Optional[dict] = None) -> list[Producer]:
         parsed = self.java.parse_method_invocation(inv)
         receiver = parsed["receiver"]
         method_called = parsed["method"]
@@ -441,7 +540,62 @@ class JvmProducerDetector:
         if not receiver:
             return []
 
-        field_type = self.index.field_type(ci, receiver)
+        field_type = self.index.field_type(ci, receiver) or (local_types or {}).get(receiver, "")
+
+        # Axon event-sourcing publisher: AggregateLifecycle.apply(new Event(…))
+        # — the aggregate's event emission, routed by payload type like the
+        # gateways. Only the qualified form; a bare apply(...) is too generic.
+        if receiver == "AggregateLifecycle" and method_called == "apply":
+            payload = self._bus_payload_type(inv, ci, {}, {})
+            if payload:
+                payload = self.index.resolve_fqn(ci, payload) or payload
+                return [Producer(
+                    id=f"{ci.repo}:{ci.simple_name}.{m_name}:apply:{payload}",
+                    repo=ci.repo,
+                    type=ProducerType.MESSAGE_BUS_PRODUCER,
+                    channel=payload,
+                    method=f"{ci.simple_name}.{m_name}",
+                    file=ci.file,
+                    line=inv.start_point[0] + 1,
+                    message_type=payload,
+                )]
+            return []
+
+        # gRPC client stub: any method call on a generated stub type. The
+        # channel mirrors the server-side format (/Service/method) exactly, so
+        # gRPC→gRPC edges link without a separate linker pass.
+        svc = self.grpc_stub_service(field_type)
+        if svc:
+            return [Producer(
+                id=f"{ci.repo}:{ci.simple_name}.{m_name}:grpc:{svc}/{method_called}",
+                repo=ci.repo,
+                type=ProducerType.GRPC_CALL,
+                channel=f"/{svc}/{method_called}",
+                method=f"{ci.simple_name}.{m_name}",
+                file=ci.file,
+                line=inv.start_point[0] + 1,
+                message_type=field_type.rsplit(".", 1)[-1],
+            )]
+
+        # Payload-routed dispatch (Axon gateways/buses): the payload type is
+        # the routing key, FQN-resolved like the in-house bus so sibling repos
+        # with same-simple-named commands don't falsely link.
+        if field_type in PAYLOAD_ROUTED_TYPES and method_called in PAYLOAD_ROUTED_TYPES[field_type]:
+            payload = self._bus_payload_type(inv, ci, {}, {})
+            if payload:
+                payload = self.index.resolve_fqn(ci, payload) or payload
+                return [Producer(
+                    id=f"{ci.repo}:{ci.simple_name}.{m_name}:{method_called}:{receiver}:{payload}",
+                    repo=ci.repo,
+                    type=ProducerType.MESSAGE_BUS_PRODUCER,
+                    channel=payload,
+                    method=f"{ci.simple_name}.{m_name}",
+                    file=ci.file,
+                    line=inv.start_point[0] + 1,
+                    message_type=payload,
+                )]
+            return []
+
         if not field_type or field_type not in PRODUCER_TYPES:
             return []
         if method_called not in PRODUCER_TYPES[field_type]:
@@ -472,6 +626,25 @@ class JvmProducerDetector:
                 channel = topic
 
         resolved = self.index.resolve_channel(channel, ci) if channel else "unknown"
+        # Destination passed as a factory call — ctx.createQueue("legacy-q") —
+        # the channel is the factory's string literal.
+        if resolved not in ("", "unknown"):
+            arglist = next(
+                (c for c in inv.children if c.type == "argument_list"), None
+            )
+            if arglist is not None:
+                for ac in arglist.children:
+                    if ac.type != "method_invocation":
+                        continue
+                    inner = self.java.parse_method_invocation(ac)
+                    if inner["method"] in DESTINATION_FACTORY_METHODS and inner["args"]:
+                        resolved = inner["args"][0]
+                        break
+        # SQS destinations arrive as queue URLs or ARNs; the consumer side
+        # (@SqsListener) uses the bare queue name. Normalize to the name so
+        # both sides of the channel join.
+        if prod_type == ProducerType.SQS_PRODUCER:
+            resolved = _sqs_queue_name(resolved)
 
         return [Producer(
             id=f"{ci.repo}:{ci.simple_name}.{m_name}:{method_called}:{receiver}",
@@ -504,6 +677,11 @@ class JvmProducerDetector:
 
         field_type = self.index.field_type(ci, receiver)
         if not _looks_like_bus_type(field_type):
+            return []
+        # A known payload-routed dispatch API (Axon gateways/buses) matches the
+        # bus-shape heuristic too — the specific detector owns those; don't
+        # emit a duplicate here.
+        if field_type in PAYLOAD_ROUTED_TYPES and method_called in PAYLOAD_ROUTED_TYPES.get(field_type, set()):
             return []
 
         payload = self._bus_payload_type(inv, ci, local_types, params)

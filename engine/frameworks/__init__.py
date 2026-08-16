@@ -10,21 +10,27 @@ from .spring import SpringHandler
 from .jakarta import JakartaHandler
 from .extra import ExtraHandler
 from .camel import CamelHandler
+from .reactive import ReactiveHandler
+from .axon import AxonHandler
 from .messagebus import MessageBusHandler
 
-# Ordered: Spring, Jakarta, then the extra-framework tier, Camel, and the
-# in-house bus tier (its annotations don't collide with the tiers above, but it
-# runs last so standardized frameworks win any tie on ordering).
+# Ordered: Spring, Jakarta, then the extra-framework tier, Camel, the
+# reactive/microframework tier (Quarkus SmallRye, Micronaut), Axon (payload-
+# routed CQRS handlers), and the in-house bus tier (its annotations don't
+# collide with the tiers above, but it runs last so standardized frameworks
+# win any tie on ordering).
 HANDLERS: list[FrameworkHandler] = [
     SpringHandler(),
     JakartaHandler(),
     ExtraHandler(),
     CamelHandler(),
+    ReactiveHandler(),
+    AxonHandler(),
     MessageBusHandler(),
 ]
 
 __all__ = [
     "FrameworkHandler", "ScanContext", "HANDLERS",
     "SpringHandler", "JakartaHandler", "ExtraHandler", "CamelHandler",
-    "MessageBusHandler",
+    "ReactiveHandler", "AxonHandler", "MessageBusHandler",
 ]

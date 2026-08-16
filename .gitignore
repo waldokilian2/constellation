@@ -1,10 +1,15 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+
+# Generated output (graphs, project store) — mounted volume in Docker
 output/
 
-# Local environment config — copy .env.example to .env and fill in secrets.
+# Local secrets — created from .env.example by the start scripts, never committed
 .env
+
+# Large sample repo used only for local framework validation
 tests/repos/sample-spring-kafka-microservices/
 
 # Node / Vite
@@ -16,3 +21,6 @@ tests/e2e/node_modules/
 tests/e2e/test-results/
 tests/e2e/playwright-report/
 /test-results/
+
+# Kilo agent state (plans, skills, worktrees)
+.kilo/

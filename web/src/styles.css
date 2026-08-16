@@ -1570,6 +1570,53 @@ code { font-family: var(--mono); color: var(--cyan); }
   padding: 16px;
 }
 
+/* Resume-previous-session prompt (shared: global chat + planner) */
+.chat-resume {
+  margin: 24px auto 12px;
+  max-width: 320px;
+  padding: 16px 18px;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  border-radius: 12px;
+  background: rgba(13, 20, 36, 0.85);
+  text-align: center;
+}
+.chat-resume-title {
+  font-size: 13px;
+  color: #cbd5e1;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.chat-resume-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.chat-resume-btn {
+  flex: 1;
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: #cbd5e1;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.chat-resume-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #e8eefc;
+}
+.chat-resume-btn.primary {
+  background: rgba(0, 212, 255, 0.14);
+  border-color: rgba(0, 212, 255, 0.35);
+  color: #7dd3fc;
+}
+.chat-resume-btn.primary:hover {
+  background: rgba(0, 212, 255, 0.24);
+  color: #e0f2fe;
+}
+
 /* Welcome screen */
 .chat-welcome {
   display: flex;
@@ -3593,6 +3640,9 @@ code { font-family: var(--mono); color: var(--cyan); }
 .planner-chat-body > .chat-welcome {
   flex: 1;
   justify-content: center;
+}
+.planner-chat-body > .chat-resume {
+  margin: auto;
 }
 
 /* Planner welcome: title + stats row */

@@ -27,6 +27,7 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
     setModel, setError,
     scrollRef, inputRef,
     conversationId, convList, refreshConvList,
+    pendingResume, resumePending,
   } = useConversationChat({
     pid,
     ctxPayload: { planner: true, entry_point_id: "", node: {} },
@@ -41,10 +42,12 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
   });
 
   // Lift the active conversation id so the panel can (re)load its
-  // diagrams on conversation switch / new plan.
+  // diagrams on conversation switch / new plan. While a previous session
+  // is pending resume, lift null — the panel must not reveal the old
+  // session's persisted diagrams before the user chooses Resume.
   useEffect(() => {
-    if (onConversation) onConversation(conversationId);
-  }, [conversationId, onConversation]);
+    if (onConversation) onConversation(pendingResume ? null : conversationId);
+  }, [conversationId, pendingResume, onConversation]);
 
   const [showHistory, setShowHistory] = useState(false);
   const openHistory = () => { refreshConvList(); setShowHistory(true); };
@@ -112,7 +115,16 @@ function PlannerChat({ graph, pid, onDiagrams, onConversation }) {
 
       {/* Messages */}
       <div className="planner-chat-body" ref={scrollRef}>
-        {messages.length === 0 && !loading && (
+        {pendingResume && !loading && messages.length === 0 && (
+          <div className="chat-resume" role="dialog" aria-label="Previous session available">
+            <div className="chat-resume-title">There is a previous session that can be resumed.</div>
+            <div className="chat-resume-actions">
+              <button className="chat-resume-btn primary" onClick={resumePending}>Resume</button>
+              <button className="chat-resume-btn" onClick={newPlan}>Start new chat</button>
+            </div>
+          </div>
+        )}
+        {messages.length === 0 && !loading && !pendingResume && (
           <div className="chat-welcome">
             <div className="chat-welcome-icon">✦</div>
             <p className="planner-welcome-title">Plan architecture changes before you code</p>

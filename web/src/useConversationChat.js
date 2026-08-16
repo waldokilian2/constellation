@@ -69,6 +69,10 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
   const [error, setError] = useState("");
   const [conversationId, setConversationId] = useState(null);
   const [convList, setConvList] = useState([]);
+  // A previous session (non-empty latest conversation) found on mount. The
+  // UI shows a resume prompt instead of auto-loading its messages; Resume
+  // loads it, Start-new creates a fresh conversation.
+  const [pendingResume, setPendingResume] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -93,6 +97,7 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
   useEffect(() => {
     let alive = true;
     async function init() {
+      setPendingResume(null);
       try {
         const convs = await refreshConvList();
         let cid = null;
@@ -109,9 +114,18 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
           await refreshConvList();
         }
         if (alive && cid) {
-          const conv = await fetchJSON(projPath(pid, "/conversations/" + cid));
-          setConversationId(cid);
-          setMessages(normalizeMessages(conv.messages || []));
+          const latest = convs.find((c) => c.id === cid) || null;
+          const count = latest && typeof latest.message_count === "number" ? latest.message_count : 0;
+          if (count > 0) {
+            // Previous session exists — wire the id but let the UI prompt
+            // Resume vs Start-new instead of auto-loading the messages.
+            setConversationId(cid);
+            setPendingResume({ id: cid });
+          } else {
+            const conv = await fetchJSON(projPath(pid, "/conversations/" + cid));
+            setConversationId(cid);
+            setMessages(normalizeMessages(conv.messages || []));
+          }
         }
       } catch (e) {
         // project/graph may not be loaded yet — retried on next pid change
@@ -176,6 +190,7 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
 
     flush();
     setError("");
+    setPendingResume(null);
     setLoading(true);
 
     try {
@@ -287,6 +302,7 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
       setConversationId(res.id);
       setMessages([]);
       setError("");
+      setPendingResume(null);
       await refreshConvList();
     } catch (e) {
       // ignore
@@ -301,11 +317,19 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
       setConversationId(cid);
       setMessages(normalizeMessages(conv.messages || []));
       setError("");
+      setPendingResume(null);
     } catch (e) {
       // conversation missing — refresh list
       await refreshConvList();
     }
   }, [pid, refreshConvList]);
+
+  // ── Resume the previous session surfaced by the mount prompt ──
+  const resumePending = useCallback(async () => {
+    const id = pendingResume && pendingResume.id;
+    if (!id) return;
+    await loadConversation(id);
+  }, [pendingResume, loadConversation]);
 
   // ── Delete a conversation ──
   const deleteConversation = useCallback(async (cid) => {
@@ -333,5 +357,6 @@ export function useConversationChat({ pid, ctxPayload, planner = false, onToolRe
     setModel, setError,
     scrollRef, inputRef,
     conversationId, convList, refreshConvList,
+    pendingResume, resumePending,
   };
 }

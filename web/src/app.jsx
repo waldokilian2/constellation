@@ -4927,6 +4927,7 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
     setModel, setError,
     scrollRef, inputRef,
     conversationId, convList, refreshConvList,
+    pendingResume, resumePending,
   } = useConversationChat({ pid, ctxPayload: ctx.payload, planner: false });
 
   const [showHistory, setShowHistory] = useState(false);
@@ -5131,7 +5132,16 @@ function GlobalChat({ graph, view, selectedNode, entryPoint, detailOpen, sidePan
           </div>
 
           <div className="chat-window-body" ref={scrollRef}>
-            {messages.length === 0 && !loading && (
+            {pendingResume && !loading && messages.length === 0 && (
+              <div className="chat-resume" role="dialog" aria-label="Previous session available">
+                <div className="chat-resume-title">There is a previous session that can be resumed.</div>
+                <div className="chat-resume-actions">
+                  <button className="chat-resume-btn primary" onClick={resumePending}>Resume</button>
+                  <button className="chat-resume-btn" onClick={newChat}>Start new chat</button>
+                </div>
+              </div>
+            )}
+            {messages.length === 0 && !loading && !pendingResume && (
               <div className="chat-welcome">
                 <div className="chat-welcome-icon">✦</div>
                 <p>Ask me anything about the architecture.</p>

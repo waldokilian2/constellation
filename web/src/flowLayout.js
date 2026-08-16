@@ -69,9 +69,13 @@ const CURVE_GAP = 14;        // min approach between unrelated curves
 const ATTACH_R = 50;         // forgiveness radius around shared card faces
 const SEGS = 16;             // curve sampling density
 
-// Same-column arc geometry.
-const BOW_BASE = 150;
-const BOW_STEP = 110;
+// Same-column arc geometry.  The bow width is the scalar control-offset
+// knob (curve extent ≈ 0.3 × bow): a base of 300 pushes the curve clearly
+// out of the column instead of hugging the card face like a straight
+// vertical line.
+const SAME_BOW_BASE = 300;
+const SAME_BOW_STEP = 90;    // per-lane width (keeps nested bows ≥20px apart)
+const SAME_BOW_MAG = 60;     // escalation rung for crowded corridors
 const BOW_CAP_OPEN = 800;    // open space past the last column
 
 // Skip-edge arc geometry.
@@ -338,7 +342,9 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
   const bowCapFor = (d) => {
     const isLast = d === depths[depths.length - 1];
     if (isLast) return BOW_CAP_OPEN;
-    return Math.max(BOW_BASE, colStep - CARD_W - 10);
+    // Corridor between columns, converted to bow units (extent ≈ 0.3 × bow),
+    // so a bow may fill the corridor without crossing into the next column.
+    return Math.max(SAME_BOW_BASE, (colStep - CARD_W - 10) / 0.3);
   };
 
   // Geometry for a given candidate; returns { start, cp1, cp2, end }.
@@ -370,7 +376,7 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
       const start = { x: faceX, y: rt.a.y + aOff };
       const end = { x: faceX, y: rt.b.y + bOff };
       const lane = sameColLane[rt.key] || 0;
-      const bow = 80 + lane * 70 + magnitude;
+      const bow = SAME_BOW_BASE + lane * SAME_BOW_STEP + magnitude;
       const pull = bow * 0.4;
       const segs = [{
         p0: start,
@@ -444,10 +450,10 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
       // escalation rungs for crowded corridors (capped by the corridor
       // width; open space past the last column gets the generous cap).
       const cap = bowCapFor(e.a.depth);
-      const bowBase = 80 + (sameColLane[e.key] || 0) * 70;
+      const bowBase = SAME_BOW_BASE + (sameColLane[e.key] || 0) * SAME_BOW_STEP;
       const mags = [];
       for (let k = 0; k < 4; k++) {
-        const m = k * 56;
+        const m = k * SAME_BOW_MAG;
         if (bowBase + m <= cap) mags.push(m);
       }
       mags.forEach((m) => rt.candidates.push({ kind: "same", sign: 1, magnitude: m }));

@@ -3965,9 +3965,23 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
     const seenRepos = {};
     const seenEdges = new Set();
 
-    function walk(step, depth) {
+    // A repo's column depth is its minimum hop distance from the origin, not
+    // the first depth the depth-first walk happens to reach it at.  The old
+    // first-visit depth stranded direct consumers several columns from their
+    // producer (routed as skip/same-column edges — straight lines with sharp
+    // bends); min-depth lays each repo beside its nearest producer so its
+    // edges are the smooth adjacent-column curves.
+    const minDepth = {};
+    (function measure(step, depth) {
+      if (minDepth[step.repo] === undefined || depth < minDepth[step.repo]) {
+        minDepth[step.repo] = depth;
+      }
+      step.children.forEach((child) => measure(child.step, depth + 1));
+    })(flow.step, 0);
+
+    function walk(step) {
       if (!seenRepos[step.repo]) {
-        seenRepos[step.repo] = { depth, repos: [step] };
+        seenRepos[step.repo] = { repos: [step] };
       } else {
         seenRepos[step.repo].repos.push(step);
       }
@@ -4001,7 +4015,7 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
             }
           }
         }
-        walk(child.step, depth + 1);
+        walk(child.step);
       });
     }
 
@@ -4012,12 +4026,12 @@ function FlowView({ flow, graph, dims, onSelectRepoInFlow, compare }) {
       externals.push({ channel: flow.originChannel, targetRepo: flow.step.repo, kind: "rest", verb: flow.originMethodType || "POST", tag: "REST", cls: "rest" });
     }
 
-    walk(flow.step, 0);
+    walk(flow.step);
 
     const repoOrder = Object.keys(seenRepos);
     const repoNodes = repoOrder.map((repo) => ({
       repo,
-      depth: seenRepos[repo].depth,
+      depth: minDepth[repo],
       entryIds: seenRepos[repo].repos.map((s) => s.entryId),
       methods: seenRepos[repo].repos.map((s) => s.method),
     }));

@@ -43,6 +43,10 @@ python -m engine.mcp_server        # CONSTELLATION_GRAPH optionally points at a 
 
 # Mock backend for frontend-only work (no engine required)
 python web/mock_server.py
+
+# Flow layout verification harness (Node, no deps — same methodology as the
+# galaxy layout harnesses documented in docs/analyses/)
+node scripts/flow-harness.mjs
 ```
 
 The startup scripts only regenerate `output/graph.json` when it is missing or custom repo args are passed. `output/graph.json` is gitignored (as are `tests/repos/sample-spring-kafka-microservices/` and `web/dist/`).
@@ -73,6 +77,15 @@ web/                 # React 18 + Vite frontend
                      # placeEdgePills = coordinated pill placement shared with the
                      # renderer — pills render exactly where the layout placed them,
                      # no deps)
+    flowLayout.js    # deterministic FlowView layout + edge routing (no deps):
+                     # depth-column grid with barycenter sibling ordering, per-face
+                     # attachment fans (no shared edge start points), straight
+                     # lines for aligned adjacent cards + per-pair forward/back
+                     # bend lanes, same-column smooth-cubic bows, smooth skip
+                     # arches (rounded rise/run/drop fallback), iterated route
+                     # refinement avoiding cards + other curves + other pills,
+                     # placeFlowPills = widest-first pills sliding ALONG their curve
+                     # (labels always sit on their edge line — never lifted off)
     styles.css       # SVG + CSS visualization styles
   dist/              # Vite build output (gitignored, created by npm run build)
   mock_server.py     # static in-memory backend for frontend dev

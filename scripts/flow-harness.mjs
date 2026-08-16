@@ -7,7 +7,8 @@
 // Usage: node scripts/flow-harness.mjs
 import { layoutFlow } from "../web/src/flowLayout.js";
 
-// ── Reconstruct the "Create Order" flow exactly as the FlowView does ──
+// ── Reconstruct the "Create Order" flow (min-depth layering, as the
+//    FlowView now assigns depths) ──
 const flows = [
   {
     name: "Create Order (order-events)",
@@ -15,7 +16,7 @@ const flows = [
     repos: [
       { repo: "order-service", depth: 0, methods: ["createOrder", "onAnalyticsEvent", "onInventoryUpdate", "getOrder"] },
       { repo: "fulfillment-service", depth: 1, methods: ["handleOrderEvent", "getFulfillmentStatus"] },
-      { repo: "notification-service", depth: 2, methods: ["handleShipmentEvent", "handleOrderEvent", "handleShipmentEvent"] },
+      { repo: "notification-service", depth: 1, methods: ["handleShipmentEvent", "handleOrderEvent"] },
       { repo: "user-service", depth: 2, methods: ["onShipmentEvent", "onShipmentEvent"] },
       { repo: "analytics-service", depth: 1, methods: ["configure", "onOrderEvent"] },
       { repo: "payment-service", depth: 1, methods: ["onOrderEvent"] },

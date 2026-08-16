@@ -79,10 +79,11 @@ web/                 # React 18 + Vite frontend
                      # no deps)
     flowLayout.js    # deterministic FlowView layout + edge routing (no deps):
                      # depth-column grid with barycenter sibling ordering, per-face
-                     # attachment fans (no shared edge start points), per-pair
-                     # forward/back bend lanes, lane-based same-column corner/run/
-                     # corner arcs, orthogonal rise/run/drop skip arcs, iterated
-                     # route refinement avoiding cards + other curves + other pills,
+                     # attachment fans (no shared edge start points), straight
+                     # lines for aligned adjacent cards + per-pair forward/back
+                     # bend lanes, same-column smooth-cubic bows, smooth skip
+                     # arches (rounded rise/run/drop fallback), iterated route
+                     # refinement avoiding cards + other curves + other pills,
                      # placeFlowPills = widest-first pills sliding ALONG their curve
                      # (labels always sit on their edge line — never lifted off)
     styles.css       # SVG + CSS visualization styles

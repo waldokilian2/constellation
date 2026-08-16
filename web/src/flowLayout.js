@@ -17,9 +17,11 @@
       card face (fan sorted by the far end) — edges never share a
       start point, so a hub fans out cleanly.
    3. Edge shapes by class:
-      - forward/backward adjacent columns: cubic bezier with
-        horizontal-ish tangents at the faces; same-pair edges fan
-        into vertically separated lanes (request/response pairs).
+      - forward/backward adjacent columns: a straight horizontal line
+        when two single-edge cards sit directly across from each other
+        (aligned rows); otherwise a cubic bezier with horizontal-ish
+        tangents.  Same-pair edges fan into vertically separated lanes
+        (request/response pairs).
       - same-column edges: one smooth cubic per edge bowing out of
         the column; distinct lane widths keep nested bows apart.
       - skip edges (spanning >1 column): a smooth arch over the
@@ -359,9 +361,10 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
     if (kind === "fwd" || kind === "back") {
       // Cards sitting straight across from one another (same row height)
       // connect with a straight horizontal line — the pre-refactor look —
-      // instead of an unnecessary bend.  Cards at different heights keep the
-      // smooth bend.
-      const aligned = Math.abs(rt.a.y - rt.b.y) < ALIGN_EPS;
+      // instead of an unnecessary bend.  Paired edges (request/response or
+      // multiple channels) still fan apart, and cards at different heights
+      // keep the smooth bend.
+      const aligned = rt.single && Math.abs(rt.a.y - rt.b.y) < ALIGN_EPS;
       const start = kind === "fwd"
         ? { x: rt.a.x + rt.a.w / 2, y: rt.a.y + (aligned ? 0 : aOff) }
         : { x: rt.a.x - rt.a.w / 2, y: rt.a.y + (aligned ? 0 : aOff) };
@@ -462,13 +465,14 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
       kind: e.a.depth === e.b.depth ? "same"
         : Math.abs(e.a.depth - e.b.depth) > 1 ? "skip"
         : (e.b.depth > e.a.depth ? "fwd" : "back"),
-      baseBend, candidates: [], chosen: null,
+      baseBend, single: n === 1, candidates: [], chosen: null,
     };
     if (rt.kind === "same") {
-      // Smooth bow: each same-column edge has its own lane width (80 + 70
-      // per lane) so nested same-side bows stay ≥20px apart, plus outward
-      // escalation rungs for crowded corridors (capped by the corridor
-      // width; open space past the last column gets the generous cap).
+      // Smooth bow: each same-column edge has its own lane width
+      // (SAME_BOW_BASE + SAME_BOW_STEP per lane) so nested same-side bows
+      // stay ≥20px apart, plus outward escalation rungs for crowded
+      // corridors (capped by the corridor width; open space past the last
+      // column gets the generous cap).
       const cap = bowCapFor(e.a.depth);
       const bowBase = SAME_BOW_BASE + (sameColLane[e.key] || 0) * SAME_BOW_STEP;
       const mags = [];
@@ -556,15 +560,6 @@ export function layoutFlow({ repos, externals, edges, pillWFor, H }) {
       }
     });
     return pts;
-  };
-
-  // Point on a route at parameter t (0..1 across all segments evenly).
-  const pointOnRoute = (rt, t) => {
-    const n = rt.segs.length;
-    const idx = Math.min(n - 1, Math.floor(t * n));
-    const local = t * n - idx;
-    const s = rt.segs[idx];
-    return cubicPoint(s.p0, s.c1, s.c2, s.p3, local);
   };
 
   // 1 per crossing non-endpoint card, weighted by how deep the curve dips
@@ -759,7 +754,7 @@ export function placeFlowPills(routes, rects, pillWFor) {
   for (const { rt, pw } of order) {
     let best = null;
     for (const t of ts) {
-      const p = pointOnRouteLocal(rt, t);
+      const p = pointOnRoute(rt, t);
       const rect = { x: p.x - pw / 2, y: p.y - PILL_H / 2, w: pw, h: PILL_H };
       let pen = 0;
       for (const c of rects) {
@@ -783,7 +778,7 @@ export function placeFlowPills(routes, rects, pillWFor) {
 }
 
 // Point on a route at parameter t (0..1, evenly split across its segments).
-const pointOnRouteLocal = (rt, t) => {
+const pointOnRoute = (rt, t) => {
   const n = rt.segs.length;
   const idx = Math.min(n - 1, Math.floor(t * n));
   const local = t * n - idx;

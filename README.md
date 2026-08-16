@@ -1,8 +1,10 @@
-# ⚡ Constellation
+<p align="center">
+  <img src="assets/title-banner.png" width="100%" alt="Constellation">
+</p>
 
-**Deterministically map Java Spring Boot microservice architectures. Find every entry point, trace execution paths, and see how messages flow between services — all from static analysis, zero AI required.**
+**Deterministically map JVM microservice architectures. Find every entry point, trace execution paths, and see how messages flow between services — all from static analysis, zero AI required.**
 
-Constellation parses source code with tree-sitter AST to build a complete map of your microservice architecture. No code runs, no LLMs needed for the core analysis — every relationship is extracted directly from the source.
+Constellation parses source code with tree-sitter ASTs to build a complete map of your architecture. No code runs, no LLMs are needed for the core analysis — every relationship is extracted directly from the source.
 
 AI is an optional advisory layer on top: it gets structured graph context (not raw source) so it can answer questions about the system accurately.
 
@@ -24,14 +26,13 @@ start.bat
 Open **http://localhost:8765** in your browser.
 
 The startup script will:
-1. Create a Python virtual environment (if missing)
-2. Install dependencies (if missing)
-3. Generate the demo graphs from the bundled test repos (if missing)
-4. Build the frontend (`npm install && npm run build`, if `web/dist/` is missing or stale)
-5. Start the server
+1. Create a Python virtual environment and install dependencies (if missing)
+2. Generate the demo graphs from the bundled test repos (if missing)
+3. Build the frontend (`npm install && npm run build`, if `web/dist/` is missing or stale)
+4. Start the server
 
 On first load the server seeds two demo projects:
-- **Spring Boot** — `order-service`, `fulfillment-service`, `notification-service` (Spring Messaging / REST / Kafka / RabbitMQ)
+- **Spring Boot** — `order-service`, `fulfillment-service`, `notification-service`, `analytics-service` (REST, RabbitMQ, Kafka, gRPC, GraphQL, scheduled tasks, and more)
 - **Java EE** — `java-ee-order-service`, `java-ee-fulfillment-service`, `java-ee-notification-service` (JAX-RS, JMS MDB, CDI, EJB, WebSocket, Spring `@Scheduled`/`@MessageMapping`) with real cross-repo links
 
 ### Docker (all-in-one)
@@ -44,7 +45,7 @@ docker compose up           # http://localhost:8765
 
 - Works offline (React/marked are bundled into the built UI; Google Fonts fall back to system fonts).
 - Graphs and cloned repos persist in the `constellation-output` named volume.
-- Optional AI: `ANTHROPIC_API_KEY=sk-... docker compose up`.
+- Optional AI: `OPENCODE_API_KEY=sk-... docker compose up`.
 
 #### Analyze repos you've already cloned
 
@@ -77,122 +78,168 @@ docker compose run --rm --entrypoint python constellation \
 - **Python 3.10+**
 - **Node.js 18+** (for the Vite frontend build)
 - **A modern browser** (for the web UI)
-- **Optional:** `OPENCODE_API_KEY` env var for AI features (defaults to Zen; works without — just disables AI chat). Copy the committed `.env.example` to `.env` (git-ignored) and fill in your keys.
+- **Optional:** an `OPENCODE_API_KEY` for AI chat (defaults to Zen, any OpenAI-compatible endpoint works). Copy `.env.example` to `.env` (git-ignored) and fill in your keys — the start scripts do this automatically on first run.
 
 ---
 
-## What It Does
+## Features
 
-### Entry Point Detection
+### Projects — one map per system
+Every project is its own isolated map of the repositories that make up a system, ready to enter and explore.
 
-Scans for framework-specific annotations and patterns:
+<img src="assets/screenshots/00-landing.jpg" width="720" alt="Project list"/>
 
-| Pattern | Type | Framework |
-|---------|------|-----------|
-| `@RabbitListener(queues = "name")` | RabbitMQ Consumer | Spring AMQP |
-| `@KafkaListener(topics = "name")` | Kafka Consumer | Spring Kafka |
-| `@JmsListener(destination = "name")` | JMS Consumer | Spring JMS |
-| `@RocketMQMessageListener(topic = "name")` | Kafka-style Consumer | RocketMQ |
-| `@StreamListener(value = "name")` | Kafka-style Consumer | Spring Cloud Stream |
-| `@GetMapping`, `@PostMapping`, etc. | REST Endpoint | Spring Web |
-| `@RequestMapping` (class-level prefix) | REST Endpoint | Spring Web |
-| `@EventListener` / `@TransactionalEventListener` | Event Listener | Spring Events |
-| `@Scheduled` | Scheduled Task | Spring |
-| `@MessageMapping` / `@SubscribeMapping` | WebSocket / STOMP | Spring Messaging |
-| `@Path` + `@GET`/`@POST`/… | REST Endpoint | JAX-RS (Jakarta EE) |
-| `@MessageDriven` + `activationConfig` | JMS MDB consumer | Jakarta EE |
-| `@Observes` (parameter) | Event Listener | CDI |
-| `@Schedule` / `@Schedules` | Scheduled Task | EJB |
-| `@ServerEndpoint` + `@OnMessage`/`@OnOpen`/… | WebSocket endpoint | Jakarta WebSocket |
+### Ingestion — point it at your repositories
+Bring in a project from git URLs, a local folder, or an entire git-host organization (GitHub · GitLab · Bitbucket · Azure DevOps). Repositories are analyzed together so cross-service links are found across the whole set.
 
-Channels are resolved through the symbol index: string literals, `Class.CONST` / bare constant
-references, `${...}` placeholders (from `application.properties`/`.yml`), and `#{...}` SpEL
-(dynamic — preserved for display). Array arguments (`topics = {"a", "b"}`) produce one entry
-point per element.
+<img src="assets/screenshots/12-import.jpg" width="720" alt="Git-host import"/>
 
-### Producer Detection
+### Galaxy view — the system in one screen
+Every repository is a cluster; message channels and sync HTTP calls are links with their contract labels visible. Entry-point counts, type badges, and a "repos with gaps" health signal sit right on the overview.
 
-Finds message producers by matching the **declared field type** of the receiver (not the variable name — a plain `template.send(...)` no longer false-matches):
+<img src="assets/screenshots/01-galaxy.jpg" width="720" alt="Galaxy view"/>
 
-| Declared field type | Producing methods | Type |
-|---------------------|-------------------|------|
-| `KafkaTemplate` | `send(...)` | Kafka Producer |
-| `RabbitTemplate` / `AmqpTemplate` | `convertAndSend(...)`, `send(...)` | RabbitMQ Producer |
-| `JmsTemplate` | `convertAndSend(...)`, `send(...)` | JMS Producer |
-| `ApplicationEventPublisher` | `publishEvent(...)` | Event Publisher |
+### Solar System — one service at a time
+Entry points orbit as stars sized by call-tree complexity and colored by type. The docked panel shows everything a service consumes, sends, bridges, and requests over HTTP — with deep links to the flows behind them.
+
+<img src="assets/screenshots/02-solar.jpg" width="720" alt="Solar System view"/>
+
+### Call paths — from handler to side effect
+Every entry point has a call tree built by a depth-limited, cycle-safe breadth-first walk, resolved to concrete definitions — with `file:line` on every node and honest confidence tags (`EXTRACTED` vs `INFERRED`).
+
+<img src="assets/screenshots/03-path.jpg" width="720" alt="Call path view"/>
+
+### Source detail — the code behind the graph
+Click any node to see the source it came from with the relevant line highlighted — no round-trip to the repository.
+
+<img src="assets/screenshots/04-detail.jpg" width="720" alt="Source detail panel"/>
+
+### Flows — end-to-end journeys
+Message hops and sync HTTP calls chain into complete business flows. The index is searchable and filterable; each trace shows the full path across services. Cross-repo links are found by deterministic channel-name matching — no AI, no inference.
+
+<img src="assets/screenshots/05-flows-index.jpg" width="720" alt="Flows index"/>
+<img src="assets/screenshots/06-flow-trace.jpg" width="720" alt="Flow trace"/>
+
+### Code Issues — dead code & broken contracts
+Unreachable methods, thin handlers, orphan producers/consumers, and dependency cycles — every finding with its source location and a deep link.
+
+<img src="assets/screenshots/07-code-issues.jpg" width="720" alt="Code Issues view"/>
+
+### Compare — what changed since the last scan
+Every rescan keeps a snapshot; compare mode paints added/changed/removed entry points and links directly onto the topology.
+
+<img src="assets/screenshots/10-compare.jpg" width="720" alt="Compare mode"/>
+
+### AI Change Planner — plan changes, rendered
+AI works from the extracted graph and renders plan documents and diagrams into a preview panel — with reasoning and tool steps visible. The API key is proxied server-side and never reaches the frontend.
+
+<img src="assets/screenshots/08-planner.jpg" width="720" alt="AI Change Planner"/>
+
+### Architecture assistant — grounded Q&A
+Ask anything about the project; answers are backed by live queries over the graph, with the evidence visible in the transcript.
+
+<img src="assets/screenshots/09-chat.jpg" width="720" alt="Architecture assistant"/>
+
+### Boards — your issue tracker, inside the map
+Connect a GitHub Project and work appears as a live kanban next to the code it affects — move cards, comment, and jump to the issue.
+
+<img src="assets/screenshots/11-boards.jpg" width="720" alt="Boards view"/>
+
+### Detection reference
+
+Framework-specific annotation and interface-contract scanning:
+
+| Family | Detects |
+|--------|---------|
+| **Spring** | `@GetMapping`/`@PostMapping`/… REST endpoints, `@RabbitListener`, `@KafkaListener`, `@JmsListener`, `@SqsListener`, `@PulsarListener`, `@RocketMQMessageListener`, `@StreamListener`, `@EventListener`, `@Scheduled`, `@MessageMapping`/`@SubscribeMapping` (STOMP) |
+| **Jakarta / Java EE** | JAX-RS (`@Path` + verbs), JMS MDB (`@MessageDriven`), CDI (`@Observes`), EJB timers (`@Schedule`/`@Schedules`/`@Timeout`), WebSocket (`@ServerEndpoint`) |
+| **Interface contracts** | `public static void main`, lifecycle hooks (`@PostConstruct`, `CommandLineRunner`, `ApplicationRunner`, `InitializingBean`, …), Servlets & filters (`@WebServlet`/`@WebFilter`), SOAP (`@WebService`/`@WebMethod`), Spring for GraphQL (`@QueryMapping`/`@MutationMapping`/…), gRPC (`*ImplBase` service methods), Spring Cloud Function (`@Bean Function/Supplier/Consumer`) |
+| **Apache Camel** | `RouteBuilder` DSL — `from(...)`/`to(...)` URIs, broker scheme selects the channel type |
+| **Axon Framework** | CQRS/ES handlers routed by payload type (commands, events, queries) |
+| **Quarkus / Micronaut** | SmallRye Reactive Messaging (`@Incoming`/`@Outgoing`), Micronaut listener annotations |
+| **Custom bus facades** | `@MessageHandler`-style classes dispatched by payload type (`bus.send(...)`) |
+
+Channels are resolved through the symbol index: string literals, `Class.CONST` / bare constant references, `${...}` placeholders (from `application.properties`/`.yml`), and `#{...}` SpEL (dynamic — preserved for display). Array arguments (`topics = {"a", "b"}`) produce one entry point per element.
+
+Message producers are matched by **declared field type** of the receiver (not variable names — a plain `template.send(...)` doesn't false-match):
+
+| Declared type / pattern | Producing methods | Type |
+|-------------------------|-------------------|------|
+| `KafkaTemplate` | `send(...)` | Kafka |
+| `RabbitTemplate` / `AmqpTemplate` | `convertAndSend(...)`, `send(...)` | RabbitMQ |
+| `JmsTemplate` | `convertAndSend(...)`, `send(...)` | JMS |
+| `SqsTemplate` / `SqsClient` / `AmazonSQS` | `send(...)` | AWS SQS |
+| `SnsTemplate` / `SnsClient` / `AmazonSNS` | `publish(...)` | AWS SNS |
+| `PulsarTemplate` | `send(...)` | Pulsar |
+| `NatsTemplate`-style clients | `publish(...)` | NATS |
+| `ApplicationEventPublisher` | `publishEvent(...)` | Spring events |
 | `StreamBridge` | `send(...)` | Cloud Stream (broker-agnostic) |
+| `@SendTo` (STOMP) | handler methods | WebSocket replies |
+| gRPC stubs (`*BlockingStub`/`*FutureStub`/`*Stub`) | service calls | gRPC |
+| HTTP clients (Feign, `RestTemplate`, `WebClient`, …) | request methods | HTTP calls |
+| Custom bus facade | `bus.send(payload)` | in-house bus |
 
-### Cross-Repo Message Flow
-
-When Repo A produces to `"order-events"` and Repo B consumes from `"order-events"`, Constellation links them. This is deterministic string matching on queue/topic names across parsed repos — no AI, no inference.
-
-### Call Tree Extraction
-
-For each entry point, Constellation builds a call tree by:
-1. Parsing the handler method body with tree-sitter AST
-2. Finding all method invocations
-3. Resolving each call to its definition in the codebase
-4. Recursing up to depth 4 (configurable)
-5. Marking each node with confidence: `EXTRACTED` (resolved) or `INFERRED` (unresolved)
-
-### AI Integration (Optional)
-
-When an API key is configured, the web UI provides a conversational AI assistant that:
-- Gets a **structured system prompt** with the architecture overview, call tree, and cross-repo connections
-- Can call **graph tools** to search the codebase, find callers, and trace paths
-- Works as a multi-turn chat with follow-up questions
-
----
+*Screenshots are from the bundled Spring Boot demo project.*
 
 ## Architecture
 
 ```
 constellation/
-├── engine/                         # Deterministic analysis engine
-│   ├── parser.py                   #   tree-sitter Java AST wrapper + structural helpers
-│   ├── java_index.py               #   repo-wide symbol index (type-aware resolution)
-│   ├── entry_detector.py           #   Spring + Java EE annotation + producer scanner
-│   ├── call_graph.py               #   BFS call tree builder (depth-limited)
-│   ├── cross_repo.py               #   Queue/topic name matcher
-│   ├── context_builder.py          #   Builds AI system prompts from graph data
-│   ├── graph_tools.py              #   11 query functions (shared by all interfaces)
-│   ├── mcp_server.py               #   MCP stdio server for coding agents
-│   ├── models.py                   #   Data classes
-│   ├── paths.py                    #   Safe, root-confined source path resolution
-│   ├── project_store.py            #   Multi-project index, git-clone ingestion
-│   └── constellation.py            #   CLI orchestrator
+├── engine/                        # Deterministic analysis engine
+│   ├── constellation.py           #   CLI orchestrator
+│   ├── ast_parser.py              #   tree-sitter AST wrapper + structural helpers
+│   ├── languages/                 #   Language specs + registry (Java today, extensible)
+│   │   ├── java_ast.py            #     Java-specific AST helpers
+│   │   └── specs/java.py          #     Java language spec
+│   ├── frameworks/                #   Framework detectors (pluggable handlers)
+│   │   ├── spring.py              #     Spring + Micronaut annotations
+│   │   ├── jakarta.py             #     Java EE / Jakarta (JAX-RS, MDB, CDI, EJB, WS)
+│   │   ├── camel.py               #     Apache Camel RouteBuilder DSL
+│   │   ├── axon.py                #     Axon CQRS/ES handlers
+│   │   ├── reactive.py            #     Quarkus / MicroProfile reactive messaging
+│   │   ├── messagebus.py          #     Custom bus facade handlers
+│   │   └── extra.py               #     main, lifecycle, servlets, SOAP, GraphQL, gRPC, cloud functions
+│   ├── producers/jvm.py           #   Producer detection by declared receiver type
+│   ├── symbol_index.py            #   Repo-wide symbol index (type-aware resolution)
+│   ├── entry_detector.py          #   Entry-point scan driver
+│   ├── call_graph.py              #   BFS call tree builder
+│   ├── cross_repo.py              #   Queue/topic name matcher
+│   ├── http_paths.py              #   REST path extraction
+│   ├── git_hosts.py               #   GitHub / GitLab / Bitbucket repo browsing + clone URLs
+│   ├── graph_tools.py             #   Graph query functions (shared by all interfaces)
+│   ├── context_builder.py         #   Builds AI system prompts from graph data
+│   ├── mermaid_validator.py       #   Mermaid diagram validation + repair (with .mjs checker)
+│   ├── conversation_store.py      #   Persisted AI conversations + diagrams
+│   ├── boards/                    #   GitHub Projects sync via the official GitHub MCP server
+│   ├── project_store.py           #   Multi-project index, git-clone ingestion
+│   ├── mcp_server.py              #   MCP server (stdio + streamable HTTP)
+│   ├── models.py                  #   Data classes
+│   └── paths.py                   #   Safe, root-confined source path resolution
 │
-├── server.py                       # FastAPI web server + REST API
-├── web/                            # React 18 + Vite frontend
-│   ├── index.html                  # Vite entry point
-│   ├── src/
-│   │   ├── main.jsx                # createRoot entry
-│   │   ├── app.jsx                 # Galaxy → Solar System → Path → Detail views
-│   │   └── styles.css              # visualization styles
-│   └── dist/                       # Vite build output (gitignored)
+├── server.py                      # FastAPI web server + REST API + MCP mount
+├── win_accept_resilience.py       # Windows selector-loop fix (CPython #93821)
+├── web/                           # React 18 + Vite frontend
+│   └── src/
+│       ├── app.jsx                #   All views/modes (topology, flows, planner, boards, dead)
+│       ├── useConversationChat.js #   Streaming chat hook (SSE + tool-use loop)
+│       ├── changePlanner.jsx      #   Planner mode + diagram preview
+│       ├── galaxyLayout.js        #   Galaxy/solar layout
+│       ├── flowLayout.js          #   Flow-view layout
+│       └── mermaidRepair.js       #   Client-side diagram repair
 │
-├── tests/repos/                    # Sample Java microservice repos
-│   ├── order-service/              #   Spring Boot demo: REST + RabbitMQ producer + event listener
-│   ├── fulfillment-service/        #   Spring Boot demo: RabbitMQ consumer + Kafka producer
-│   ├── notification-service/       #   Spring Boot demo: Kafka + RabbitMQ consumers
-│   ├── java-ee-order-service/      #   Java EE demo (app1): JAX-RS, @MessageMapping,
-│   │                               #     @Scheduled; producers → order-events
-│   ├── java-ee-fulfillment-service/ #   Java EE demo (app2): JMS MDB, array-topics Kafka;
-│   │                               #     producer → shipment-events
-│   ├── java-ee-notification-service/ #   Java EE demo (app3): CDI @Observes, EJB @Schedule,
-│   │                               #     WebSocket @ServerEndpoint; Kafka consumer
-│   └── sample-spring-kafka-microservices/  # Real cloned repo (3 services)
+├── tests/                         # Unit tests + bundled sample repos
+│   ├── run_tests.py               #   stdlib test runner
+│   ├── test_*.py                  #   Engine + server regression tests
+│   ├── repos/                     #   14 sample Java repos (Spring Boot + Java EE demos)
+│   └── e2e/                       #   Playwright end-to-end specs
 │
-├── output/                         # Generated graphs + project store (gitignored)
-│   ├── graph.json                  #   Spring Boot demo graph (test repos)
-│   ├── graph-java-ee.json          #   Java EE demo graph (cross-repo links)
-│   ├── projects.json               #   Multi-project index
-│   └── projects/<pid>/             #   Per-project: graph.json + cloned repos/
-│
-├── start.sh                        # Linux/macOS startup
-├── start.bat                       # Windows startup
-└── PLAN.md                         # Architecture + roadmap
+├── scripts/flow-harness.mjs       #   Flow-layout dev harness
+├── docker/                        #   Dockerfile + entrypoint
+├── start.sh / start.bat           #   Startup scripts
+└── .env.example                   #   Configuration template (copy to .env)
 ```
+
+Generated graphs, the project store, and cloned repos live in `output/` (git-ignored, a Docker volume in the container).
 
 ---
 
@@ -201,33 +248,25 @@ constellation/
 The graph tools are pure functions in `engine/graph_tools.py`. They're exposed three ways:
 
 ```
-                    Graph Tools (pure functions)
-                            │
-           ┌────────────────┼────────────────┐
-           ▼                ▼                ▼
-     MCP Server        REST API         Web AI Chat
-   (stdio JSON-RPC)   (/api/tools/*)   (tool-use loop)
-           │                │                │
-           ▼                ▼                ▼
-    Claude Code       Debugging /       Browser
-    Cursor            External use       Detail Panel
+                Graph Tools (pure functions)
+                          │
+         ┌────────────────┼────────────────┐
+         ▼                ▼                ▼
+   MCP Server        REST API         Web AI Chat
+ (stdio + HTTP)   (/api/projects/…)   (tool-use loop)
+         │                │                │
+         ▼                ▼                ▼
+  Claude Code      Debugging /        Browser
+  Cursor, …        External use       chat + planner
 ```
 
 ### 1. Web UI
 
-Projects list, then per-project zoom levels:
-
-| View | What You See |
-|------|-------------|
-| **Projects** | All ingested projects (each is its own graph — e.g. "Spring Boot", "Java EE") |
-| **Galaxy** | All repos in the project as clusters, message channels as curved connections with channel names |
-| **Solar System** | Entry points in a repo as stars (sized by complexity, colored by type) |
-| **Path** | Call tree for one entry point — the full execution chain from request to response |
-| **Detail Panel** | Source code with line highlighting, relationships, and AI chat |
+See [Features](#features) above.
 
 ### 2. REST API
 
-All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...` (the legacy flat `/api/graph`, `/api/tools/*`, `/api/ai/*` routes were replaced):
+All graph-dependent endpoints are **project-scoped** under `/api/projects/{pid}/...`:
 
 ```bash
 # List projects
@@ -257,10 +296,10 @@ curl -X POST http://localhost:8765/api/projects/<pid>/tools/find_callers \
   -d '{"method_name": "save"}'
 ```
 
-Projects can also be created/via API (UI-driven ingestion clones git repos):
+Projects are created through the same API (the UI uses these endpoints — git URLs are cloned server-side):
 
 ```bash
-# Create a project from one or more git URLs
+# Create a project from one or more git URLs (streams [clone]/[scan]/[link] progress)
 curl -X POST http://localhost:8765/api/projects \
   -H "Content-Type: application/json" \
   -d '{"name": "My Stack", "repos": ["https://github.com/me/a.git", "https://github.com/me/b.git"]}'
@@ -271,38 +310,75 @@ curl -X POST http://localhost:8765/api/projects/<pid>/repos \
   -d '{"repos": ["https://github.com/me/c.git"]}'
 ```
 
+<details>
+<summary><strong>Full endpoint reference</strong></summary>
+
+**Projects & repos**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/projects` | List projects |
+| `GET` | `/api/projects/{pid}` | Project metadata |
+| `POST` | `/api/projects` | Create project from git URLs (streams `[clone]/[scan]/[link]`) |
+| `DELETE` | `/api/projects/{pid}` | Delete a project |
+| `POST` | `/api/projects/{pid}/repos` | Add repos to a project |
+| `POST` | `/api/projects/{pid}/rescan` | Re-run the engine on the project |
+| `GET` | `/api/projects/{pid}/updates` | Upstream change detection (stale repos) |
+| `GET` | `/api/projects/{pid}/graph` | Full graph data |
+| `GET` | `/api/projects/{pid}/source?file_path=X` | Source file contents |
+| `GET` | `/api/projects/{pid}/diff` | Graph diff vs. a stored snapshot |
+| `GET` | `/api/remotes/repos?url=…` | Browse a GitHub/GitLab/Bitbucket org or user's repos |
+| `GET` | `/api/local/repos` | Discover local candidate repos |
+
+**Tools**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/projects/{pid}/tools` | List all tools + schemas |
+| `POST` | `/api/projects/{pid}/tools/{name}` | Execute any tool with JSON args |
+| `GET` | `/api/projects/{pid}/tools/search?q=X` | Quick search |
+| `GET` | `/api/projects/{pid}/tools/callers?method=X` | Find callers |
+| `GET` | `/api/projects/{pid}/tools/channels` | List channels |
+| `GET` | `/api/projects/{pid}/tools/channel/{name}` | Channel flow |
+| `GET` | `/api/projects/{pid}/tools/overview` | Architecture summary |
+| `GET` | `/api/projects/{pid}/tools/trace?from_method=X&to_method=Y` | Path trace |
+| `GET` | `/api/projects/{pid}/tools/orphans` | Half-wired channels |
+| `GET` | `/api/projects/{pid}/tools/cycles` | Repo-level dependency cycles |
+| `GET` | `/api/projects/{pid}/tools/dead_code` | Dead-code candidates |
+| `GET` | `/api/projects/{pid}/tools/diff` | Diff two graph snapshots |
+
+**AI conversations**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/ai/models` | Available LLM models |
+| `POST` | `/api/projects/{pid}/conversations` | Create a conversation |
+| `GET` | `/api/projects/{pid}/conversations` | List conversations |
+| `GET` | `/api/projects/{pid}/conversations/{cid}` | Conversation with messages |
+| `DELETE` | `/api/projects/{pid}/conversations/{cid}` | Delete a conversation |
+| `POST` | `/api/projects/{pid}/conversations/{cid}/chat/stream` | Send a message; streams the reply (SSE: `token`, `reasoning`, `tool_start`, `tool_result`, `task_complete`, `done`, `error`) |
+| `GET/DELETE` | `/api/projects/{pid}/conversations/{cid}/diagrams[/{id}]` | Persisted planner diagrams |
+
+**Boards (GitHub Projects sync)**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET/POST` | `/api/projects/{pid}/boards` | List connected boards / connect one |
+| `DELETE` | `/api/projects/{pid}/boards/{bid}` | Disconnect a board |
+| `POST` | `/api/projects/{pid}/boards/{bid}/sync` | Two-way issue ↔ card sync |
+| `POST` | `/api/projects/{pid}/boards/{bid}/items` | Move a card (status swim lane / issue open-close) |
+| `POST` | `…/boards/{bid}/items/comment` | Comment on a synced item |
+| `POST` | `…/boards/{bid}/items/create` | Create a card + issue |
+
+Misc: `GET /api/graph` (legacy default-project graph), `GET /health`.
+
+</details>
+
 ### 3. MCP Server (for coding agents)
 
-Register Constellation with Claude Code, Cursor, or any MCP-compatible agent.
-Built on the official MCP Python SDK (v2); the protocol version is negotiated
-automatically (current wire version 2025-11-25). The MCP server is **multi-project
-aware**: it exposes every project the app knows about (the same projects the web
-UI shows). Call `list_projects` to discover them, then pass a `project` id to any
-graph tool to query that project (omit it to query the default — the most recently
-updated ready project). All eleven graph tools are exposed, tagged read-only, plus
-the default project's graph as the `constellation://graph` resource.
+Register Constellation with Claude Code, Cursor, or any MCP-compatible agent. Built on the official MCP Python SDK (v2); the protocol version is negotiated automatically. The MCP server is **multi-project aware**: it exposes every project the app knows about (the same projects the web UI shows). Call `list_projects` to discover them, then pass a `project` id to any graph tool to query that project (omit it to query the default — the most recently updated ready project). All graph tools are exposed and tagged read-only, plus the default project's graph as the `constellation://graph` resource.
 
-**Local / non-docker (stdio):**
-
-```json
-// .mcp.json
-{
-  "mcpServers": {
-    "constellation": {
-      "command": "python",
-      "args": ["-m", "engine.mcp_server"],
-      "cwd": "/path/to/constellation",
-      "env": {
-        "CONSTELLATION_GRAPH": "/path/to/constellation/output/graph.json"
-      }
-    }
-  }
-}
-```
-
-**Docker / web-server hosting (Streamable HTTP):** the FastAPI web app
-(`server.py`) mounts the same MCP server at `/mcp`, so the docker container
-serves MCP with just a URL and no stdio subprocess:
+**Docker / web-server hosting (Streamable HTTP):** the FastAPI web app mounts the same MCP server at `/mcp`, so the container serves MCP with just a URL and no stdio subprocess:
 
 ```json
 // .mcp.json
@@ -311,6 +387,20 @@ serves MCP with just a URL and no stdio subprocess:
     "constellation": {
       "type": "http",
       "url": "http://localhost:8765/mcp"
+    }
+  }
+}
+```
+
+**Local / non-docker (stdio):**
+
+```json
+{
+  "mcpServers": {
+    "constellation": {
+      "command": "python",
+      "args": ["-m", "engine.mcp_server"],
+      "cwd": "/path/to/constellation"
     }
   }
 }
@@ -325,12 +415,12 @@ The agent can then ask questions like:
 
 ## Graph Tools
 
-Eleven tools, shared across all three interfaces:
+Thirteen tools, shared across all three interfaces:
 
 | Tool | Description |
 |------|-------------|
 | `search_code` | Search entry points, producers, and files by name or pattern |
-| `get_node` | Get full details + call tree for a specific entry point |
+| `get_node` | Full details + call tree for a specific entry point |
 | `find_callers` | Impact analysis — find all entry points that call a given method |
 | `trace_path` | Trace the execution chain from method A to method B |
 | `get_channel_flow` | Full message flow through a queue/topic (producers → consumers) |
@@ -340,47 +430,10 @@ Eleven tools, shared across all three interfaces:
 | `find_orphans` | Message channels only half-wired (producer with no consumer, or vice versa) |
 | `find_cycles` | Repo-level dependency cycles via cross-repo channel edges (A → B → A) |
 | `find_dead_code` | Possible dead code: unreachable methods, thin handlers, isolated repos |
+| `diff_graphs` | Diff two graph snapshots (added/removed/changed entry points) |
+| `task_complete` | Planner signal — report status and next steps |
 
----
-
-## API Reference
-
-### Graph Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/projects` | List projects |
-| `GET` | `/api/projects/{pid}` | Project metadata |
-| `POST` | `/api/projects` | Create project from git URLs (streams `[clone]/[scan]/[link]`) |
-| `POST` | `/api/projects/{pid}/repos` | Add repos to a project |
-| `POST` | `/api/projects/{pid}/rescan` | Re-run the engine on the project |
-| `GET` | `/api/projects/{pid}/updates` | Upstream change detection (stale repos) |
-| `DELETE` | `/api/projects/{pid}` | Delete a project |
-| `GET` | `/api/projects/{pid}/graph` | Full graph data |
-| `GET` | `/api/projects/{pid}/source?file_path=X` | Source file contents |
-
-### AI Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/ai/models` | Available LLM models |
-
-Conversations are the only AI surface — each message streams via
-`POST /api/projects/{pid}/conversations/{cid}/chat/stream`
-(SSE: `token`, `reasoning`, `tool_start`, `tool_result`, `task_complete`, `done`, `error`).
-
-### Tool Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/projects/{pid}/tools` | List all tools + schemas |
-| `POST` | `/api/projects/{pid}/tools/{name}` | Execute any tool with JSON args |
-| `GET` | `/api/projects/{pid}/tools/search?q=X` | Quick search |
-| `GET` | `/api/projects/{pid}/tools/callers?method=X` | Find callers |
-| `GET` | `/api/projects/{pid}/tools/channels` | List channels |
-| `GET` | `/api/projects/{pid}/tools/channel/{name}` | Channel flow |
-| `GET` | `/api/projects/{pid}/tools/overview` | Architecture summary |
-| `GET` | `/api/projects/{pid}/tools/trace?from_method=X&to_method=Y` | Path trace |
+One additional tool, `render_diagram`, is exposed **only** to the planner chat (it's stateful — diagrams are persisted on the conversation).
 
 ---
 
@@ -398,7 +451,7 @@ python -m engine.constellation \
   /path/to/repo2 \
   --output output/graph.json
 
-# Start the MCP server
+# Start the MCP server (serves every project in the local store)
 python -m engine.mcp_server
 ```
 
@@ -412,18 +465,18 @@ Source Code (.java files)
         ▼
   tree-sitter AST parsing        ← deterministic, no LLM
         │
-        ├──→ Symbol index        ← one pass: classes, imports, fields, methods, config (java_index.py)
-        ├──→ Annotation scan     ← Spring + Java EE: @RabbitListener, @GetMapping, JAX-RS, MDB, CDI, EJB, WS
-        ├──→ Producer scan       ← by declared field type (KafkaTemplate, RabbitTemplate, …)
+        ├──→ Symbol index        ← classes, imports, fields, methods, config
+        ├──→ Framework scan      ← Spring, Jakarta, Camel, Axon, Quarkus, servlets, SOAP, GraphQL, gRPC, …
+        ├──→ Producer scan       ← by declared field type (KafkaTemplate, WebClient, gRPC stubs, …)
         ├──→ Call tree build     ← BFS through method invocations, depth-limited
         └──→ Channel matching    ← literals, constants, ${} placeholders → cross-repo links
         │
         ▼
     graph.json (per project)
         │
-        ├──→ Web UI             ← projects → galaxy → solar system → path → detail
+        ├──→ Web UI             ← topology / flows / planner / boards / dead-code views
         ├──→ REST API           ← /api/projects/{pid}/tools/* endpoints
-        ├──→ MCP Server         ← stdio JSON-RPC for coding agents
+        ├──→ MCP Server         ← stdio + streamable HTTP for coding agents
         └──→ AI Context         ← structured system prompt + tool-use loop
 ```
 
@@ -436,16 +489,34 @@ Every relationship in the graph is tagged with confidence:
 
 ## Configuration
 
-### Environment Variables
+Configuration lives in `.env` (created from `.env.example`; real env vars take precedence):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CONSTELLATION_PORT` | `8765` | Web server port |
-| `CONSTELLATION_GRAPH` | `output/graph.json` | Graph file path (MCP server) |
+| `CONSTELLATION_GRAPH` | `output/graph.json` | Graph file path (standalone MCP server) |
 | `CONSTELLATION_API_TOKEN` | — | Optional bearer token; API is open when unset |
-| `OPENCODE_API_KEY` | — | API key for AI features (alias: `OPENAI_API_KEY`) |
-| `OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | OpenAI-compatible base URL — Zen by default (alias: `OPENAI_BASE_URL`) |
+| `OPENCODE_API_KEY` | — | API key for AI chat (alias: `OPENAI_API_KEY`); empty disables AI gracefully |
+| `OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | Any OpenAI-compatible base URL (alias: `OPENAI_BASE_URL`) |
 | `OPENCODE_MODEL` | `deepseek-v4-flash-free` | Default model (alias: `OPENAI_MODEL`) |
+| `CONSTELLATION_FREE_MODELS_ONLY` | `true` | Only list free models in the chat dropdown |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | — | PAT for Boards sync (repo + project scopes); falls back to `gh auth token` locally |
+| `GITHUB_MCP_TRANSPORT` | `http` | Boards GitHub MCP transport: `http` or `stdio` (Docker) |
+
+---
+
+## Testing
+
+```bash
+# Engine + server regression tests (stdlib runner, no pytest needed)
+python tests/run_tests.py
+
+# Single module
+python tests/run_tests.py test_graph_diff
+
+# End-to-end (Playwright; requires the server running)
+cd tests/e2e && npm install && npm test
+```
 
 ---
 
@@ -454,51 +525,26 @@ Every relationship in the graph is tagged with confidence:
 | Component | Technology | Why |
 |-----------|-----------|-----|
 | AST Parsing | [tree-sitter](https://tree-sitter.github.io/) + tree-sitter-java | Industry standard, pre-built wheels for Windows/Linux |
-| Engine | Python 3.10+ | Cross-platform, tree-sitter bindings |
+| Engine | Python 3.10+ (stdlib-only HTTP for LLM calls) | Cross-platform, minimal deps |
 | API Server | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn | Async, fast, auto-docs |
 | Frontend | React 18 + Vite | `npm run dev` for HMR, `npm run build` for production |
 | Graph Viz | SVG (custom) + CSS animations | Lightweight, no heavy dependencies |
-| AI (optional) | OpenAI-compatible API or Anthropic | Proxied server-side, key never in frontend |
-| MCP | JSON-RPC 2.0 over stdio | Standard protocol for coding agents |
-
----
-
-## Roadmap
-
-### In Progress
-- **Python language support** — FastAPI entry detector + tree-sitter-python
-- **Local-variable type tracking** — chained calls on locals now resolve to `EXTRACTED` (params + local declarations fed into call resolution)
-- **Overload resolution by parameter types** — only arity matching today
-
-### Planned
-- TypeScript/Express, Go, C# language support
-- Apache Camel DSL route detection
-- `@Bean` / Spring Cloud Stream consumer discovery
-- Java EE SOAP (`@WebService`) and Servlets (`@WebServlet`, `HttpServlet` overrides)
-- Dynamic queue name resolution (config + concatenation)
-- Agent tool-use for Anthropic API format
+| AI (optional) | OpenAI-compatible API (Zen by default) | Proxied server-side, key never in frontend |
+| MCP | Official MCP Python SDK (v2), stdio + streamable HTTP | Standard protocol for coding agents |
 
 ---
 
 ## Limitations (Honest)
 
 **What works well:**
-- Java Spring + Java EE / Jakarta annotation detection (RabbitMQ, Kafka, JMS, REST, JAX-RS, Events, CDI, EJB, WebSocket, Scheduled)
+- JVM framework detection — Spring, Jakarta EE, Camel, Axon, Quarkus/MicroProfile, Micronaut, servlets, SOAP, GraphQL, gRPC, cloud functions
 - Producers matched by declared field type (no variable-name false positives)
 - Cross-repo linking via channel names — literals, `Class.CONST`, `${...}` config placeholders
 - Import-aware call resolution with interface→impl linking, plus local-variable and parameter-typed receivers (chained calls resolve to `EXTRACTED`)
-- Call tree extraction to depth 4 with cycle prevention
 - Confidence tagging (`EXTRACTED` vs `INFERRED` vs `AMBIGUOUS`)
 
 **What doesn't work yet:**
+- Non-JVM languages (the language-spec registry exists, but only Java ships today; Python/TypeScript/Go are planned)
 - Overload resolution by parameter *types* (arity only)
-- Apache Camel DSL routes, manual `channel.basicConsume`
-- `@Bean`/Cloud Stream consumer discovery, Java EE SOAP + Servlets
-- Non-Java languages (Python/TypeScript/Go support planned)
+- Manual `channel.basicConsume` style consumers without annotations
 - True data flow / taint analysis (this is call-graph, not data-flow)
-
----
-
-## License
-
-MIT
